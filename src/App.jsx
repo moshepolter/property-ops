@@ -169,10 +169,13 @@ function cleanLines(text) {
 // Every RIS report repeats a header like:
 // "PROP # 333OVI: SG & SONS REALTY LLC - 333 OVINGTON AVENUE BROOKLYN, NEW YORK 11209"
 // Extract a stable property code + the address so uploads can auto-detect/create the building.
+// Stops at the ZIP code so trailing text merged in by PDF extraction (fiscal period, page
+// numbers, etc.) never gets pulled into the address.
 function parseBuildingHeader(text) {
-  const m = text.match(/PROP\s*#\s*([^\s:]+):\s*.+?-\s*(.+)/);
+  const m = text.match(/PROP\s*#\s*([^\s:]+):\s*[\s\S]+?-\s*([\s\S]+?\b\d{5}\b)/);
   if (!m) return { propCode: "", address: "" };
-  return { propCode: m[1].trim(), address: m[2].trim().split("\n")[0].trim() };
+  const norm = s => s.replace(/\s+/g, " ").trim();
+  return { propCode: norm(m[1]), address: norm(m[2]) };
 }
 
 function money(n) {
@@ -960,11 +963,11 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
 
       <div className="filter-row">
         <button className={`chip ${section === "buildings" ? "chip-active" : ""}`} onClick={() => setSection("buildings")}>Buildings</button>
-        <button className={`chip ${section === "import" ? "chip-active" : ""}`} onClick={() => setSection("import")}>Import Directory & Contacts</button>
+        <button className={`chip ${section === "import" ? "chip-active" : ""}`} onClick={() => setSection("import")}>Import Contacts</button>
       </div>
 
       {section === "import" ? (
-        <ImportSection data={data} setData={setData} buildingName={buildingName} allowedTypes={["directory", "contacts"]} />
+        <ImportSection data={data} setData={setData} buildingName={buildingName} allowedTypes={["contacts"]} />
       ) : (
       <>
       {form && (
@@ -1221,8 +1224,7 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
 /* ============================== RIS import ============================== */
 
 const IMPORT_TYPES = [
-  { key: "arrears", label: "Aged Arrears", hint: "Updates balance and status. Paste the full text of the Aged Arrears report." },
-  { key: "directory", label: "Building Directory", hint: "Updates tenant names. Two-column layout — review carefully before confirming." },
+  { key: "arrears", label: "Aged Arrears", hint: "Updates balance, status, and tenant names." },
   { key: "contacts", label: "Telephone / Email List", hint: "Updates phone and email." },
 ];
 
@@ -1234,7 +1236,7 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
   parsedEntries.forEach(entry => {
     const unit = unitsForBuilding.find(u => (u.unitNumber || "").toUpperCase() === entry.apt.toUpperCase());
     let fields = {};
-    if (type === "arrears") fields = { balance: entry.balance, status: entry.status };
+    if (type === "arrears") fields = { balance: entry.balance, status: entry.status, name: entry.name };
     if (type === "directory") fields = { name: entry.name };
     if (type === "contacts") {
       if (entry.phone) fields.phone = entry.phone;
