@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import Papa from "papaparse";
 // PDF upload support for RIS reports. Requires: npm install pdfjs-dist
@@ -12,13 +11,12 @@ import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from
 import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyA5Op33F-BQSfKVbe3zx3jlbfZdsCSWT2c",
-  authDomain: "management-board-cb4cc.firebaseapp.com",
-  projectId: "management-board-cb4cc",
-  storageBucket: "management-board-cb4cc.firebasestorage.app",
-  messagingSenderId: "179973991586",
-  appId: "1:179973991586:web:7a88edf20297671eb0bbfb",
-  measurementId: "G-ZNC3V3JXE2"
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID",
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
@@ -1265,6 +1263,8 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
 function ImportSection({ data, setData, buildingName, allowedTypes }) {
   const availableTypes = IMPORT_TYPES.filter(t => !allowedTypes || allowedTypes.includes(t.key));
   const [buildingId, setBuildingId] = useState(data.buildings[0]?.id || "");
+  const [addingBuilding, setAddingBuilding] = useState(false);
+  const [newBuildingAddress, setNewBuildingAddress] = useState("");
   const [type, setType] = useState(availableTypes[0]?.key || "arrears");
   const [rawText, setRawText] = useState("");
   const [preview, setPreview] = useState(null);
@@ -1272,6 +1272,16 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
   const [pdfStatus, setPdfStatus] = useState(null); // null | "reading" | "error"
   const [pdfError, setPdfError] = useState("");
   const pdfInputRef = useRef(null);
+
+  const saveNewBuilding = () => {
+    const address = newBuildingAddress.trim();
+    if (!address) return;
+    const newId = uid();
+    setData(d => ({ ...d, buildings: [...d.buildings, { id: newId, address, notes: "" }] }));
+    setBuildingId(newId);
+    setNewBuildingAddress("");
+    setAddingBuilding(false);
+  };
 
   const runParse = (text, forType, bId) => {
     if (!text.trim() || !bId) return;
@@ -1347,10 +1357,26 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
     <div>
       <div className="form-panel" style={{ marginTop: 0 }}>
         <Field label="Building">
-          <select value={buildingId} onChange={e => { setBuildingId(e.target.value); setPreview(null); }}>
-            <option value="">—</option>
-            {data.buildings.map(b => <option key={b.id} value={b.id}>{b.address}</option>)}
-          </select>
+          {addingBuilding ? (
+            <div className="inline-form" style={{ margin: 0 }}>
+              <input
+                autoFocus placeholder="Building address" value={newBuildingAddress}
+                onChange={e => setNewBuildingAddress(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && saveNewBuilding()}
+              />
+              <button className="btn-primary" type="button" onClick={saveNewBuilding}>Save</button>
+              <button className="btn-ghost" type="button" onClick={() => { setAddingBuilding(false); setNewBuildingAddress(""); }}>Cancel</button>
+            </div>
+          ) : (
+            <select value={buildingId} onChange={e => {
+              if (e.target.value === ADD_NEW) { setAddingBuilding(true); return; }
+              setBuildingId(e.target.value); setPreview(null);
+            }}>
+              <option value="">—</option>
+              {data.buildings.map(b => <option key={b.id} value={b.id}>{b.address}</option>)}
+              <option value={ADD_NEW}>+ Add new building…</option>
+            </select>
+          )}
         </Field>
         {availableTypes.length > 1 && (
           <Field label="Report type">
@@ -1368,6 +1394,7 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
             <input ref={pdfInputRef} type="file" accept="application/pdf" hidden onChange={handlePdfUpload} />
           </div>
           {pdfStatus === "error" && <div className="hint" style={{ color: "var(--danger)" }}>{pdfError}</div>}
+          {!buildingId && <div className="hint" style={{ color: "var(--warn)" }}>Pick or add a building above first — the button stays disabled until one's selected.</div>}
         </div>
         <div className="field" style={{ gridColumn: "1 / -1" }}>
           <span className="field-label">Or paste the report text (open the PDF, select all, copy, paste here)</span>
