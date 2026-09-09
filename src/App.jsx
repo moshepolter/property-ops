@@ -880,12 +880,57 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const rentPanelCount = overdueTenants.length + allFollowUps;
   const totalAttention = rentPanelCount + violationItems.length + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + hpdDue10.length + dobDue10.length + fdnyDue10.length;
 
+  // Anything due TODAY is urgent enough that it shouldn't need a click to see —
+  // pull every type of due-date item (follow-up, violation, court date, payment,
+  // appointment) into one always-visible list at the very top of the dashboard.
+  const isToday = (d) => d === todayISO();
+  const dueToday = [
+    ...followUpEntries.filter(e => isToday(e.followUp.date)).map(e => ({
+      key: `f-${e.followUp.id}`, type: "Follow-up", label: e.tenant.name,
+      sub: buildingName(e.tenant.buildingId), note: e.followUp.note, tab: "rent",
+    })),
+    ...data.violations.filter(v => !isViolationClosed(v) && isToday(v.cureDeadline)).map(v => ({
+      key: `v-${v.id}`, type: `${v.agency} cure deadline`, label: `#${v.violationNumber}`,
+      sub: buildingName(v.buildingId), tab: "violations",
+    })),
+    ...data.courtCases.filter(c => !c.archived && isToday(c.nextCourtDate)).map(c => ({
+      key: `c-${c.id}`, type: "Court date", label: tenantName(c.tenantId),
+      sub: buildingName(c.buildingId), tab: "court",
+    })),
+    ...data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && isToday(c.nextPaymentDue)).map(c => ({
+      key: `p-${c.id}`, type: "Payment due", label: tenantName(c.tenantId),
+      sub: buildingName(c.buildingId), tab: "court",
+    })),
+    ...data.appointments.filter(a => !a.completed && isToday(a.date)).map(a => ({
+      key: `a-${a.id}`, type: a.recurring ? "Recurring appointment" : "Appointment", label: a.type,
+      sub: buildingName(a.buildingId), tab: "inspections",
+    })),
+  ];
+
   return (
     <div>
       <div className="page-head">
         <h1 className="page-title">Dashboard</h1>
         <PrintButton label="Dashboard" />
       </div>
+
+      {dueToday.length > 0 && (
+        <div className="due-today">
+          <div className="due-today-head">
+            <AlertTriangle size={18} />
+            <span>Due today ({dueToday.length})</span>
+          </div>
+          {dueToday.map(item => (
+            <button className="due-today-item" key={item.key} onClick={() => setTab(item.tab)}>
+              <span className="pill pill-danger">{item.type}</span>
+              <div className="followup-item-main">
+                <div className="followup-item-name">{item.label} <span className="row-muted">— {item.sub}</span></div>
+                {item.note && <div className="followup-item-note">{item.note}</div>}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
 
       {totalAttention === 0 ? (
         <div className="all-clear"><CheckCircle2 size={18} /> Nothing needs attention right now.</div>
@@ -3026,6 +3071,21 @@ function Styles() {
       .sheet-follow-btn:hover { background: #F0EEE7; color: var(--navy); }
       .sheet-follow-date { font-size: 10px; }
       .followup-scroll { max-height: 520px; overflow-y: auto; padding-right: 4px; }
+      .due-today {
+        background: var(--danger-bg); border: 2px solid var(--danger); border-radius: 8px;
+        margin-bottom: 20px; padding: 14px 16px;
+      }
+      .due-today-head {
+        display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--danger);
+        font-size: 15px; margin-bottom: 10px;
+      }
+      .due-today-item {
+        display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+        background: #fff; border: 1px solid var(--danger); border-radius: 6px;
+        padding: 8px 10px; margin-bottom: 6px; cursor: pointer; font: inherit;
+      }
+      .due-today-item:last-child { margin-bottom: 0; }
+      .due-today-item:hover { background: var(--danger-bg); }
       .followup-panel { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--warn); border-radius: 8px; margin-bottom: 24px; overflow: hidden; }
       .followup-panel-head {
         display: flex; align-items: center; gap: 12px; width: 100%; background: none; border: none;
