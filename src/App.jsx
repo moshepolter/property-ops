@@ -2664,6 +2664,9 @@ function Styles() {
       .topbar {
         display: flex; align-items: center; justify-content: space-between;
         gap: 16px; padding: 14px 20px; background: var(--navy); color: #fff;
+        padding-top: max(14px, env(safe-area-inset-top));
+        padding-left: max(20px, env(safe-area-inset-left));
+        padding-right: max(20px, env(safe-area-inset-right));
       }
       .topbar-left { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
       .topbar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
@@ -2695,7 +2698,10 @@ function Styles() {
         border-right: 1px solid var(--border); padding: 12px 8px;
         position: fixed; top: 0; bottom: 0; left: 0; z-index: 21;
         transform: translateX(-100%); transition: transform 0.18s ease;
-        box-shadow: 2px 0 12px rgba(0,0,0,0.15); padding-top: 20px; overflow-y: auto;
+        box-shadow: 2px 0 12px rgba(0,0,0,0.15); overflow-y: auto;
+        padding-top: max(20px, env(safe-area-inset-top));
+        padding-bottom: max(12px, env(safe-area-inset-bottom));
+        padding-left: max(8px, env(safe-area-inset-left));
       }
       .sidenav-open { transform: translateX(0); }
       .content { width: 100%; }
@@ -2706,7 +2712,7 @@ function Styles() {
       }
       .nav-item:hover { background: #F0EEE7; }
       .nav-item-active { background: var(--navy); color: #fff; }
-      .content { flex: 1; padding: 24px 28px; min-width: 0; }
+      .content { flex: 1; padding: 24px 28px; padding-bottom: max(24px, env(safe-area-inset-bottom)); min-width: 0; }
       .page-title { font-family: Georgia, "Times New Roman", serif; font-size: 24px; margin: 0 0 14px; }
       .section-heading { font-family: Georgia, "Times New Roman", serif; font-size: 18px; margin: 28px 0 10px; }
       .page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; flex-wrap: wrap; gap: 8px; }
@@ -2908,6 +2914,19 @@ function Styles() {
         .topbar { flex-wrap: wrap; }
         .search-wrap { order: 3; max-width: 100%; width: 100%; margin: 0; flex: 1 1 100%; }
         .brand-sub { display: none; }
+        .content { padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+        /* iOS Safari auto-zooms the whole page when you tap an input with a font
+           smaller than 16px — jarring on every single field in an app this
+           form-heavy. Force 16px on mobile only, so desktop stays compact. */
+        input, select, textarea { font-size: 16px !important; }
+        /* Icon-only buttons (edit/delete/etc, used on nearly every row) were
+           only ~22px of actual tap area — below the ~44px minimum comfortable
+           touch target, easy to mis-tap Delete instead of Edit on a real phone. */
+        .icon-btn { min-width: 40px; min-height: 40px; justify-content: center; }
+        .btn-primary, .btn-ghost { min-height: 40px; }
+        .page-actions, .form-actions { gap: 8px; }
+        .stat-value { font-size: 24px; }
+        .sheet-input, select.sheet-input { padding: 10px 8px; }
       }
       .save-error-banner {
         display: flex; align-items: center; gap: 8px; background: var(--danger-bg); color: var(--danger);
@@ -2916,10 +2935,11 @@ function Styles() {
       .login-shell {
         min-height: 100vh; display: flex; align-items: center; justify-content: center;
         background: var(--bg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+        padding: 20px; box-sizing: border-box;
       }
       .login-card {
         background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-        padding: 32px; width: 320px; display: flex; flex-direction: column;
+        padding: 32px; width: 100%; max-width: 320px; display: flex; flex-direction: column; box-sizing: border-box;
       }
       @media print {
         .no-print, .icon-btn, .btn-ghost, .btn-primary, .page-actions,
