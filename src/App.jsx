@@ -17,7 +17,7 @@ const firebaseConfig = {
   storageBucket: "management-board-cb4cc.firebasestorage.app",
   messagingSenderId: "179973991586",
   appId: "1:179973991586:web:7a88edf20297671eb0bbfb",
-  measurementId: "G-ZNC3V3JXE2"
+  measurementId: "G-ZNC3V3JXE2",
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
@@ -164,6 +164,15 @@ const SKIP_LINE_RE = /^\d{2}\/\d{2}\/\d{4}|FISCAL PERIOD|^Page:|PROP #|TELEPHONE
 
 function cleanLines(text) {
   return text.split("\n").map(l => l.trim()).filter(l => l && !SKIP_LINE_RE.test(l));
+}
+
+// Every RIS report repeats a header like:
+// "PROP # 333OVI: SG & SONS REALTY LLC - 333 OVINGTON AVENUE BROOKLYN, NEW YORK 11209"
+// Extract a stable property code + the address so uploads can auto-detect/create the building.
+function parseBuildingHeader(text) {
+  const m = text.match(/PROP\s*#\s*([^\s:]+):\s*.+?-\s*(.+)/);
+  if (!m) return { propCode: "", address: "" };
+  return { propCode: m[1].trim(), address: m[2].trim().split("\n")[0].trim() };
 }
 
 function money(n) {
@@ -1261,43 +1270,34 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
   return { changes, missing };
 }
 
-function ImportSection({ data, setData, buildingName, allowedTypes }) {
-  const availableTypes = IMPORT_TYPES.filter(t => !allowedTypes || allowedTypes.includes(t.key));
-  const [buildingId, setBuildingId] = useState(data.buildings[0]?.id || "");
-  const [addingBuilding, setAddingBuilding] = useState(false);
-  const [newBuildingAddress, setNewBuildingAddress] = useState("");
-  const [type, setType] = useState(availableTypes[0]?.key || "arrears");
+function ImportBlock({ type, data, setData, buildingName }) {
+  const typeInfo = IMPORT_TYPES.find(t => t.key === type);
   const [rawText, setRawText] = useState("");
+  const [showPaste, setShowPaste] = useState(false);
   const [preview, setPreview] = useState(null);
-  const [expandedEntry, setExpandedEntry] = useState(null);
   const [pdfStatus, setPdfStatus] = useState(null); // null | "reading" | "error"
   const [pdfError, setPdfError] = useState("");
   const pdfInputRef = useRef(null);
 
-  const saveNewBuilding = () => {
-    const address = newBuildingAddress.trim();
-    if (!address) return;
-    const newId = uid();
-    setData(d => ({ ...d, buildings: [...d.buildings, { id: newId, address, notes: "" }] }));
-    setBuildingId(newId);
-    setNewBuildingAddress("");
-    setAddingBuilding(false);
-  };
-
-  const runParse = (text, forType, bId) => {
-    if (!text.trim() || !bId) return;
-    const parser = forType === "arrears" ? parseArrearsText : forType === "directory" ? parseDirectoryText : parseContactsText;
+  const runParse = (text) => {
+    if (!text.trim()) return;
+    const parser = type === "arrears" ? parseArrearsText : type === "directory" ? parseDirectoryText : parseContactsText;
     const entries = parser(text);
-    const diff = buildImportDiff(forType, entries, data, bId);
-    setPreview({ ...diff, parsedCount: entries.length });
+    const header = parseBuildingHeader(text);
+    const existing = data.buildings.find(b =>
+      (header.propCode && b.risPropCode === header.propCode) ||
+      (header.address && (b.address || "").trim().toLowerCase() === header.address.trim().toLowerCase())
+    );
+    // If no matching building exists yet, diff against a placeholder id so every
+    // row in the report shows as "new" — the real building gets created on confirm.
+    const diff = buildImportDiff(type, entries, data, existing ? existing.id : "__pending__");
+    setPreview({ ...diff, parsedCount: entries.length, header, matchedBuildingId: existing ? existing.id : null });
   };
-
-  const parse = () => runParse(rawText, type, buildingId);
 
   const handlePdfUpload = async (e) => {
     const file = e.target.files[0];
     e.target.value = "";
-    if (!file || !buildingId) return;
+    if (!file) return;
     setPdfStatus("reading");
     setPdfError("");
     setPreview(null);
@@ -1305,17 +1305,29 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
       const text = await extractPdfText(file);
       setRawText(text);
       setPdfStatus(null);
-      runParse(text, type, buildingId);
+      runParse(text);
     } catch (err) {
       setPdfStatus("error");
-      setPdfError("Couldn't read that PDF automatically — paste the text below instead (open the PDF, Ctrl/Cmd+A, Ctrl/Cmd+C, then paste).");
+      setPdfError("Couldn't read that PDF automatically — use \"paste the text instead\" below (open the PDF, Ctrl/Cmd+A, Ctrl/Cmd+C, then paste).");
+      setShowPaste(true);
     }
   };
 
   const confirm = () => {
     if (!preview) return;
     setData(d => {
-      const next = { ...d, units: [...d.units], tenants: [...d.tenants], importHistory: [...d.importHistory] };
+      const next = { ...d, buildings: [...d.buildings], units: [...d.units], tenants: [...d.tenants], importHistory: [...d.importHistory] };
+      let buildingId = preview.matchedBuildingId;
+      if (!buildingId) {
+        const newBuilding = {
+          id: uid(),
+          address: preview.header.address || "Unknown address (from import)",
+          risPropCode: preview.header.propCode || "",
+          notes: "",
+        };
+        next.buildings.push(newBuilding);
+        buildingId = newBuilding.id;
+      }
       preview.changes.forEach(ch => {
         let unitId = ch.unitId;
         if (ch.newUnit) {
@@ -1349,66 +1361,40 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
     });
     setPreview(null);
     setRawText("");
+    setShowPaste(false);
   };
 
-  const typeInfo = IMPORT_TYPES.find(t => t.key === type);
-  const history = (data.importHistory || []).filter(h => !allowedTypes || allowedTypes.includes(h.type));
-
   return (
-    <div>
-      <div className="form-panel" style={{ marginTop: 0 }}>
-        <Field label="Building">
-          {addingBuilding ? (
-            <div className="inline-form" style={{ margin: 0 }}>
-              <input
-                autoFocus placeholder="Building address" value={newBuildingAddress}
-                onChange={e => setNewBuildingAddress(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && saveNewBuilding()}
-              />
-              <button className="btn-primary" type="button" onClick={saveNewBuilding}>Save</button>
-              <button className="btn-ghost" type="button" onClick={() => { setAddingBuilding(false); setNewBuildingAddress(""); }}>Cancel</button>
-            </div>
-          ) : (
-            <select value={buildingId} onChange={e => {
-              if (e.target.value === ADD_NEW) { setAddingBuilding(true); return; }
-              setBuildingId(e.target.value); setPreview(null);
-            }}>
-              <option value="">—</option>
-              {data.buildings.map(b => <option key={b.id} value={b.id}>{b.address}</option>)}
-              <option value={ADD_NEW}>+ Add new building…</option>
-            </select>
-          )}
-        </Field>
-        {availableTypes.length > 1 && (
-          <Field label="Report type">
-            <select value={type} onChange={e => { setType(e.target.value); setPreview(null); }}>
-              {availableTypes.map(t => <option key={t.key} value={t.key}>{t.label}</option>)}
-            </select>
-          </Field>
-        )}
-        <div className="field" style={{ gridColumn: "1 / -1" }}>
-          <span className="field-label">Upload the PDF — it parses automatically</span>
-          <div className="inline-form" style={{ margin: 0 }}>
-            <button className="btn-primary" type="button" onClick={() => pdfInputRef.current.click()} disabled={!buildingId || pdfStatus === "reading"}>
-              <Upload size={14} /> {pdfStatus === "reading" ? "Reading PDF…" : "Upload PDF"}
-            </button>
-            <input ref={pdfInputRef} type="file" accept="application/pdf" hidden onChange={handlePdfUpload} />
-          </div>
-          {pdfStatus === "error" && <div className="hint" style={{ color: "var(--danger)" }}>{pdfError}</div>}
-          {!buildingId && <div className="hint" style={{ color: "var(--warn)" }}>Pick or add a building above first — the button stays disabled until one's selected.</div>}
-        </div>
-        <div className="field" style={{ gridColumn: "1 / -1" }}>
-          <span className="field-label">Or paste the report text (open the PDF, select all, copy, paste here)</span>
-          <textarea rows={8} value={rawText} onChange={e => { setRawText(e.target.value); setPreview(null); }} placeholder="Paste RIS report text here…" />
-        </div>
-        <div className="form-actions">
-          <button className="btn-primary" onClick={parse} disabled={!rawText.trim() || !buildingId}>Parse & preview</button>
-        </div>
+    <div className="import-block">
+      <div className="import-block-head">
+        <div className="import-block-title">{typeInfo.label}</div>
+        <button className="btn-primary" type="button" onClick={() => pdfInputRef.current.click()} disabled={pdfStatus === "reading"}>
+          <Upload size={14} /> {pdfStatus === "reading" ? "Reading PDF…" : `Upload ${typeInfo.label} PDF`}
+        </button>
+        <input ref={pdfInputRef} type="file" accept="application/pdf" hidden onChange={handlePdfUpload} />
       </div>
-      <p className="hint">{typeInfo.hint}</p>
+      <p className="hint">{typeInfo.hint} The building is detected automatically from the report and created if it doesn't exist yet.</p>
+      {pdfStatus === "error" && <div className="hint" style={{ color: "var(--danger)" }}>{pdfError}</div>}
+
+      <button className="btn-ghost" type="button" onClick={() => setShowPaste(s => !s)}>
+        {showPaste ? "Hide paste option" : "Or paste the text instead"}
+      </button>
+      {showPaste && (
+        <div style={{ marginTop: 8 }}>
+          <textarea rows={6} value={rawText} onChange={e => { setRawText(e.target.value); setPreview(null); }} placeholder="Open the PDF, select all, copy, paste here…" />
+          <div className="form-actions" style={{ marginTop: 8 }}>
+            <button className="btn-primary" onClick={() => runParse(rawText)} disabled={!rawText.trim()}>Parse & preview</button>
+          </div>
+        </div>
+      )}
 
       {preview && (
         <div className="import-preview">
+          {preview.header.address && (
+            <div className="hint" style={{ marginBottom: 8 }}>
+              Detected: <strong>{preview.header.address}</strong> — {preview.matchedBuildingId ? "matched to an existing building" : "will create this as a new building"}
+            </div>
+          )}
           <div className="import-preview-summary">
             {preview.changes.filter(c => c.isNew).length} new · {preview.changes.filter(c => !c.isNew).length} to update
             {type === "arrears" && ` · ${preview.missing.length} not in this file`}
@@ -1448,6 +1434,20 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ImportSection({ data, setData, buildingName, allowedTypes }) {
+  const availableTypes = IMPORT_TYPES.filter(t => !allowedTypes || allowedTypes.includes(t.key));
+  const [expandedEntry, setExpandedEntry] = useState(null);
+  const history = (data.importHistory || []).filter(h => !allowedTypes || allowedTypes.includes(h.type));
+
+  return (
+    <div>
+      {availableTypes.map(t => (
+        <ImportBlock key={t.key} type={t.key} data={data} setData={setData} buildingName={buildingName} />
+      ))}
 
       <h2 className="section-heading">Last Imported</h2>
       {history.length === 0 && <EmptyState text="No imports yet." />}
@@ -2410,6 +2410,9 @@ function Styles() {
       .doc-chip-name:hover { text-decoration: underline; }
       .doc-remove { background: none; border: none; color: var(--ink-soft); cursor: pointer; border-radius: 50%; display: flex; padding: 2px; }
       .doc-remove:hover { color: var(--danger); }
+      .import-block { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 18px; }
+      .import-block-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+      .import-block-title { font-family: Georgia, serif; font-size: 16px; font-weight: 600; margin-right: auto; }
       .import-preview { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 16px; }
       .import-preview-summary { font-weight: 600; font-size: 13px; margin-bottom: 8px; }
       .import-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
