@@ -23,7 +23,7 @@ const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
 import {
-  Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat,
+  Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat, Home,
   CalendarClock, ScrollText, MessageSquare, Archive as ArchiveIcon,
   Plus, X, Camera, Download, LayoutDashboard, ChevronDown, ChevronRight,
   Trash2, Pencil, Upload, Menu, Printer, CheckCircle2
@@ -34,6 +34,20 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 const uid = () => Math.random().toString(36).slice(2, 10);
 const todayISO = () => new Date().toISOString().slice(0, 10);
+
+// "B4" must sort before "B39", not after it — plain string sort gets this wrong
+// because it compares character by character. Split into a letter prefix and a
+// numeric suffix and compare those separately.
+function unitSortKey(u) {
+  const m = String(u || "").match(/^([A-Za-z]*)(\d*)/);
+  return [m[1] || "", parseInt(m[2] || "0", 10) || 0];
+}
+function compareUnits(a, b) {
+  const [al, an] = unitSortKey(a);
+  const [bl, bn] = unitSortKey(b);
+  if (al !== bl) return al.localeCompare(bl);
+  return an - bn;
+}
 
 function filesToDataUrls(fileList) {
   const files = Array.from(fileList);
@@ -804,9 +818,10 @@ function Dashboard({ data, buildingName, tenantName, setTab }) {
     .sort((a, b) => a.followUpDate.localeCompare(b.followUpDate));
   const openViolations = data.violations.filter(v => !isViolationClosed(v)).length;
   const overdueShown = showAllOverdue ? overdueTenants : overdueTenants.slice(0, 5);
+  const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id));
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
-  const totalAttention = rentPanelCount + violationItems.length + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length;
+  const totalAttention = rentPanelCount + violationItems.length + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length;
 
   return (
     <div>
@@ -955,6 +970,17 @@ function Dashboard({ data, buildingName, tenantName, setTab }) {
               </div>
             )}
           />
+
+          <AttentionPanel
+            icon={<Home size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
+            label="Units with no tenant on file (vacant or a data gap)" items={vacantUnits} tab="buildings" setTab={setTab}
+            itemKey={u => u.id}
+            renderItem={u => (
+              <div className="followup-item-main">
+                <div className="followup-item-name">Unit {u.unitNumber || "—"} <span className="row-muted">— {buildingName(u.buildingId)}</span></div>
+              </div>
+            )}
+          />
         </>
       )}
 
@@ -1000,7 +1026,28 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
   const [expanded, setExpanded] = useState(null);
   const [expandedUnit, setExpandedUnit] = useState(null);
   const [section, setSection] = useState("buildings");
+  const [pendingDelete, setPendingDelete] = useState(null);
   const fileRef = useRef(null);
+
+  const deleteBuilding = (buildingId) => {
+    setData(d => ({
+      ...d,
+      buildings: d.buildings.filter(b => b.id !== buildingId),
+      units: d.units.filter(u => u.buildingId !== buildingId),
+      tenants: d.tenants.filter(t => t.buildingId !== buildingId),
+    }));
+    setPendingDelete(null);
+  };
+  const [pendingDeleteUnit, setPendingDeleteUnit] = useState(null);
+  const deleteUnit = (unitId) => {
+    setData(d => ({
+      ...d,
+      units: d.units.filter(u => u.id !== unitId),
+      tenants: d.tenants.filter(t => t.unitId !== unitId),
+    }));
+    setPendingDeleteUnit(null);
+    setExpandedUnit(null);
+  };
 
   const submit = () => {
     if (!form.address) return;
@@ -1097,13 +1144,23 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
               <div className="list-card-title">{b.address}</div>
               <span className="pill pill-muted">{units.length} units</span>
               <div className="spacer" />
-              <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(b); }}><Pencil size={14} /></IconBtn>
-              <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("buildings", b.id); }}><Trash2 size={14} /></IconBtn>
+              {pendingDelete === b.id ? (
+                <>
+                  <span className="row-muted" style={{ fontSize: 12 }}>Delete building + {units.length} units + {data.tenants.filter(t => t.buildingId === b.id).length} tenants?</span>
+                  <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); deleteBuilding(b.id); }} style={{ color: "var(--danger)" }}>Yes, delete</button>
+                  <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); setPendingDelete(null); }}>Cancel</button>
+                </>
+              ) : (
+                <>
+                  <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(b); }}><Pencil size={14} /></IconBtn>
+                  <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); setPendingDelete(b.id); }}><Trash2 size={14} /></IconBtn>
+                </>
+              )}
             </div>
             {expanded === b.id && (
               <div className="list-card-body">
                 {units.length === 0 && <div className="hint">No units added yet.</div>}
-                {units.slice().sort((a, b2) => (a.unitNumber || "").localeCompare(b2.unitNumber || "")).map(u => {
+                {units.slice().sort((a, b2) => compareUnits(a.unitNumber, b2.unitNumber)).map(u => {
                   const tenants = data.tenants.filter(t => t.unitId === u.id);
                   const isOpen = expandedUnit === u.id;
                   return (
@@ -1115,9 +1172,33 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                         {tenants[0]?.status && tenants[0].status !== "Current" && (
                           <span className={`pill ${tenants[0].status === "Late" ? "pill-warn" : "pill-danger"}`}>{tenants[0].status}</span>
                         )}
+                        {units.filter(u2 => u2.id !== u.id && u.unitNumber && (u2.unitNumber || "").toUpperCase() === u.unitNumber.toUpperCase()).length > 0 && (
+                          <span className="pill pill-danger">⚠ Duplicate #</span>
+                        )}
                       </button>
                       {isOpen && (
                         <div className="unit-detail">
+                          <div className="unit-detail-row" style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                            <span className="row-muted" style={{ fontSize: 12 }}>Unit number:</span>
+                            <input
+                              className="sheet-input" style={{ width: 90, border: "1px solid var(--border)", borderRadius: 4 }}
+                              value={u.unitNumber} onChange={e => update("units", u.id, { unitNumber: e.target.value })}
+                            />
+                            {pendingDeleteUnit === u.id ? (
+                              <>
+                                <span className="row-muted" style={{ fontSize: 12 }}>Delete unit{tenants.length > 0 ? ` + ${tenants.length} tenant(s)` : ""}?</span>
+                                <button className="btn-ghost" onClick={() => deleteUnit(u.id)} style={{ color: "var(--danger)" }}>Yes, delete</button>
+                                <button className="btn-ghost" onClick={() => setPendingDeleteUnit(null)}>Cancel</button>
+                              </>
+                            ) : (
+                              <IconBtn title="Delete unit" danger onClick={() => setPendingDeleteUnit(u.id)}><Trash2 size={14} /></IconBtn>
+                            )}
+                          </div>
+                          {units.filter(u2 => u2.id !== u.id && u.unitNumber && (u2.unitNumber || "").toUpperCase() === u.unitNumber.toUpperCase()).length > 0 && (
+                            <div className="unit-detail-row" style={{ color: "var(--danger)", fontSize: 12, marginBottom: 6 }}>
+                              ⚠ Another unit in this building already has number "{u.unitNumber}" — check for a duplicate.
+                            </div>
+                          )}
                           {tenants.length === 0 && <div className="hint">No tenant on file for this unit yet.</div>}
                           {tenants.map(t => (
                             <div key={t.id} className="unit-detail-tenant">
@@ -1166,11 +1247,36 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
 
   const inCourt = (tenantId) => (data.courtCases || []).some(c => c.tenantId === tenantId && !c.archived);
 
-  const addRow = () => add("tenants", {
-    buildingId: data.buildings[0]?.id || "", unitId: "", name: "", phone: "",
-    email: "", balance: "", status: "Current", notes: [], messageLog: [],
-  });
+  const [newTenant, setNewTenant] = useState(null);
 
+  const openNewTenant = () => setNewTenant({
+    buildingId: data.buildings[0]?.id || "", unitId: "", name: "", phone: "", balance: "", status: "Current",
+  });
+  const saveNewTenant = () => {
+    if (!newTenant.buildingId || !newTenant.unitId) return;
+    add("tenants", { ...newTenant, email: "", notes: [], messageLog: [] });
+    setNewTenant(null);
+  };
+
+  const exportCSV = () => {
+    const rows = visibleTenants.map(t => ({
+      Building: buildingName(t.buildingId),
+      Unit: unitOf(t),
+      Tenant: t.name,
+      Phone: t.phone,
+      Balance: t.balance,
+      Status: t.status,
+      "Latest Note": notesArr(t).length ? notesArr(t)[notesArr(t).length - 1].text : "",
+      "Follow-up": t.followUpDate || "",
+    }));
+    const csv = Papa.unparse(rows);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "rent-collection.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const sendMsg = (tenantId) => {
     if (!msgText.trim()) return;
@@ -1199,9 +1305,12 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
   };
 
   const byBuilding = t => buildingFilter === "All" || t.buildingId === buildingFilter;
+  const unitOf = t => data.units.find(u => u.id === t.unitId)?.unitNumber || "";
   const visibleTenants = (statusFilter === "Follow-ups"
     ? data.tenants.filter(t => t.followUpDate).slice().sort((a, b) => a.followUpDate.localeCompare(b.followUpDate))
     : data.tenants.filter(t => statusFilter === "All" || t.status === statusFilter)
+        .slice()
+        .sort((a, b) => buildingName(a.buildingId).localeCompare(buildingName(b.buildingId)) || compareUnits(unitOf(a), unitOf(b)))
   ).filter(byBuilding);
 
   return (
@@ -1210,7 +1319,8 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
         <h1 className="page-title">Rent Collection</h1>
         <div className="page-actions">
           <PrintButton label="Rent Collection" />
-          <button className="btn-primary" onClick={addRow}><Plus size={14} /> Add row</button>
+          <button className="btn-ghost" onClick={exportCSV}><Download size={14} /> Export CSV</button>
+          <button className="btn-primary" onClick={openNewTenant}><Plus size={14} /> Add tenant</button>
         </div>
       </div>
 
@@ -1223,6 +1333,35 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
         <ImportSection data={data} setData={setData} buildingName={buildingName} allowedTypes={["arrears"]} />
       ) : (
       <>
+      {newTenant && (
+        <div className="form-panel">
+          <Field label="Building">
+            <select value={newTenant.buildingId} onChange={e => setNewTenant({ ...newTenant, buildingId: e.target.value, unitId: "" })}>
+              <option value="">—</option>
+              {data.buildings.map(b => <option key={b.id} value={b.id}>{b.address}</option>)}
+            </select>
+          </Field>
+          <Field label="Unit">
+            <select value={newTenant.unitId} onChange={e => setNewTenant({ ...newTenant, unitId: e.target.value })}>
+              <option value="">—</option>
+              {data.units.filter(u => u.buildingId === newTenant.buildingId).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber)).map(u => <option key={u.id} value={u.id}>{u.unitNumber}</option>)}
+            </select>
+          </Field>
+          <Field label="Tenant name"><input value={newTenant.name} onChange={e => setNewTenant({ ...newTenant, name: e.target.value })} /></Field>
+          <Field label="Phone"><input value={newTenant.phone} onChange={e => setNewTenant({ ...newTenant, phone: e.target.value })} /></Field>
+          <Field label="Balance"><input value={newTenant.balance} onChange={e => setNewTenant({ ...newTenant, balance: e.target.value })} /></Field>
+          <Field label="Status">
+            <select value={newTenant.status} onChange={e => setNewTenant({ ...newTenant, status: e.target.value })}>
+              {RENT_STATUSES.map(s => <option key={s}>{s}</option>)}
+            </select>
+          </Field>
+          <p className="hint" style={{ gridColumn: "1 / -1" }}>Building and unit can only be set here or changed later from the Buildings tab — not editable in the sheet, so tenants never accidentally end up on the wrong building.</p>
+          <div className="form-actions">
+            <button className="btn-primary" onClick={saveNewTenant} disabled={!newTenant.buildingId || !newTenant.unitId}>Save</button>
+            <button className="btn-ghost" onClick={() => setNewTenant(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
       <div className="filter-row">
         {["All", ...RENT_STATUSES].map(s => (
           <button key={s} className={`chip ${statusFilter === s ? "chip-active" : ""}`} onClick={() => setStatusFilter(s)}>{s}</button>
@@ -1237,7 +1376,7 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
       </div>
 
       {data.tenants.length === 0 ? (
-        <EmptyState text="No tenants yet — import RIS data or add a row." />
+        <EmptyState text="No tenants yet — import RIS data or add a tenant." />
       ) : (
         <div className="sheet-wrap">
           <table className="sheet">
@@ -1255,18 +1394,8 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
               {visibleTenants.map(t => (
                 <React.Fragment key={t.id}>
                   <tr className={t.status !== "Current" ? "sheet-row-flag" : ""}>
-                    <td>
-                      <select className="sheet-input" value={t.buildingId} onChange={e => update("tenants", t.id, { buildingId: e.target.value, unitId: "" })}>
-                        <option value="">—</option>
-                        {data.buildings.map(b => <option key={b.id} value={b.id}>{b.address}</option>)}
-                      </select>
-                    </td>
-                    <td>
-                      <select className="sheet-input" value={t.unitId} onChange={e => update("tenants", t.id, { unitId: e.target.value })}>
-                        <option value="">—</option>
-                        {data.units.filter(u => u.buildingId === t.buildingId).map(u => <option key={u.id} value={u.id}>{u.unitNumber}</option>)}
-                      </select>
-                    </td>
+                    <td className="sheet-readonly">{buildingName(t.buildingId)}</td>
+                    <td className="sheet-readonly">{unitOf(t) || "—"}</td>
                     <td>
                       <div className="sheet-name-cell">
                         <input className="sheet-input" value={t.name} onChange={e => update("tenants", t.id, { name: e.target.value })} />
@@ -1301,7 +1430,10 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
                     <td className="sheet-actions">
                       <IconBtn title="Notes" onClick={() => setNoteFor(noteFor === t.id ? null : t.id)}><Pencil size={14} /></IconBtn>
                       <IconBtn title="Message log" onClick={() => setMsgFor(msgFor === t.id ? null : t.id)}><MessageSquare size={14} /></IconBtn>
-                      <IconBtn title="Delete" danger onClick={() => remove("tenants", t.id)}><Trash2 size={14} /></IconBtn>
+                      <IconBtn title="Delete" danger onClick={() => {
+                        if (inCourt(t.id) && !window.confirm(`${t.name || "This tenant"} has an open court case. Delete anyway? The case will stay but lose its link to this tenant.`)) return;
+                        remove("tenants", t.id);
+                      }}><Trash2 size={14} /></IconBtn>
                     </td>
                   </tr>
                   {followFor === t.id && (
@@ -1909,6 +2041,11 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
               {agency === "Other" && v.company && <span className="pill pill-muted">{v.company}</span>}
               {agency !== "DSNY" && view === "active" && <Flag date={v.cureDeadline} />}
               <div className="spacer" />
+              {agency === "HPD" && view === "active" && (
+                <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); update("violations", v.id, { status: "Certified" }); }}>
+                  Mark Certified
+                </button>
+              )}
               <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(v); }}><Pencil size={14} /></IconBtn>
               <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("violations", v.id); }}><Trash2 size={14} /></IconBtn>
             </div>
@@ -2050,7 +2187,7 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
         <h1 className="page-title">Court Cases</h1>
         <div className="page-actions">
           <PrintButton label="Court Cases" />
-          <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: data.buildings[0]?.id || "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: CASE_STAGES[0], stipulationTerms: "", nextPaymentDue: "" })}>
+          <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: CASE_STAGES[0], stipulationTerms: "", nextPaymentDue: "" })}>
             <Plus size={14} /> Add case
           </button>
         </div>
@@ -2063,16 +2200,18 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
       {form && (
         <div className="form-panel">
           <Field label="Tenant">
-            <select value={form.tenantId} onChange={e => setForm({ ...form, tenantId: e.target.value })}>
+            <select value={form.tenantId} onChange={e => {
+              const t = data.tenants.find(x => x.id === e.target.value);
+              setForm({ ...form, tenantId: e.target.value, buildingId: t ? t.buildingId : form.buildingId });
+            }}>
               <option value="">—</option>
               {data.tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
           </Field>
           <Field label="Building">
-            <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value })}>
-              <option value="">—</option>
-              {data.buildings.map(b => <option key={b.id} value={b.id}>{b.address}</option>)}
-            </select>
+            <div className="sheet-readonly" style={{ padding: "7px 9px", border: "1px solid var(--border)", borderRadius: 5, background: "#fff" }}>
+              {form.buildingId ? buildingName(form.buildingId) : "Pick a tenant first"}
+            </div>
           </Field>
           <Field label="Docket #"><input value={form.caseNumber} onChange={e => setForm({ ...form, caseNumber: e.target.value })} /></Field>
           <Field label="Where the case stands">
@@ -2639,6 +2778,7 @@ function Styles() {
         font-family: inherit; color: var(--ink); border-radius: 0;
       }
       .sheet-input:focus { outline: 2px solid var(--navy); outline-offset: -2px; background: #fff; }
+      .sheet-readonly { padding: 8px 10px; color: var(--ink-soft); font-size: 13px; }
       .sheet-status-ok { color: var(--ok); font-weight: 600; }
       .sheet-status-warn { color: var(--warn); font-weight: 600; }
       .sheet-status-danger { color: var(--danger); font-weight: 600; }
@@ -2695,11 +2835,35 @@ function Styles() {
         padding: 32px; width: 320px; display: flex; flex-direction: column;
       }
       @media print {
-        .no-print { display: none !important; }
+        .no-print, .icon-btn, .btn-ghost, .btn-primary, .page-actions,
+        .filter-row, .form-panel, .import-preview, .import-block,
+        .sheet-actions, .sheet-follow-btn, .chevron-icon,
+        .lucide-chevron-right, .lucide-chevron-down, .search-wrap, .menu-btn {
+          display: none !important;
+        }
         .app-shell { border-radius: 0; background: #fff; }
         .content { padding: 0; }
         .list-card, .stat-card, .building-row, .dash-building-card { break-inside: avoid; border: 1px solid #ccc; }
         body { background: #fff; }
+        .topbar { background: #fff !important; color: #000 !important; border-bottom: 2px solid #000; }
+        .brand-title { color: #000; }
+        .brand-sub { color: #444; }
+        .brand-mark { background: #ddd !important; color: #000 !important; }
+        .list-card-head { cursor: default !important; }
+        .list-card-body { display: block !important; }
+        .sheet-wrap { overflow: visible; border: none; }
+        .sheet { width: 100%; border-collapse: collapse; }
+        .sheet th, .sheet td { border: 1px solid #999 !important; padding: 6px 8px !important; }
+        .sheet th { background: #eee !important; color: #000 !important; }
+        .sheet-input, select.sheet-input {
+          border: none !important; background: none !important; -webkit-appearance: none;
+          appearance: none; padding: 0 !important; color: #000 !important; pointer-events: none;
+        }
+        .sheet-status-ok, .sheet-status-warn, .sheet-status-danger { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        .sheet-note-preview { pointer-events: none; }
+        .sheet-note-text { white-space: normal !important; max-width: none !important; }
+        .pill { -webkit-print-color-adjust: exact; print-color-adjust: exact; border: 1px solid currentColor; }
+        .sheet-court-pill { border: 1px solid var(--danger); }
       }
     `}</style>
   );
