@@ -202,39 +202,33 @@ function parseArrearsText(text) {
 
 // Telephone/Email list: header line "A1 AUDREY LYNN MELENDEZ" then indented "CELL - ...", "EMAIL ADDRESS - ..."
 function parseContactsText(text) {
-  const headerRe = new RegExp(`^(${APT_RE})\\s+(.+)$`);
-  const detailRe = /^(CELL|EMAIL ADDRESS|HOME|WORK|OTHER|FAX)\s*-\s*(.+)$/i;
-  // PDF text extraction can occasionally merge two visually separate lines into
-  // one (e.g. "A1 AUDREY LYNN MELENDEZ CELL - 917-388-5948"). Repair that by
-  // splitting on any of these labels found mid-line, not just at line start —
-  // this fixes it based on content rather than relying on layout/coordinates.
-  const labelSplitRe = /\s+(CELL|EMAIL ADDRESS|HOME|WORK|OTHER|FAX)\s*-\s*/gi;
-  const lines = [];
-  for (const raw of cleanLines(text)) {
-    const parts = raw.split(labelSplitRe);
-    if (parts.length === 1) { lines.push(raw); continue; }
-    if (parts[0].trim()) lines.push(parts[0].trim());
-    for (let i = 1; i < parts.length; i += 2) lines.push(`${parts[i]} - ${parts[i + 1]}`.trim());
+  // Different PDF viewers copy multi-line contact cells in unpredictable order —
+  // sometimes labels and values stay paired, sometimes all labels get grouped
+  // together with all their values afterward. Rather than trying to track which
+  // line goes with which, treat the whole report as one continuous block: find
+  // every apartment header, then pull the first phone number and first email
+  // found anywhere between that header and the next one, wherever it landed.
+  const cleaned = cleanLines(text).join(" ");
+  const headerRe = new RegExp(
+    `(?:^|\\s)(${APT_RE})\\s+((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]*?)(?=\\s+(?:CELL|EMAIL ADDRESS|HOME|WORK|OTHER|FAX)\\b|\\s+${APT_RE}\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])|$)`,
+    "g"
+  );
+  const headers = [];
+  let m;
+  while ((m = headerRe.exec(cleaned))) {
+    headers.push({ apt: m[1], name: m[2].trim(), start: m.index, end: m.index + m[0].length });
   }
 
-  const out = [];
-  let current = null;
-  for (const line of lines) {
-    const detailMatch = line.match(detailRe);
-    if (detailMatch && current) {
-      const [, label, value] = detailMatch;
-      if (/EMAIL/i.test(label) && !current.email) current.email = value.trim().split(/\s+/)[0];
-      if (/CELL/i.test(label) && !current.phone) current.phone = value.trim().match(/[\d()+\-.\s]{7,}/)?.[0]?.trim() || value.trim();
-      continue;
-    }
-    const headerMatch = line.match(headerRe);
-    if (headerMatch) {
-      if (current) out.push(current);
-      current = { apt: headerMatch[1], name: headerMatch[2].trim(), phone: "", email: "" };
-    }
-  }
-  if (current) out.push(current);
-  return out; // keep every detected apartment, even ones with no phone/email on file
+  const phoneRe = /\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}/;
+  const emailRe = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+
+  return headers.map((h, i) => {
+    const blockEnd = i + 1 < headers.length ? headers[i + 1].start : cleaned.length;
+    const block = cleaned.slice(h.end, blockEnd);
+    const phone = block.match(phoneRe);
+    const email = block.match(emailRe);
+    return { apt: h.apt, name: h.name, phone: phone ? phone[0].trim() : "", email: email ? email[0].trim() : "" };
+  }); // keep every detected apartment, even ones with no phone/email on file
 }
 
 // Building Directory: two apt/name pairs per line, best-effort split
@@ -340,6 +334,41 @@ function EmptyState({ text }) {
   return <div className="empty-state">{text}</div>;
 }
 
+function PinSetupPanel({ onClose }) {
+  const [pin1, setPin1] = useState("");
+  const [pin2, setPin2] = useState("");
+  const [error, setError] = useState("");
+  const hasExisting = !!localStorage.getItem(PIN_STORAGE_KEY);
+
+  const save = () => {
+    if (pin1.length < 4) { setError("At least 4 digits."); return; }
+    if (pin1 !== pin2) { setError("PINs don't match."); return; }
+    localStorage.setItem(PIN_STORAGE_KEY, pin1);
+    onClose();
+  };
+  const clear = () => {
+    localStorage.removeItem(PIN_STORAGE_KEY);
+    onClose();
+  };
+
+  return (
+    <div className="form-panel no-print" style={{ margin: "0 20px 16px" }}>
+      <Field label="New PIN (4–6 digits)">
+        <input type="password" inputMode="numeric" pattern="[0-9]*" maxLength={6} value={pin1} onChange={e => setPin1(e.target.value.replace(/\D/g, ""))} />
+      </Field>
+      <Field label="Confirm PIN">
+        <input type="password" inputMode="numeric" pattern="[0-9]*" maxLength={6} value={pin2} onChange={e => setPin2(e.target.value.replace(/\D/g, ""))} />
+      </Field>
+      {error && <div className="hint" style={{ color: "var(--danger)", gridColumn: "1 / -1" }}>{error}</div>}
+      <div className="form-actions">
+        <button className="btn-primary" onClick={save}>Save PIN</button>
+        {hasExisting && <button className="btn-ghost" onClick={clear}>Remove PIN</button>}
+        <button className="btn-ghost" onClick={onClose}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function PrintButton({ label }) {
   return (
     <button className="btn-ghost no-print" onClick={() => window.print()} title={`Print ${label}`}>
@@ -441,6 +470,8 @@ function DocumentUploader({ documents, onAdd, onRemove }) {
 
 /* ============================== login ============================== */
 
+const PIN_STORAGE_KEY = "pm-ops-device-pin";
+
 function LoginScreen({ onSignedIn }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -477,6 +508,46 @@ function LoginScreen({ onSignedIn }) {
   );
 }
 
+function PinLockScreen({ onUnlock, onForgot }) {
+  const [pin, setPin] = useState("");
+  const [error, setError] = useState("");
+
+  const submit = (e) => {
+    e.preventDefault();
+    const saved = localStorage.getItem(PIN_STORAGE_KEY);
+    if (pin && pin === saved) {
+      onUnlock();
+    } else {
+      setError("Wrong PIN — try again.");
+      setPin("");
+    }
+  };
+
+  return (
+    <div className="login-shell">
+      <form className="login-card" onSubmit={submit}>
+        <div className="brand-mark" style={{ marginBottom: 14 }}>PO</div>
+        <h1 className="page-title" style={{ marginBottom: 4 }}>Enter PIN</h1>
+        <p className="hint" style={{ marginBottom: 16 }}>Quick unlock for this device — you're still signed in.</p>
+        <Field label="PIN">
+          <input
+            type="password" inputMode="numeric" pattern="[0-9]*" maxLength={6} autoFocus
+            value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ""))}
+          />
+        </Field>
+        {error && <div className="hint" style={{ color: "var(--danger)" }}>{error}</div>}
+        <button className="btn-primary" type="submit" disabled={!pin} style={{ marginTop: 10, width: "100%", justifyContent: "center" }}>
+          Unlock
+        </button>
+        <button type="button" className="btn-ghost" style={{ marginTop: 8, width: "100%", justifyContent: "center" }} onClick={onForgot}>
+          Forgot PIN — sign out fully
+        </button>
+      </form>
+      <Styles />
+    </div>
+  );
+}
+
 /* ============================== app ============================== */
 
 export default function PropertyOpsApp() {
@@ -486,6 +557,8 @@ export default function PropertyOpsApp() {
   const [tab, setTab] = useState("dashboard");
   const [query, setQuery] = useState("");
   const [navOpen, setNavOpen] = useState(false);
+  const [pinUnlocked, setPinUnlocked] = useState(() => !localStorage.getItem(PIN_STORAGE_KEY));
+  const [showPinSetup, setShowPinSetup] = useState(false);
   const saveTimer = useRef(null);
 
   useEffect(() => onAuthStateChanged(auth, u => setUser(u || null)), []);
@@ -550,19 +623,27 @@ export default function PropertyOpsApp() {
 
   if (user === undefined) return <div className="app-shell"><div className="loading">Loading…</div><Styles /></div>;
   if (user === null) return <LoginScreen />;
+  if (!pinUnlocked) return (
+    <PinLockScreen
+      onUnlock={() => setPinUnlocked(true)}
+      onForgot={() => { localStorage.removeItem(PIN_STORAGE_KEY); signOut(auth); }}
+    />
+  );
   if (!loaded) return <div className="app-shell"><div className="loading">Loading your ops board…</div><Styles /></div>;
 
   return (
     <div className="app-shell">
       <header className="topbar no-print">
-        <button className="menu-btn" onClick={() => setNavOpen(o => !o)} title="Menu">
-          <Menu size={18} />
-        </button>
-        <div className="brand">
-          <div className="brand-mark">PO</div>
-          <div>
-            <div className="brand-title">Property Ops</div>
-            <div className="brand-sub">{data.buildings.length} buildings tracked</div>
+        <div className="topbar-left">
+          <button className="menu-btn" onClick={() => setNavOpen(o => !o)} title="Menu">
+            <Menu size={18} />
+          </button>
+          <div className="brand">
+            <div className="brand-mark">PO</div>
+            <div>
+              <div className="brand-title">Property Ops</div>
+              <div className="brand-sub">{data.buildings.length} buildings tracked</div>
+            </div>
           </div>
         </div>
         <div className="search-wrap">
@@ -575,10 +656,19 @@ export default function PropertyOpsApp() {
           />
           {query && <button className="search-clear" onClick={() => setQuery("")}><X size={14} /></button>}
         </div>
-        <button className="btn-ghost no-print" title="Sign out" onClick={() => signOut(auth)} style={{ color: "#fff", borderColor: "rgba(255,255,255,0.3)" }}>
-          Sign out
-        </button>
+        <div className="topbar-actions">
+          <button className="btn-ghost no-print" title="Set a quick-unlock PIN for this device" onClick={() => setShowPinSetup(s => !s)} style={{ color: "#fff", borderColor: "rgba(255,255,255,0.3)" }}>
+            {localStorage.getItem(PIN_STORAGE_KEY) ? "Change PIN" : "Set PIN"}
+          </button>
+          <button className="btn-ghost no-print" title="Sign out" onClick={() => { localStorage.removeItem(PIN_STORAGE_KEY); signOut(auth); }} style={{ color: "#fff", borderColor: "rgba(255,255,255,0.3)" }}>
+            Sign out
+          </button>
+        </div>
       </header>
+
+      {showPinSetup && (
+        <PinSetupPanel onClose={() => setShowPinSetup(false)} />
+      )}
 
       {searchResults ? (
         <SearchResults results={searchResults} buildingName={buildingName} onClose={() => setQuery("")} />
@@ -697,7 +787,9 @@ function Dashboard({ data, buildingName, tenantName, setTab }) {
   const [showAllOverdue, setShowAllOverdue] = useState(false);
   const [monthsToShow, setMonthsToShow] = useState(1);
 
-  const overdueTenants = data.tenants.filter(t => t.status !== "Current");
+  // Tenants with a follow-up already scheduled show up under "to follow up" —
+  // no need to also flag them under "not current on rent", that's just noise.
+  const overdueTenants = data.tenants.filter(t => t.status !== "Current" && !t.followUpDate);
   const violationItems = data.violations.filter(v => !isViolationClosed(v) && flagFor(v.cureDeadline));
   const courtItems = data.courtCases.filter(c => !c.archived && flagFor(c.nextCourtDate));
   const stipItems = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && flagFor(c.nextPaymentDue));
@@ -1072,6 +1164,8 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
   const [buildingFilter, setBuildingFilter] = useState("All");
   const [section, setSection] = useState("sheet");
 
+  const inCourt = (tenantId) => (data.courtCases || []).some(c => c.tenantId === tenantId && !c.archived);
+
   const addRow = () => add("tenants", {
     buildingId: data.buildings[0]?.id || "", unitId: "", name: "", phone: "",
     email: "", balance: "", status: "Current", notes: [], messageLog: [],
@@ -1173,7 +1267,12 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
                         {data.units.filter(u => u.buildingId === t.buildingId).map(u => <option key={u.id} value={u.id}>{u.unitNumber}</option>)}
                       </select>
                     </td>
-                    <td><input className="sheet-input" value={t.name} onChange={e => update("tenants", t.id, { name: e.target.value })} /></td>
+                    <td>
+                      <div className="sheet-name-cell">
+                        <input className="sheet-input" value={t.name} onChange={e => update("tenants", t.id, { name: e.target.value })} />
+                        {inCourt(t.id) && <span className="pill pill-danger sheet-court-pill" title="Active court case — no need to independently follow up">In Court</span>}
+                      </div>
+                    </td>
                     <td><input className="sheet-input" value={t.phone} onChange={e => update("tenants", t.id, { phone: e.target.value })} /></td>
                     <td className="sheet-col-balance"><input className="sheet-input" value={t.balance} onChange={e => update("tenants", t.id, { balance: e.target.value })} /></td>
                     <td>
@@ -1270,6 +1369,7 @@ const IMPORT_TYPES = [
 function buildImportDiff(type, parsedEntries, data, buildingId) {
   const unitsForBuilding = data.units.filter(u => u.buildingId === buildingId);
   const tenantByUnit = unitId => data.tenants.find(t => t.unitId === unitId);
+  const hasActiveCourtCase = tenantId => (data.courtCases || []).some(c => c.tenantId === tenantId && !c.archived);
   const changes = [];
 
   parsedEntries.forEach(entry => {
@@ -1287,17 +1387,24 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
         const diffFields = {};
         Object.entries(fields).forEach(([k, v]) => { if (v && tenant[k] !== v) diffFields[k] = v; });
         if (Object.keys(diffFields).length > 0) {
+          // If this tenant was already flagged Late/In Arrears before this import, don't
+          // silently overwrite whatever's being tracked for them — require an explicit
+          // approve. Tenants currently "Current" (or brand-new changes) apply automatically.
+          const priorStatus = tenant.status || "Current";
+          const needsApproval = type === "arrears" && priorStatus !== "Current";
           changes.push({
             apt: entry.apt, unitId: unit.id, tenantId: tenant.id, isNew: false,
             fields: diffFields, before: Object.fromEntries(Object.keys(diffFields).map(k => [k, tenant[k] || "—"])),
             name: tenant.name || entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview,
+            priorStatus, needsApproval, approved: !needsApproval,
+            inCourt: hasActiveCourtCase(tenant.id),
           });
         }
       } else {
-        changes.push({ apt: entry.apt, unitId: unit.id, tenantId: null, isNew: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview });
+        changes.push({ apt: entry.apt, unitId: unit.id, tenantId: null, isNew: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false });
       }
     } else {
-      changes.push({ apt: entry.apt, unitId: null, tenantId: null, isNew: true, newUnit: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview });
+      changes.push({ apt: entry.apt, unitId: null, tenantId: null, isNew: true, newUnit: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false });
     }
   });
 
@@ -1354,6 +1461,13 @@ function ImportBlock({ type, data, setData, buildingName }) {
     }
   };
 
+  const toggleApprove = (idx) => {
+    setPreview(p => ({
+      ...p,
+      changes: p.changes.map((c, i) => i === idx ? { ...c, approved: !c.approved } : c),
+    }));
+  };
+
   const confirm = () => {
     if (!preview) return;
     setData(d => {
@@ -1369,7 +1483,8 @@ function ImportBlock({ type, data, setData, buildingName }) {
         next.buildings.push(newBuilding);
         buildingId = newBuilding.id;
       }
-      preview.changes.forEach(ch => {
+      const applied = preview.changes.filter(ch => !ch.needsApproval || ch.approved);
+      applied.forEach(ch => {
         let unitId = ch.unitId;
         if (ch.newUnit) {
           const unit = { id: uid(), buildingId, unitNumber: ch.apt };
@@ -1390,10 +1505,11 @@ function ImportBlock({ type, data, setData, buildingName }) {
       next.importHistory = [
         {
           id: uid(), date: todayISO(), buildingId, type,
-          updated: preview.changes.filter(c => !c.isNew).length,
-          added: preview.changes.filter(c => c.isNew).length,
+          updated: applied.filter(c => !c.isNew).length,
+          added: applied.filter(c => c.isNew).length,
           missing: preview.missing.length,
-          details: preview.changes.map(c => ({ apt: c.apt, name: c.name, isNew: c.isNew, fields: c.fields })),
+          skipped: preview.changes.length - applied.length,
+          details: applied.map(c => ({ apt: c.apt, name: c.name, isNew: c.isNew, fields: c.fields })),
           missingDetails: preview.missing,
         },
         ...next.importHistory,
@@ -1437,7 +1553,8 @@ function ImportBlock({ type, data, setData, buildingName }) {
             </div>
           )}
           <div className="import-preview-summary">
-            {preview.changes.filter(c => c.isNew).length} new · {preview.changes.filter(c => !c.isNew).length} to update
+            {preview.changes.filter(c => c.isNew).length} new · {preview.changes.filter(c => !c.isNew && !c.needsApproval).length} to update
+            {preview.changes.some(c => c.needsApproval) && ` · ${preview.changes.filter(c => c.needsApproval).length} already flagged behind — needs your approval`}
             {type === "arrears" && ` · ${preview.missing.length} not in this file`}
             {" "}({preview.parsedCount} rows read)
           </div>
@@ -1445,17 +1562,24 @@ function ImportBlock({ type, data, setData, buildingName }) {
             <div className="hint">No changes found — everything already matches.</div>
           )}
           {preview.changes.map((c, i) => (
-            <div className="import-row" key={i}>
+            <div className={`import-row ${c.needsApproval ? "import-row-approval" : ""}`} key={i}>
               <span className="pill pill-muted">{c.apt}</span>
               <span className="import-row-name">{c.name}</span>
               {c.isNew && <span className="pill pill-warn">New</span>}
               {c.movedOut && <span className="pill pill-danger">Moved out (flagged)</span>}
               {c.needsReview && <span className="pill pill-warn">⚠ Review — shared unit, verify names</span>}
+              {c.inCourt && <span className="pill pill-danger">In Court</span>}
               <div className="import-row-fields">
                 {Object.entries(c.fields).map(([k, v]) => (
                   <span key={k} className="import-field">{k}: {c.before?.[k] ? `${c.before[k]} → ` : ""}{String(v)}</span>
                 ))}
               </div>
+              {c.needsApproval && (
+                <label className="import-approve">
+                  <input type="checkbox" checked={c.approved} onChange={() => toggleApprove(i)} />
+                  Already marked "{c.priorStatus}" — update to this?
+                </label>
+              )}
             </div>
           ))}
           {preview.missing.length > 0 && (
@@ -1502,6 +1626,7 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
             <span className="pill pill-ok">{h.added} new</span>
             <span className="pill pill-warn">{h.updated} updated</span>
             {h.missing > 0 && <span className="pill pill-danger">{h.missing} missing</span>}
+            {h.skipped > 0 && <span className="pill pill-muted">{h.skipped} not approved</span>}
           </div>
           {expandedEntry === h.id && (
             <div className="list-card-body">
@@ -1612,6 +1737,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   const [view, setView] = useState("active");
   const [noteFor, setNoteFor] = useState(null);
   const [noteText, setNoteText] = useState("");
+  const [expandedRow, setExpandedRow] = useState(null);
   const fileRef = useRef(null);
 
   const statusesFor = (a) => a === "HPD" ? HPD_STATUSES : a === "DSNY" ? DSNY_STATUSES : OTHER_STATUSES;
@@ -1725,7 +1851,6 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
             <>
               <Field label="Class"><input value={form.class} onChange={e => setForm({ ...form, class: e.target.value })} placeholder="A / B / C" /></Field>
               <Field label="Description"><textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></Field>
-              <Field label="Date issued"><input type="date" value={form.dateIssued} onChange={e => setForm({ ...form, dateIssued: e.target.value })} /></Field>
               <Field label="Certify / cure deadline"><input type="date" value={form.cureDeadline} onChange={e => setForm({ ...form, cureDeadline: e.target.value })} /></Field>
               <Field label="Vendor assigned">
                 <select value={form.vendorId} onChange={e => setForm({ ...form, vendorId: e.target.value })}>
@@ -1770,9 +1895,11 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
       {list.length === 0 && <EmptyState text={`No ${agency} violations here.`} />}
       {list.map(v => {
         const flag = view === "active" ? flagFor(v.cureDeadline) : null;
+        const isOpen = expandedRow === v.id;
         return (
           <div className={`list-card ${flag === "overdue" ? "list-card-danger" : flag === "soon" ? "list-card-warn" : ""}`} key={v.id}>
-            <div className="list-card-head">
+            <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : v.id)} style={{ cursor: "pointer" }}>
+              {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
               <div className="list-card-title">#{v.violationNumber} {v.class && `· Class ${v.class}`}</div>
               <span className={`pill ${isClosed(v) ? "pill-ok" : "pill-muted"}`}>{v.status}</span>
               <span className="pill pill-muted">{buildingName(v.buildingId)}</span>
@@ -1782,30 +1909,32 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
               {agency === "Other" && v.company && <span className="pill pill-muted">{v.company}</span>}
               {agency !== "DSNY" && view === "active" && <Flag date={v.cureDeadline} />}
               <div className="spacer" />
-              <IconBtn title="Edit" onClick={() => setForm(v)}><Pencil size={14} /></IconBtn>
-              <IconBtn title="Delete" danger onClick={() => remove("violations", v.id)}><Trash2 size={14} /></IconBtn>
+              <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(v); }}><Pencil size={14} /></IconBtn>
+              <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("violations", v.id); }}><Trash2 size={14} /></IconBtn>
             </div>
-            <div className="list-card-body">
-              {v.description && <div className="row">{v.description}</div>}
-              <PhotoUploader
-                photos={v.photos}
-                onAdd={(newPhotos) => update("violations", v.id, { photos: [...(v.photos || []), ...newPhotos] })}
-                onRemove={(id) => update("violations", v.id, { photos: (v.photos || []).filter(p => p.id !== id) })}
-              />
-              <div className="row" style={{ marginTop: 8 }}>
-                <strong>Notes</strong>
-                <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => setNoteFor(noteFor === v.id ? null : v.id)}><Plus size={14} /> Add note</button>
-              </div>
-              {noteFor === v.id && (
-                <div className="inline-form">
-                  <input placeholder="Update…" value={noteText} onChange={e => setNoteText(e.target.value)} />
-                  <button className="btn-primary" onClick={() => addNote(v)}>Save</button>
+            {isOpen && (
+              <div className="list-card-body">
+                {v.description && <div className="row">{v.description}</div>}
+                <PhotoUploader
+                  photos={v.photos}
+                  onAdd={(newPhotos) => update("violations", v.id, { photos: [...(v.photos || []), ...newPhotos] })}
+                  onRemove={(id) => update("violations", v.id, { photos: (v.photos || []).filter(p => p.id !== id) })}
+                />
+                <div className="row" style={{ marginTop: 8 }}>
+                  <strong>Notes</strong>
+                  <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => setNoteFor(noteFor === v.id ? null : v.id)}><Plus size={14} /> Add note</button>
                 </div>
-              )}
-              {(v.notes || []).slice().reverse().map((n, i) => (
-                <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
-              ))}
-            </div>
+                {noteFor === v.id && (
+                  <div className="inline-form">
+                    <input placeholder="Update…" value={noteText} onChange={e => setNoteText(e.target.value)} />
+                    <button className="btn-primary" onClick={() => addNote(v)}>Save</button>
+                  </div>
+                )}
+                {(v.notes || []).slice().reverse().map((n, i) => (
+                  <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
+                ))}
+              </div>
+            )}
           </div>
         );
       })}
@@ -2312,8 +2441,10 @@ function Styles() {
       .loading { padding: 40px; text-align: center; color: var(--ink-soft); }
       .topbar {
         display: flex; align-items: center; justify-content: space-between;
-        gap: 14px; padding: 14px 20px; background: var(--navy); color: #fff;
+        gap: 16px; padding: 14px 20px; background: var(--navy); color: #fff;
       }
+      .topbar-left { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+      .topbar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
       .menu-btn {
         background: rgba(255,255,255,0.1); border: none; color: #fff; width: 34px; height: 34px;
         border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0;
@@ -2327,7 +2458,7 @@ function Styles() {
       }
       .brand-title { font-family: Georgia, "Times New Roman", serif; font-size: 16px; line-height: 1.2; }
       .brand-sub { font-size: 11px; color: #C9CFD6; }
-      .search-wrap { position: relative; flex: 1; max-width: 420px; }
+      .search-wrap { position: relative; flex: 1; max-width: 440px; margin: 0 auto; }
       .search-icon { position: absolute; left: 10px; top: 9px; color: #9AA3AD; }
       .search-input {
         width: 100%; padding: 8px 32px; border-radius: 6px; border: 1px solid transparent;
@@ -2473,6 +2604,11 @@ function Styles() {
       .import-row:last-of-type { border-bottom: none; }
       .import-row-name { font-weight: 600; }
       .import-row-fields { display: flex; flex-wrap: wrap; gap: 8px; color: var(--ink-soft); font-size: 12px; }
+      .import-row-approval { background: #FBF6EF; margin: 0 -10px; padding: 6px 10px; border-radius: 6px; }
+      .import-approve { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink); margin-top: 4px; width: 100%; cursor: pointer; }
+      .sheet-name-cell { display: flex; align-items: center; gap: 4px; }
+      .sheet-name-cell .sheet-input { flex: 1; }
+      .sheet-court-pill { flex-shrink: 0; margin-right: 4px; font-size: 10px; padding: 2px 6px; }
 
       .attention-icon { flex-shrink: 0; }
       .attention-count { font-family: Georgia, serif; font-size: 17px; margin-right: 2px; }
@@ -2546,6 +2682,9 @@ function Styles() {
         .form-panel { grid-template-columns: 1fr; }
         .law-row { grid-template-columns: 1fr; }
         .sidenav { width: 78%; }
+        .topbar { flex-wrap: wrap; }
+        .search-wrap { order: 3; max-width: 100%; width: 100%; margin: 0; flex: 1 1 100%; }
+        .brand-sub { display: none; }
       }
       .login-shell {
         min-height: 100vh; display: flex; align-items: center; justify-content: center;
