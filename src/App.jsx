@@ -856,6 +856,10 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   // no need to also flag them under "not current on rent", that's just noise.
   const overdueTenants = data.tenants.filter(t => t.status !== "Current" && tenantFollowUps(t).length === 0);
   const violationItems = data.violations.filter(v => !isViolationClosed(v) && flagFor(v.cureDeadline));
+  const dueWithin10 = (v) => { const d = daysUntil(v.cureDeadline); return d !== null && d <= 10 && !isViolationClosed(v); };
+  const hpdDue10 = data.violations.filter(v => v.agency === "HPD" && dueWithin10(v));
+  const dobDue10 = data.violations.filter(v => v.agency === "Other" && v.otherAgency === "DOB" && dueWithin10(v));
+  const fdnyDue10 = data.violations.filter(v => v.agency === "Other" && v.otherAgency === "FDNY" && dueWithin10(v));
   const courtItems = data.courtCases.filter(c => !c.archived && flagFor(c.nextCourtDate));
   const stipItems = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && flagFor(c.nextPaymentDue));
   const recurringItems = data.appointments.filter(a => !a.completed && a.recurring && flagFor(a.date));
@@ -874,7 +878,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id));
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
-  const totalAttention = rentPanelCount + violationItems.length + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length;
+  const totalAttention = rentPanelCount + violationItems.length + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + hpdDue10.length + dobDue10.length + fdnyDue10.length;
 
   return (
     <div>
@@ -905,7 +909,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
                           <span className={`pill ${t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status}</span>
                           <div className="followup-item-main">
                             <div className="followup-item-name">{t.name} <span className="row-muted">— {buildingName(t.buildingId)}</span></div>
-                            {t.balance && <div className="followup-item-note">Balance: {t.balance}</div>}
+                            {t.balance && <div className="followup-item-note">Balance: ${t.balance}</div>}
                           </div>
                         </div>
                       ))}
@@ -950,6 +954,48 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
                 <Flag date={v.cureDeadline} />
                 <div className="followup-item-main">
                   <div className="followup-item-name">#{v.violationNumber} · {v.agency} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
+                </div>
+              </>
+            )}
+          />
+
+          <AttentionPanel
+            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
+            label="HPD violations due within 10 days" items={hpdDue10} tab="violations" setTab={setTab}
+            itemKey={v => v.id}
+            renderItem={v => (
+              <>
+                <Flag date={v.cureDeadline} />
+                <div className="followup-item-main">
+                  <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
+                </div>
+              </>
+            )}
+          />
+
+          <AttentionPanel
+            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
+            label="DOB violations due within 10 days" items={dobDue10} tab="violations" setTab={setTab}
+            itemKey={v => v.id}
+            renderItem={v => (
+              <>
+                <Flag date={v.cureDeadline} />
+                <div className="followup-item-main">
+                  <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
+                </div>
+              </>
+            )}
+          />
+
+          <AttentionPanel
+            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
+            label="FDNY violations due within 10 days" items={fdnyDue10} tab="violations" setTab={setTab}
+            itemKey={v => v.id}
+            renderItem={v => (
+              <>
+                <Flag date={v.cureDeadline} />
+                <div className="followup-item-main">
+                  <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
                 </div>
               </>
             )}
@@ -1299,7 +1345,7 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                               <div className="unit-detail-row"><strong>{t.name || "(no name on file)"}</strong></div>
                               {t.phone && <div className="unit-detail-row">Phone: {t.phone}</div>}
                               {t.email && <div className="unit-detail-row">Email: {t.email}</div>}
-                              <div className="unit-detail-row">Balance: {t.balance || "—"} · Status: <span className={`pill ${t.status === "Current" ? "pill-ok" : t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status || "Current"}</span></div>
+                              <div className="unit-detail-row">Balance: {t.balance ? `$${t.balance}` : "—"} · Status: <span className={`pill ${t.status === "Current" ? "pill-ok" : t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status || "Current"}</span></div>
                               {tenantFollowUps(t).length > 0 && (
                                 <div className="unit-detail-row">
                                   Follow-up{tenantFollowUps(t).length > 1 ? "s" : ""}: {tenantFollowUps(t).map(f => `${fmtDate(f.date)}${f.note ? ` — ${f.note}` : ""}`).join("; ")}
@@ -1447,7 +1493,12 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
           </Field>
           <Field label="Tenant name"><input value={newTenant.name} onChange={e => setNewTenant({ ...newTenant, name: e.target.value })} /></Field>
           <Field label="Phone"><input value={newTenant.phone} onChange={e => setNewTenant({ ...newTenant, phone: e.target.value })} /></Field>
-          <Field label="Balance"><input value={newTenant.balance} onChange={e => setNewTenant({ ...newTenant, balance: e.target.value })} /></Field>
+          <Field label="Balance">
+            <div className="balance-input-wrap">
+              <span className="balance-dollar">$</span>
+              <input className="balance-input" value={newTenant.balance} onChange={e => setNewTenant({ ...newTenant, balance: e.target.value })} />
+            </div>
+          </Field>
           <Field label="Status">
             <select value={newTenant.status} onChange={e => setNewTenant({ ...newTenant, status: e.target.value })}>
               {RENT_STATUSES.map(s => <option key={s}>{s}</option>)}
@@ -1501,7 +1552,12 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
                       </div>
                     </td>
                     <td><input className="sheet-input" value={t.phone} onChange={e => update("tenants", t.id, { phone: e.target.value })} /></td>
-                    <td className="sheet-col-balance"><input className="sheet-input" value={t.balance} onChange={e => update("tenants", t.id, { balance: e.target.value })} /></td>
+                    <td className="sheet-col-balance">
+                      <div className="balance-input-wrap">
+                        <span className="balance-dollar">$</span>
+                        <input className="sheet-input balance-input" value={t.balance} onChange={e => update("tenants", t.id, { balance: e.target.value })} />
+                      </div>
+                    </td>
                     <td>
                       <select className={`sheet-input sheet-status-${t.status === "Current" ? "ok" : t.status === "Late" ? "warn" : "danger"}`} value={t.status} onChange={e => update("tenants", t.id, { status: e.target.value })}>
                         {RENT_STATUSES.map(s => <option key={s}>{s}</option>)}
@@ -1966,6 +2022,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   const [agency, setAgency] = useState("HPD");
   const [form, setForm] = useState(null);
   const [view, setView] = useState("active");
+  const [dueFilter, setDueFilter] = useState("all");
   const [noteFor, setNoteFor] = useState(null);
   const [noteText, setNoteText] = useState("");
   const [expandedRow, setExpandedRow] = useState(null);
@@ -2035,6 +2092,10 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
 
   let list = data.violations.filter(v => v.agency === agency && (view === "active" ? !isClosed(v) : isClosed(v)));
   if (view === "active") {
+    if (dueFilter !== "all") {
+      const maxDays = dueFilter === "24h" ? 1 : dueFilter === "1w" ? 7 : 10;
+      list = list.filter(v => { const d = daysUntil(v.cureDeadline); return d !== null && d <= maxDays; });
+    }
     list = [...list].sort((a, b) => {
       const da = daysUntil(a.cureDeadline); const db = daysUntil(b.cureDeadline);
       if (da === null && db === null) return 0;
@@ -2067,6 +2128,14 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
         <button className={`chip ${view === "active" ? "chip-active" : ""}`} onClick={() => setView("active")}>Active / Due</button>
         <button className={`chip ${view === "closed" ? "chip-active" : ""}`} onClick={() => setView("closed")}>{agency === "DSNY" ? "Paid" : "Closed"}</button>
       </div>
+      {view === "active" && (
+        <div className="filter-row">
+          <button className={`chip ${dueFilter === "all" ? "chip-active" : ""}`} onClick={() => setDueFilter("all")}>All due dates</button>
+          <button className={`chip ${dueFilter === "24h" ? "chip-active" : ""}`} onClick={() => setDueFilter("24h")}>Cure due ≤ 24 hrs</button>
+          <button className={`chip ${dueFilter === "1w" ? "chip-active" : ""}`} onClick={() => setDueFilter("1w")}>Cure due ≤ 1 week</button>
+          <button className={`chip ${dueFilter === "10d" ? "chip-active" : ""}`} onClick={() => setDueFilter("10d")}>Cure due ≤ 10 days</button>
+        </div>
+      )}
 
       {form && (
         <div className="form-panel">
@@ -2135,10 +2204,13 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
         const isOpen = expandedRow === v.id;
         return (
           <div className={`list-card ${flag === "overdue" ? "list-card-danger" : flag === "soon" ? "list-card-warn" : ""}`} key={v.id}>
-            <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : v.id)} style={{ cursor: "pointer" }}>
+            <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : v.id)} style={{ cursor: "pointer", alignItems: "flex-start" }}>
               {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
               {v.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === v.unitId)?.unitNumber || "—"}</span>}
-              <div className="list-card-title">#{v.violationNumber} {v.class && `· Class ${v.class}`}</div>
+              <div className="violation-title-group">
+                <div className="list-card-title">#{v.violationNumber}</div>
+                {v.description && <div className="violation-desc-preview">{v.description}</div>}
+              </div>
               <span className={`pill ${isClosed(v) ? "pill-ok" : "pill-muted"}`}>{v.status}</span>
               <span className="pill pill-muted">{buildingName(v.buildingId)}</span>
               {agency === "HPD" && v.vendorId && <span className="pill pill-muted">{vendorName(v.vendorId)}</span>}
@@ -2157,6 +2229,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
             </div>
             {isOpen && (
               <div className="list-card-body">
+                {v.class && <div className="row"><strong>Class:</strong> {v.class}</div>}
                 {v.description && <div className="row">{v.description}</div>}
                 <PhotoUploader
                   photos={v.photos}
@@ -2318,9 +2391,7 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
         <button className={`chip ${view === "closed" ? "chip-active" : ""}`} onClick={() => setView("closed")}>Closed / Archived</button>
       </div>
 
-      {form && (() => {
-        const unitTenants = data.tenants.filter(t => t.unitId === form.unitId);
-        return (
+      {form && (
         <div className="form-panel">
           <Field label="Building">
             <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value, unitId: "", tenantId: "" })}>
@@ -2328,31 +2399,25 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
               {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
             </select>
           </Field>
-          <Field label="Apt #">
+          <Field label="Apt # — Tenant">
             <select
-              value={form.unitId} disabled={!form.buildingId}
+              value={form.tenantId} disabled={!form.buildingId}
               onChange={e => {
-                const tenantsHere = data.tenants.filter(t => t.unitId === e.target.value);
-                setForm({ ...form, unitId: e.target.value, tenantId: tenantsHere.length === 1 ? tenantsHere[0].id : "" });
+                const t = data.tenants.find(x => x.id === e.target.value);
+                setForm({ ...form, tenantId: e.target.value, unitId: t ? t.unitId : "" });
               }}
             >
               <option value="">{form.buildingId ? "—" : "Pick a building first"}</option>
-              {data.units.filter(u => u.buildingId === form.buildingId).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber)).map(u => <option key={u.id} value={u.id}>{u.unitNumber}</option>)}
+              {data.tenants
+                .filter(t => t.buildingId === form.buildingId)
+                .slice()
+                .sort((a, b) => compareUnits(data.units.find(u => u.id === a.unitId)?.unitNumber, data.units.find(u => u.id === b.unitId)?.unitNumber))
+                .map(t => (
+                  <option key={t.id} value={t.id}>
+                    {data.units.find(u => u.id === t.unitId)?.unitNumber || "—"} — {t.name || "(no name on file)"}
+                  </option>
+                ))}
             </select>
-          </Field>
-          <Field label="Tenant">
-            {!form.unitId ? (
-              <div className="sheet-readonly" style={{ padding: "7px 9px", border: "1px solid var(--border)", borderRadius: 5, background: "#fff" }}>Pick an apt first</div>
-            ) : unitTenants.length === 0 ? (
-              <div className="sheet-readonly" style={{ padding: "7px 9px", border: "1px solid var(--border)", borderRadius: 5, background: "#fff", color: "var(--danger)" }}>No tenant on file for this apt — add them from the Buildings tab first</div>
-            ) : unitTenants.length === 1 ? (
-              <div className="sheet-readonly" style={{ padding: "7px 9px", border: "1px solid var(--border)", borderRadius: 5, background: "#fff" }}>{unitTenants[0].name}</div>
-            ) : (
-              <select value={form.tenantId} onChange={e => setForm({ ...form, tenantId: e.target.value })}>
-                <option value="">— multiple tenants on this apt, pick one —</option>
-                {unitTenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-            )}
           </Field>
           <Field label="Docket #"><input value={form.caseNumber} onChange={e => setForm({ ...form, caseNumber: e.target.value })} /></Field>
           <Field label="Where the case stands">
@@ -2380,8 +2445,7 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
             <button className="btn-ghost" onClick={() => setForm(null)}>Cancel</button>
           </div>
         </div>
-        );
-      })()}
+      )}
 
       {list.length === 0 && <EmptyState text={view === "active" ? "No open court cases." : "Nothing closed yet."} />}
       {list.map(c => {
@@ -2819,6 +2883,11 @@ function Styles() {
       .pill-warn { background: var(--warn-bg); color: var(--warn); }
       .pill-danger { background: var(--danger-bg); color: var(--danger); }
       .pill-accent { background: var(--navy); color: #fff; font-weight: 700; }
+      .violation-title-group { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      .violation-desc-preview {
+        font-size: 12px; color: var(--ink-soft); max-width: 420px;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
       .count-badge { background: var(--accent); color: #fff; font-size: 11px; padding: 1px 7px; border-radius: 10px; }
       .row { padding: 5px 0; font-size: 13px; }
       .row-muted { color: var(--ink-soft); }
@@ -2932,6 +3001,9 @@ function Styles() {
       }
       .sheet-input:focus { outline: 2px solid var(--navy); outline-offset: -2px; background: #fff; }
       .sheet-readonly { padding: 8px 10px; color: var(--ink-soft); font-size: 13px; }
+      .balance-input-wrap { position: relative; display: flex; align-items: center; }
+      .balance-dollar { position: absolute; left: 8px; color: var(--ink-soft); font-size: 13px; pointer-events: none; }
+      .balance-input { padding-left: 18px !important; width: 100%; }
       .sheet-status-ok { color: var(--ok); font-weight: 600; }
       .sheet-status-warn { color: var(--warn); font-weight: 600; }
       .sheet-status-danger { color: var(--danger); font-weight: 600; }
