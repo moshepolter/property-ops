@@ -14,7 +14,7 @@
     "papaparse": "^5.4.1",
     "lucide-react": "^0.383.0",
     "firebase": "^10.8.0",
-    "pdfjs-dist": "^4.0.379"
+    "pdfjs-dist": "4.0.379"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.1",
