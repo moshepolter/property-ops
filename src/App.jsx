@@ -736,7 +736,7 @@ export default function PropertyOpsApp() {
             ))}
           </nav>
           <main className="content">
-            {tab === "dashboard" && <Dashboard data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} />}
+            {tab === "dashboard" && <Dashboard data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} setData={setData} />}
             {tab === "buildings" && <BuildingsTab data={data} add={add} update={update} remove={remove} setData={setData} buildingName={buildingName} />}
             {tab === "rent" && <RentTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} unitLabel={unitLabel} setData={setData} />}
             {tab === "workorders" && <WorkOrdersTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} />}
@@ -809,7 +809,7 @@ const TAB_LABELS = {
   inspections: "Appointments", quicknotes: "Quick Notes",
 };
 
-function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey }) {
+function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, extraAction }) {
   const [open, setOpen] = useState(false);
   if (items.length === 0) return null;
   return (
@@ -826,18 +826,30 @@ function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey }
             <div className="followup-item" key={itemKey ? itemKey(it) : i}>{renderItem(it)}</div>
           ))}
           {items.length > 8 && <div className="hint" style={{ margin: "4px 0" }}>+ {items.length - 8} more</div>}
-          <button className="btn-ghost" style={{ marginTop: 8 }} onClick={() => setTab(tab)}>
-            View in {TAB_LABELS[tab] || tab}
-          </button>
+          <div className="row" style={{ marginTop: 8, gap: 8 }}>
+            <button className="btn-ghost" onClick={() => setTab(tab)}>
+              View in {TAB_LABELS[tab] || tab}
+            </button>
+            {extraAction}
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-function Dashboard({ data, buildingName, tenantName, setTab }) {
+function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const [rentPanelOpen, setRentPanelOpen] = useState(false);
   const [showAllOverdue, setShowAllOverdue] = useState(false);
+  const [confirmingCleanup, setConfirmingCleanup] = useState(false);
+
+  const cleanupAllEmptyUnits = () => {
+    setData(d => ({
+      ...d,
+      units: d.units.filter(u => d.tenants.some(t => t.unitId === u.id)),
+    }));
+    setConfirmingCleanup(false);
+  };
   const [monthsToShow, setMonthsToShow] = useState(1);
 
   // Tenants with a follow-up already scheduled show up under "to follow up" —
@@ -1021,6 +1033,17 @@ function Dashboard({ data, buildingName, tenantName, setTab }) {
                 <div className="followup-item-name">Unit {u.unitNumber || "—"} <span className="row-muted">— {buildingName(u.buildingId)}</span></div>
               </div>
             )}
+            extraAction={
+              confirmingCleanup ? (
+                <>
+                  <span className="row-muted" style={{ fontSize: 12 }}>Remove all {vacantUnits.length} empty units, across every building?</span>
+                  <button className="btn-primary" style={{ background: "var(--danger)", borderColor: "var(--danger)" }} onClick={cleanupAllEmptyUnits}>Yes, clean up</button>
+                  <button className="btn-ghost" onClick={() => setConfirmingCleanup(false)}>Cancel</button>
+                </>
+              ) : (
+                <button className="btn-primary" onClick={() => setConfirmingCleanup(true)}>Clean up all empty units</button>
+              )
+            }
           />
         </>
       )}
@@ -1868,7 +1891,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
         <h1 className="page-title">Work Orders</h1>
         <div className="page-actions">
           <PrintButton label="Work Orders" />
-          <button className="btn-primary" onClick={() => setForm({ buildingId: data.buildings[0]?.id || "", vendorId: "", description: "", status: "Open", priority: "Routine", dateOpened: todayISO() })}>
+          <button className="btn-primary" onClick={() => setForm({ buildingId: data.buildings[0]?.id || "", unitId: "", vendorId: "", description: "", status: "Open", priority: "Routine", dateOpened: todayISO() })}>
             <Plus size={14} /> Add work order
           </button>
         </div>
@@ -1882,9 +1905,15 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
       {form && (
         <div className="form-panel">
           <Field label="Building">
-            <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value })}>
+            <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value, unitId: "" })}>
               <option value="">—</option>
               {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
+            </select>
+          </Field>
+          <Field label="Apt # (optional)">
+            <select value={form.unitId || ""} onChange={e => setForm({ ...form, unitId: e.target.value })}>
+              <option value="">Whole building</option>
+              {data.units.filter(u => u.buildingId === form.buildingId).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber)).map(u => <option key={u.id} value={u.id}>{u.unitNumber}</option>)}
             </select>
           </Field>
           <Field label="Vendor">
@@ -1915,6 +1944,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
       {list.map(w => (
         <div className="list-card" key={w.id}>
           <div className="list-card-head">
+            {w.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === w.unitId)?.unitNumber || "—"}</span>}
             <div className="list-card-title">{w.description}</div>
             {w.priority !== "Routine" && <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span>}
             <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>
@@ -1951,7 +1981,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   };
 
   const blankForm = (a) => ({
-    buildingId: data.buildings[0]?.id || "", violationNumber: "",
+    buildingId: data.buildings[0]?.id || "", unitId: "", violationNumber: "",
     class: "", description: "", dateIssued: todayISO(), cureDeadline: "",
     fineAmount: "", company: "", otherAgency: otherAgencyOptions[0] || "",
     status: statusesFor(a)[0], vendorId: "",
@@ -2041,9 +2071,15 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
       {form && (
         <div className="form-panel">
           <Field label="Building">
-            <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value })}>
+            <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value, unitId: "" })}>
               <option value="">—</option>
               {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
+            </select>
+          </Field>
+          <Field label="Apt # (optional)">
+            <select value={form.unitId || ""} onChange={e => setForm({ ...form, unitId: e.target.value })}>
+              <option value="">Whole building</option>
+              {data.units.filter(u => u.buildingId === form.buildingId).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber)).map(u => <option key={u.id} value={u.id}>{u.unitNumber}</option>)}
             </select>
           </Field>
           <Field label="Violation #"><input value={form.violationNumber} onChange={e => setForm({ ...form, violationNumber: e.target.value })} /></Field>
@@ -2101,6 +2137,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           <div className={`list-card ${flag === "overdue" ? "list-card-danger" : flag === "soon" ? "list-card-warn" : ""}`} key={v.id}>
             <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : v.id)} style={{ cursor: "pointer" }}>
               {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              {v.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === v.unitId)?.unitNumber || "—"}</span>}
               <div className="list-card-title">#{v.violationNumber} {v.class && `· Class ${v.class}`}</div>
               <span className={`pill ${isClosed(v) ? "pill-ok" : "pill-muted"}`}>{v.status}</span>
               <span className="pill pill-muted">{buildingName(v.buildingId)}</span>
@@ -2232,7 +2269,7 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
     // item (both are on-screen at once) would silently revert that checklist change
     // back to whatever it was when this form was opened.
     const fields = {
-      tenantId: form.tenantId, buildingId: form.buildingId, caseNumber: form.caseNumber,
+      tenantId: form.tenantId, buildingId: form.buildingId, unitId: form.unitId, caseNumber: form.caseNumber,
       stage: form.stage, nextCourtDate: form.nextCourtDate, result: form.result,
       stipulationTerms: form.stipulationTerms || "", nextPaymentDue: form.nextPaymentDue || "",
     };
@@ -2243,6 +2280,10 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
     });
     setForm(null);
   };
+
+  // Old cases were saved before unitId existed — recover it from the tenant on
+  // file so editing an old case still starts from the right apt.
+  const openEdit = (c) => setForm({ ...c, unitId: c.unitId || data.tenants.find(t => t.id === c.tenantId)?.unitId || "" });
 
   const list = data.courtCases.filter(c => view === "closed" ? c.archived : !c.archived);
 
@@ -2267,7 +2308,7 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
         <h1 className="page-title">Court Cases</h1>
         <div className="page-actions">
           <PrintButton label="Court Cases" />
-          <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: CASE_STAGES[0], stipulationTerms: "", nextPaymentDue: "" })}>
+          <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", unitId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: CASE_STAGES[0], stipulationTerms: "", nextPaymentDue: "" })}>
             <Plus size={14} /> Add case
           </button>
         </div>
@@ -2277,21 +2318,41 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
         <button className={`chip ${view === "closed" ? "chip-active" : ""}`} onClick={() => setView("closed")}>Closed / Archived</button>
       </div>
 
-      {form && (
+      {form && (() => {
+        const unitTenants = data.tenants.filter(t => t.unitId === form.unitId);
+        return (
         <div className="form-panel">
-          <Field label="Tenant">
-            <select value={form.tenantId} onChange={e => {
-              const t = data.tenants.find(x => x.id === e.target.value);
-              setForm({ ...form, tenantId: e.target.value, buildingId: t ? t.buildingId : form.buildingId });
-            }}>
+          <Field label="Building">
+            <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value, unitId: "", tenantId: "" })}>
               <option value="">—</option>
-              {data.tenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
             </select>
           </Field>
-          <Field label="Building">
-            <div className="sheet-readonly" style={{ padding: "7px 9px", border: "1px solid var(--border)", borderRadius: 5, background: "#fff" }}>
-              {form.buildingId ? buildingName(form.buildingId) : "Pick a tenant first"}
-            </div>
+          <Field label="Apt #">
+            <select
+              value={form.unitId} disabled={!form.buildingId}
+              onChange={e => {
+                const tenantsHere = data.tenants.filter(t => t.unitId === e.target.value);
+                setForm({ ...form, unitId: e.target.value, tenantId: tenantsHere.length === 1 ? tenantsHere[0].id : "" });
+              }}
+            >
+              <option value="">{form.buildingId ? "—" : "Pick a building first"}</option>
+              {data.units.filter(u => u.buildingId === form.buildingId).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber)).map(u => <option key={u.id} value={u.id}>{u.unitNumber}</option>)}
+            </select>
+          </Field>
+          <Field label="Tenant">
+            {!form.unitId ? (
+              <div className="sheet-readonly" style={{ padding: "7px 9px", border: "1px solid var(--border)", borderRadius: 5, background: "#fff" }}>Pick an apt first</div>
+            ) : unitTenants.length === 0 ? (
+              <div className="sheet-readonly" style={{ padding: "7px 9px", border: "1px solid var(--border)", borderRadius: 5, background: "#fff", color: "var(--danger)" }}>No tenant on file for this apt — add them from the Buildings tab first</div>
+            ) : unitTenants.length === 1 ? (
+              <div className="sheet-readonly" style={{ padding: "7px 9px", border: "1px solid var(--border)", borderRadius: 5, background: "#fff" }}>{unitTenants[0].name}</div>
+            ) : (
+              <select value={form.tenantId} onChange={e => setForm({ ...form, tenantId: e.target.value })}>
+                <option value="">— multiple tenants on this apt, pick one —</option>
+                {unitTenants.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            )}
           </Field>
           <Field label="Docket #"><input value={form.caseNumber} onChange={e => setForm({ ...form, caseNumber: e.target.value })} /></Field>
           <Field label="Where the case stands">
@@ -2319,7 +2380,8 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
             <button className="btn-ghost" onClick={() => setForm(null)}>Cancel</button>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {list.length === 0 && <EmptyState text={view === "active" ? "No open court cases." : "Nothing closed yet."} />}
       {list.map(c => {
@@ -2327,13 +2389,14 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
         return (
         <div className="list-card" key={c.id}>
           <div className="list-card-head">
+            {c.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === c.unitId)?.unitNumber || "—"}</span>}
             <div className="list-card-title">{tenantName(c.tenantId)} {c.caseNumber && `· Docket #${c.caseNumber}`}</div>
             {c.stage && <span className="pill pill-muted">{c.stage}</span>}
             <span className="pill pill-muted">{c.result}</span>
             <span className="pill pill-muted">{buildingName(c.buildingId)}</span>
             {c.nextCourtDate && !c.archived && <Flag date={c.nextCourtDate} label="court date" />}
             <div className="spacer" />
-            <IconBtn title="Edit" onClick={() => setForm(c)}><Pencil size={14} /></IconBtn>
+            <IconBtn title="Edit" onClick={() => openEdit(c)}><Pencil size={14} /></IconBtn>
             {view === "closed"
               ? <IconBtn title="Restore to active" onClick={() => update("courtCases", c.id, { archived: false })}><ArchiveIcon size={14} /></IconBtn>
               : <IconBtn title="Move to closed" onClick={() => update("courtCases", c.id, { archived: true })}><ArchiveIcon size={14} /></IconBtn>}
@@ -2755,6 +2818,7 @@ function Styles() {
       .pill-ok { background: var(--ok-bg); color: var(--ok); }
       .pill-warn { background: var(--warn-bg); color: var(--warn); }
       .pill-danger { background: var(--danger-bg); color: var(--danger); }
+      .pill-accent { background: var(--navy); color: #fff; font-weight: 700; }
       .count-badge { background: var(--accent); color: #fff; font-size: 11px; padding: 1px 7px; border-radius: 10px; }
       .row { padding: 5px 0; font-size: 13px; }
       .row-muted { color: var(--ink-soft); }
