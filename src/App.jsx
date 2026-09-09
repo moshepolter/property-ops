@@ -12,12 +12,13 @@ import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from
 import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID",
+  apiKey: "AIzaSyA5Op33F-BQSfKVbe3zx3jlbfZdsCSWT2c",
+  authDomain: "management-board-cb4cc.firebaseapp.com",
+  projectId: "management-board-cb4cc",
+  storageBucket: "management-board-cb4cc.firebasestorage.app",
+  messagingSenderId: "179973991586",
+  appId: "1:179973991586:web:7a88edf20297671eb0bbfb",
+  measurementId: "G-ZNC3V3JXE2"
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
