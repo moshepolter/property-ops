@@ -204,9 +204,22 @@ function parseArrearsText(text) {
 function parseContactsText(text) {
   const headerRe = new RegExp(`^(${APT_RE})\\s+(.+)$`);
   const detailRe = /^(CELL|EMAIL ADDRESS|HOME|WORK|OTHER|FAX)\s*-\s*(.+)$/i;
+  // PDF text extraction can occasionally merge two visually separate lines into
+  // one (e.g. "A1 AUDREY LYNN MELENDEZ CELL - 917-388-5948"). Repair that by
+  // splitting on any of these labels found mid-line, not just at line start —
+  // this fixes it based on content rather than relying on layout/coordinates.
+  const labelSplitRe = /\s+(CELL|EMAIL ADDRESS|HOME|WORK|OTHER|FAX)\s*-\s*/gi;
+  const lines = [];
+  for (const raw of cleanLines(text)) {
+    const parts = raw.split(labelSplitRe);
+    if (parts.length === 1) { lines.push(raw); continue; }
+    if (parts[0].trim()) lines.push(parts[0].trim());
+    for (let i = 1; i < parts.length; i += 2) lines.push(`${parts[i]} - ${parts[i + 1]}`.trim());
+  }
+
   const out = [];
   let current = null;
-  for (const line of cleanLines(text)) {
+  for (const line of lines) {
     const detailMatch = line.match(detailRe);
     if (detailMatch && current) {
       const [, label, value] = detailMatch;
@@ -221,7 +234,7 @@ function parseContactsText(text) {
     }
   }
   if (current) out.push(current);
-  return out.filter(c => c.phone || c.email);
+  return out; // keep every detected apartment, even ones with no phone/email on file
 }
 
 // Building Directory: two apt/name pairs per line, best-effort split
@@ -893,6 +906,7 @@ function Dashboard({ data, buildingName, tenantName, setTab }) {
 function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
   const [form, setForm] = useState(null);
   const [expanded, setExpanded] = useState(null);
+  const [expandedUnit, setExpandedUnit] = useState(null);
   const [section, setSection] = useState("buildings");
   const fileRef = useRef(null);
 
@@ -997,11 +1011,36 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
             {expanded === b.id && (
               <div className="list-card-body">
                 {units.length === 0 && <div className="hint">No units added yet.</div>}
-                {units.map(u => {
+                {units.slice().sort((a, b2) => (a.unitNumber || "").localeCompare(b2.unitNumber || "")).map(u => {
                   const tenants = data.tenants.filter(t => t.unitId === u.id);
+                  const isOpen = expandedUnit === u.id;
                   return (
-                    <div key={u.id} className="row">
-                      Unit {u.unitNumber} — {tenants.map(t => t.name).join(", ") || "no tenant on file"}
+                    <div className="unit-block" key={u.id}>
+                      <button className="unit-row" onClick={() => setExpandedUnit(isOpen ? null : u.id)}>
+                        {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        <span className="unit-row-number">Unit {u.unitNumber}</span>
+                        <span className="unit-row-name">{tenants.map(t => t.name).filter(Boolean).join(", ") || "no tenant on file"}</span>
+                        {tenants[0]?.status && tenants[0].status !== "Current" && (
+                          <span className={`pill ${tenants[0].status === "Late" ? "pill-warn" : "pill-danger"}`}>{tenants[0].status}</span>
+                        )}
+                      </button>
+                      {isOpen && (
+                        <div className="unit-detail">
+                          {tenants.length === 0 && <div className="hint">No tenant on file for this unit yet.</div>}
+                          {tenants.map(t => (
+                            <div key={t.id} className="unit-detail-tenant">
+                              <div className="unit-detail-row"><strong>{t.name || "(no name on file)"}</strong></div>
+                              {t.phone && <div className="unit-detail-row">Phone: {t.phone}</div>}
+                              {t.email && <div className="unit-detail-row">Email: {t.email}</div>}
+                              <div className="unit-detail-row">Balance: {t.balance || "—"} · Status: <span className={`pill ${t.status === "Current" ? "pill-ok" : t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status || "Current"}</span></div>
+                              {t.followUpDate && <div className="unit-detail-row">Follow-up: {fmtDate(t.followUpDate)}{t.followUpNote ? ` — ${t.followUpNote}` : ""}</div>}
+                              {(Array.isArray(t.notes) ? t.notes : []).length > 0 && (
+                                <div className="unit-detail-row row-muted">Latest note: {t.notes[t.notes.length - 1].text}</div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -2412,6 +2451,19 @@ function Styles() {
       .doc-chip-name:hover { text-decoration: underline; }
       .doc-remove { background: none; border: none; color: var(--ink-soft); cursor: pointer; border-radius: 50%; display: flex; padding: 2px; }
       .doc-remove:hover { color: var(--danger); }
+      .unit-block { border-bottom: 1px solid var(--border); }
+      .unit-block:last-of-type { border-bottom: none; }
+      .unit-row {
+        display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+        background: none; border: none; padding: 8px 4px; cursor: pointer; font-family: inherit; font-size: 13px;
+      }
+      .unit-row:hover { background: #F0EEE7; }
+      .unit-row-number { font-weight: 600; flex-shrink: 0; }
+      .unit-row-name { color: var(--ink-soft); flex: 1; }
+      .unit-detail { padding: 4px 4px 12px 26px; }
+      .unit-detail-tenant { margin-bottom: 8px; }
+      .unit-detail-tenant:last-child { margin-bottom: 0; }
+      .unit-detail-row { font-size: 13px; padding: 2px 0; }
       .import-block { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 18px; }
       .import-block-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
       .import-block-title { font-family: Georgia, serif; font-size: 16px; font-weight: 600; margin-right: auto; }
