@@ -49,6 +49,16 @@ function compareUnits(a, b) {
   return an - bn;
 }
 
+// Full addresses ("333 OVINGTON AVENUE BROOKLYN, NEW YORK 11209") are useful in
+// the Buildings tab itself, but everywhere else a short form ("333 OVINGTON
+// AVENUE") is plenty and keeps rows/pills from getting cluttered.
+function shortAddress(address) {
+  if (!address) return "";
+  let s = address.replace(/,\s*[A-Za-z .]+\s+\d{5}(-\d{4})?\s*$/, "");
+  s = s.replace(/\s+(BROOKLYN|MANHATTAN|QUEENS|BRONX|STATEN ISLAND|NEW YORK)\s*$/i, "");
+  return s.trim() || address;
+}
+
 function filesToDataUrls(fileList) {
   const files = Array.from(fileList);
   return Promise.all(files.map(file => new Promise((resolve, reject) => {
@@ -130,6 +140,18 @@ function isInFollowUpWindow(dateStr) {
   const d = daysUntil(dateStr);
   if (d === null) return false;
   return d >= -7 && d <= 1;
+}
+// Tenants can now have several follow-ups instead of just one. Old records
+// only had followUpDate/followUpNote — read those in as a single-item list
+// so nothing already saved gets lost.
+function tenantFollowUps(t) {
+  if (Array.isArray(t.followUps)) return t.followUps;
+  if (t.followUpDate) return [{ id: "legacy", date: t.followUpDate, note: t.followUpNote || "" }];
+  return [];
+}
+function earliestFollowUpDate(t) {
+  const dates = tenantFollowUps(t).map(f => f.date).filter(Boolean).sort();
+  return dates[0] || null;
 }
 function icsFor(title, dateStr, notes, timeFrom, timeTo) {
   const dt = (dateStr || todayISO()).replace(/-/g, "");
@@ -573,6 +595,7 @@ export default function PropertyOpsApp() {
   const [navOpen, setNavOpen] = useState(false);
   const [pinUnlocked, setPinUnlocked] = useState(() => !localStorage.getItem(PIN_STORAGE_KEY));
   const [showPinSetup, setShowPinSetup] = useState(false);
+  const [saveError, setSaveError] = useState(false);
   const saveTimer = useRef(null);
 
   useEffect(() => onAuthStateChanged(auth, u => setUser(u || null)), []);
@@ -594,8 +617,18 @@ export default function PropertyOpsApp() {
     if (!loaded || !user) return;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
-      try { await setDoc(doc(db, "users", user.uid, "appData", "main"), data); }
-      catch (e) { console.error("save failed", e); }
+      try {
+        // Firestore rejects any field that's literally `undefined` (as opposed to
+        // just missing) and throws instead of saving anything. A JSON round-trip
+        // strips those out automatically so a stray undefined somewhere can never
+        // silently break autosave.
+        const safe = JSON.parse(JSON.stringify(data));
+        await setDoc(doc(db, "users", user.uid, "appData", "main"), safe);
+        setSaveError(false);
+      } catch (e) {
+        console.error("save failed", e);
+        setSaveError(true);
+      }
     }, 400);
     return () => clearTimeout(saveTimer.current);
   }, [data, loaded, user]);
@@ -605,7 +638,7 @@ export default function PropertyOpsApp() {
   const update = (col, id, patch) => setData(d => ({ ...d, [col]: d[col].map(x => x.id === id ? { ...x, ...patch } : x) }));
   const remove = (col, id) => setData(d => ({ ...d, [col]: d[col].filter(x => x.id !== id) }));
 
-  const buildingName = (id) => data.buildings.find(b => b.id === id)?.address || "—";
+  const buildingName = (id) => shortAddress(data.buildings.find(b => b.id === id)?.address) || "—";
   const unitLabel = (id) => { const u = data.units.find(x => x.id === id); return u ? u.unitNumber : "—"; };
   const vendorName = (id) => data.vendors.find(v => v.id === id)?.name || "—";
   const tenantName = (id) => data.tenants.find(t => t.id === id)?.name || "—";
@@ -680,6 +713,12 @@ export default function PropertyOpsApp() {
         </div>
       </header>
 
+      {saveError && (
+        <div className="save-error-banner no-print">
+          <AlertTriangle size={16} /> Couldn't save your last change — check your internet connection. Your edits are still here on screen, but won't be there if you close the tab until this clears.
+        </div>
+      )}
+
       {showPinSetup && (
         <PinSetupPanel onClose={() => setShowPinSetup(false)} />
       )}
@@ -728,7 +767,7 @@ function SearchResults({ results, buildingName, onClose }) {
       </div>
       {results.buildings.length > 0 && (
         <Section icon={<Building2 size={16} />} title="Buildings" count={results.buildings.length}>
-          {results.buildings.map(b => <div className="row" key={b.id}>{b.address}</div>)}
+          {results.buildings.map(b => <div className="row" key={b.id}>{shortAddress(b.address)}</div>)}
         </Section>
       )}
       {results.tenants.length > 0 && (
@@ -803,7 +842,7 @@ function Dashboard({ data, buildingName, tenantName, setTab }) {
 
   // Tenants with a follow-up already scheduled show up under "to follow up" —
   // no need to also flag them under "not current on rent", that's just noise.
-  const overdueTenants = data.tenants.filter(t => t.status !== "Current" && !t.followUpDate);
+  const overdueTenants = data.tenants.filter(t => t.status !== "Current" && tenantFollowUps(t).length === 0);
   const violationItems = data.violations.filter(v => !isViolationClosed(v) && flagFor(v.cureDeadline));
   const courtItems = data.courtCases.filter(c => !c.archived && flagFor(c.nextCourtDate));
   const stipItems = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && flagFor(c.nextPaymentDue));
@@ -811,11 +850,13 @@ function Dashboard({ data, buildingName, tenantName, setTab }) {
   const appointmentItems = data.appointments.filter(a => !a.completed && !a.recurring && flagFor(a.date));
   const quickNoteItems = data.quickNotes || [];
   const followUpCutoff = addMonths(todayISO(), monthsToShow);
-  const allFollowUps = data.tenants.filter(t => t.followUpDate).length;
-  const followUpTenants = data.tenants
-    .filter(t => t.followUpDate && t.followUpDate <= followUpCutoff)
-    .slice()
-    .sort((a, b) => a.followUpDate.localeCompare(b.followUpDate));
+  const tenantsWithFollowUps = data.tenants.filter(t => tenantFollowUps(t).length > 0);
+  const allFollowUps = tenantsWithFollowUps.length;
+  // Flatten to one row per (tenant, follow-up) pair, since a tenant can have several.
+  const followUpEntries = tenantsWithFollowUps
+    .flatMap(t => tenantFollowUps(t).map(f => ({ tenant: t, followUp: f })))
+    .filter(e => e.followUp.date && e.followUp.date <= followUpCutoff)
+    .sort((a, b) => (a.followUp.date || "").localeCompare(b.followUp.date || ""));
   const openViolations = data.violations.filter(v => !isViolationClosed(v)).length;
   const overdueShown = showAllOverdue ? overdueTenants : overdueTenants.slice(0, 5);
   const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id));
@@ -866,16 +907,16 @@ function Dashboard({ data, buildingName, tenantName, setTab }) {
                   {allFollowUps > 0 && (
                     <div className="followup-subsection">
                       <div className="followup-subsection-title">Tenants to follow up ({allFollowUps})</div>
-                      {followUpTenants.map(t => (
-                        <div className={`followup-item ${isInFollowUpWindow(t.followUpDate) ? "followup-item-due" : ""}`} key={t.id}>
-                          <span className="pill pill-muted">{fmtDate(t.followUpDate)}</span>
+                      {followUpEntries.map(({ tenant: t, followUp: f }) => (
+                        <div className={`followup-item ${isInFollowUpWindow(f.date) ? "followup-item-due" : ""}`} key={f.id}>
+                          <span className="pill pill-muted">{fmtDate(f.date)}</span>
                           <div className="followup-item-main">
                             <div className="followup-item-name">{t.name} <span className="row-muted">— {buildingName(t.buildingId)}</span></div>
-                            {t.followUpNote && <div className="followup-item-note">{t.followUpNote}</div>}
+                            {f.note && <div className="followup-item-note">{f.note}</div>}
                           </div>
                         </div>
                       ))}
-                      {followUpTenants.length < allFollowUps && (
+                      {followUpEntries.length < tenantsWithFollowUps.flatMap(t => tenantFollowUps(t)).length && (
                         <button className="btn-ghost" style={{ marginTop: 6 }} onClick={() => setMonthsToShow(m => m + 1)}>
                           Show next month
                         </button>
@@ -1002,7 +1043,7 @@ function Dashboard({ data, buildingName, tenantName, setTab }) {
             ].filter(Boolean);
             return (
               <div className="dash-building-card" key={b.id}>
-                <div className="dash-building-name">{b.address}</div>
+                <div className="dash-building-name">{shortAddress(b.address)}</div>
                 {chips.length === 0 ? (
                   <span className="dash-building-clear">All clear</span>
                 ) : (
@@ -1047,6 +1088,14 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
     }));
     setPendingDeleteUnit(null);
     setExpandedUnit(null);
+  };
+  const [pendingCleanup, setPendingCleanup] = useState(null);
+  const cleanupEmptyUnits = (buildingId) => {
+    setData(d => ({
+      ...d,
+      units: d.units.filter(u => u.buildingId !== buildingId || d.tenants.some(t => t.unitId === u.id)),
+    }));
+    setPendingCleanup(null);
   };
 
   const submit = () => {
@@ -1143,15 +1192,34 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
               {expanded === b.id ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
               <div className="list-card-title">{b.address}</div>
               <span className="pill pill-muted">{units.length} units</span>
+              {(() => {
+                const emptyCount = units.filter(u => !data.tenants.some(t => t.unitId === u.id)).length;
+                return emptyCount > 0 && <span className="pill pill-warn">{emptyCount} empty</span>;
+              })()}
               <div className="spacer" />
               {pendingDelete === b.id ? (
                 <>
-                  <span className="row-muted" style={{ fontSize: 12 }}>Delete building + {units.length} units + {data.tenants.filter(t => t.buildingId === b.id).length} tenants?</span>
+                  <span className="row-muted" style={{ fontSize: 12, color: data.tenants.some(t => t.buildingId === b.id && (data.courtCases || []).some(c => c.tenantId === t.id && !c.archived)) ? "var(--danger)" : undefined }}>
+                    Delete building + {units.length} units + {data.tenants.filter(t => t.buildingId === b.id).length} tenants
+                    {(() => {
+                      const n = data.tenants.filter(t => t.buildingId === b.id && (data.courtCases || []).some(c => c.tenantId === t.id && !c.archived)).length;
+                      return n > 0 ? ` — ${n} of them ${n === 1 ? "has" : "have"} an OPEN COURT CASE` : "";
+                    })()}?
+                  </span>
                   <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); deleteBuilding(b.id); }} style={{ color: "var(--danger)" }}>Yes, delete</button>
                   <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); setPendingDelete(null); }}>Cancel</button>
                 </>
+              ) : pendingCleanup === b.id ? (
+                <>
+                  <span className="row-muted" style={{ fontSize: 12 }}>Remove {units.filter(u => !data.tenants.some(t => t.unitId === u.id)).length} empty units from this building?</span>
+                  <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); cleanupEmptyUnits(b.id); }} style={{ color: "var(--danger)" }}>Yes, clean up</button>
+                  <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); setPendingCleanup(null); }}>Cancel</button>
+                </>
               ) : (
                 <>
+                  {units.some(u => !data.tenants.some(t => t.unitId === u.id)) && (
+                    <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); setPendingCleanup(b.id); }}>Clean up empty units</button>
+                  )}
                   <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(b); }}><Pencil size={14} /></IconBtn>
                   <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); setPendingDelete(b.id); }}><Trash2 size={14} /></IconBtn>
                 </>
@@ -1186,7 +1254,10 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                             />
                             {pendingDeleteUnit === u.id ? (
                               <>
-                                <span className="row-muted" style={{ fontSize: 12 }}>Delete unit{tenants.length > 0 ? ` + ${tenants.length} tenant(s)` : ""}?</span>
+                                <span className="row-muted" style={{ fontSize: 12, color: tenants.some(t => (data.courtCases || []).some(c => c.tenantId === t.id && !c.archived)) ? "var(--danger)" : undefined }}>
+                                  Delete unit{tenants.length > 0 ? ` + ${tenants.length} tenant(s)` : ""}
+                                  {tenants.some(t => (data.courtCases || []).some(c => c.tenantId === t.id && !c.archived)) ? " — has an OPEN COURT CASE" : ""}?
+                                </span>
                                 <button className="btn-ghost" onClick={() => deleteUnit(u.id)} style={{ color: "var(--danger)" }}>Yes, delete</button>
                                 <button className="btn-ghost" onClick={() => setPendingDeleteUnit(null)}>Cancel</button>
                               </>
@@ -1206,7 +1277,11 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                               {t.phone && <div className="unit-detail-row">Phone: {t.phone}</div>}
                               {t.email && <div className="unit-detail-row">Email: {t.email}</div>}
                               <div className="unit-detail-row">Balance: {t.balance || "—"} · Status: <span className={`pill ${t.status === "Current" ? "pill-ok" : t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status || "Current"}</span></div>
-                              {t.followUpDate && <div className="unit-detail-row">Follow-up: {fmtDate(t.followUpDate)}{t.followUpNote ? ` — ${t.followUpNote}` : ""}</div>}
+                              {tenantFollowUps(t).length > 0 && (
+                                <div className="unit-detail-row">
+                                  Follow-up{tenantFollowUps(t).length > 1 ? "s" : ""}: {tenantFollowUps(t).map(f => `${fmtDate(f.date)}${f.note ? ` — ${f.note}` : ""}`).join("; ")}
+                                </div>
+                              )}
                               {(Array.isArray(t.notes) ? t.notes : []).length > 0 && (
                                 <div className="unit-detail-row row-muted">Latest note: {t.notes[t.notes.length - 1].text}</div>
                               )}
@@ -1234,13 +1309,11 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
 /* ============================== rent collection ============================== */
 
 function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }) {
-  const [msgFor, setMsgFor] = useState(null);
-  const [msgText, setMsgText] = useState("");
   const [noteFor, setNoteFor] = useState(null);
   const [noteText, setNoteText] = useState("");
   const [followFor, setFollowFor] = useState(null);
-  const [followDate, setFollowDate] = useState("");
-  const [followNote, setFollowNote] = useState("");
+  const [newFollowDate, setNewFollowDate] = useState("");
+  const [newFollowNote, setNewFollowNote] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [buildingFilter, setBuildingFilter] = useState("All");
   const [section, setSection] = useState("sheet");
@@ -1254,7 +1327,7 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
   });
   const saveNewTenant = () => {
     if (!newTenant.buildingId || !newTenant.unitId) return;
-    add("tenants", { ...newTenant, email: "", notes: [], messageLog: [] });
+    add("tenants", { ...newTenant, email: "", notes: [], followUps: [] });
     setNewTenant(null);
   };
 
@@ -1267,7 +1340,7 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
       Balance: t.balance,
       Status: t.status,
       "Latest Note": notesArr(t).length ? notesArr(t)[notesArr(t).length - 1].text : "",
-      "Follow-up": t.followUpDate || "",
+      "Follow-ups": tenantFollowUps(t).map(f => f.date).join("; "),
     }));
     const csv = Papa.unparse(rows);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -1278,36 +1351,38 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
     URL.revokeObjectURL(url);
   };
 
-  const sendMsg = (tenantId) => {
-    if (!msgText.trim()) return;
-    const t = data.tenants.find(x => x.id === tenantId);
-    update("tenants", tenantId, { messageLog: [...(t.messageLog || []), { date: todayISO(), text: msgText }] });
-    setMsgText(""); setMsgFor(null);
+  // One combined log per tenant now — old data may still have a separate
+  // messageLog array from before; fold it in so nothing gets lost, but new
+  // entries only ever get added to "notes" going forward.
+  const notesArr = (t) => {
+    const n = Array.isArray(t.notes) ? t.notes : (t.notes ? [{ date: todayISO(), text: t.notes }] : []);
+    const m = Array.isArray(t.messageLog) ? t.messageLog : [];
+    return [...n, ...m].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
   };
-
-  const notesArr = (t) => Array.isArray(t.notes) ? t.notes : (t.notes ? [{ date: todayISO(), text: t.notes }] : []);
 
   const addNote = (tenantId) => {
     if (!noteText.trim()) return;
     const t = data.tenants.find(x => x.id === tenantId);
-    update("tenants", tenantId, { notes: [...notesArr(t), { date: todayISO(), text: noteText }] });
+    const existingNotes = Array.isArray(t.notes) ? t.notes : (t.notes ? [{ date: todayISO(), text: t.notes }] : []);
+    update("tenants", tenantId, { notes: [...existingNotes, { date: todayISO(), text: noteText }] });
     setNoteText(""); setNoteFor(null);
   };
 
-  const openFollow = (t) => {
-    setFollowDate(t.followUpDate || "");
-    setFollowNote(t.followUpNote || "");
-    setFollowFor(followFor === t.id ? null : t.id);
+  const addFollowUp = (tenantId) => {
+    if (!newFollowDate) return;
+    const t = data.tenants.find(x => x.id === tenantId);
+    update("tenants", tenantId, { followUps: [...tenantFollowUps(t), { id: uid(), date: newFollowDate, note: newFollowNote }] });
+    setNewFollowDate(""); setNewFollowNote("");
   };
-  const saveFollow = (tenantId) => {
-    update("tenants", tenantId, { followUpDate: followDate, followUpNote: followNote });
-    setFollowFor(null);
+  const removeFollowUp = (tenantId, followUpId) => {
+    const t = data.tenants.find(x => x.id === tenantId);
+    update("tenants", tenantId, { followUps: tenantFollowUps(t).filter(f => f.id !== followUpId) });
   };
 
   const byBuilding = t => buildingFilter === "All" || t.buildingId === buildingFilter;
   const unitOf = t => data.units.find(u => u.id === t.unitId)?.unitNumber || "";
   const visibleTenants = (statusFilter === "Follow-ups"
-    ? data.tenants.filter(t => t.followUpDate).slice().sort((a, b) => a.followUpDate.localeCompare(b.followUpDate))
+    ? data.tenants.filter(t => tenantFollowUps(t).length > 0).slice().sort((a, b) => (earliestFollowUpDate(a) || "").localeCompare(earliestFollowUpDate(b) || ""))
     : data.tenants.filter(t => statusFilter === "All" || t.status === statusFilter)
         .slice()
         .sort((a, b) => buildingName(a.buildingId).localeCompare(buildingName(b.buildingId)) || compareUnits(unitOf(a), unitOf(b)))
@@ -1338,7 +1413,7 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
           <Field label="Building">
             <select value={newTenant.buildingId} onChange={e => setNewTenant({ ...newTenant, buildingId: e.target.value, unitId: "" })}>
               <option value="">—</option>
-              {data.buildings.map(b => <option key={b.id} value={b.id}>{b.address}</option>)}
+              {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
             </select>
           </Field>
           <Field label="Unit">
@@ -1371,7 +1446,7 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
       <div className="filter-row">
         <button className={`chip ${buildingFilter === "All" ? "chip-active" : ""}`} onClick={() => setBuildingFilter("All")}>All buildings</button>
         {data.buildings.map(b => (
-          <button key={b.id} className={`chip ${buildingFilter === b.id ? "chip-active" : ""}`} onClick={() => setBuildingFilter(b.id)}>{b.address}</button>
+          <button key={b.id} className={`chip ${buildingFilter === b.id ? "chip-active" : ""}`} onClick={() => setBuildingFilter(b.id)}>{shortAddress(b.address)}</button>
         ))}
       </div>
 
@@ -1422,14 +1497,17 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
                       </button>
                     </td>
                     <td>
-                      <button className="sheet-follow-btn" onClick={() => openFollow(t)} title="Set a follow-up date">
+                      <button className="sheet-follow-btn" onClick={() => setFollowFor(followFor === t.id ? null : t.id)} title="Follow-ups">
                         <CalendarClock size={14} />
-                        {t.followUpDate && <span className="sheet-follow-date">{fmtDate(t.followUpDate)}</span>}
+                        {tenantFollowUps(t).length > 0 && (
+                          <span className="sheet-follow-date">
+                            {fmtDate(earliestFollowUpDate(t))}{tenantFollowUps(t).length > 1 ? ` +${tenantFollowUps(t).length - 1}` : ""}
+                          </span>
+                        )}
                       </button>
                     </td>
                     <td className="sheet-actions">
                       <IconBtn title="Notes" onClick={() => setNoteFor(noteFor === t.id ? null : t.id)}><Pencil size={14} /></IconBtn>
-                      <IconBtn title="Message log" onClick={() => setMsgFor(msgFor === t.id ? null : t.id)}><MessageSquare size={14} /></IconBtn>
                       <IconBtn title="Delete" danger onClick={() => {
                         if (inCourt(t.id) && !window.confirm(`${t.name || "This tenant"} has an open court case. Delete anyway? The case will stay but lose its link to this tenant.`)) return;
                         remove("tenants", t.id);
@@ -1439,13 +1517,19 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
                   {followFor === t.id && (
                     <tr className="sheet-expand-row">
                       <td colSpan={9}>
-                        <strong>Follow-up</strong>
+                        <strong>Follow-ups</strong>
                         <div className="inline-form">
-                          <input type="date" value={followDate} onChange={e => setFollowDate(e.target.value)} />
-                          <input placeholder="What's this follow-up about?" value={followNote} onChange={e => setFollowNote(e.target.value)} style={{ flex: 1 }} />
-                          <button className="btn-primary" onClick={() => saveFollow(t.id)}>Save</button>
-                          {t.followUpDate && <button className="btn-ghost" onClick={() => { setFollowDate(""); setFollowNote(""); update("tenants", t.id, { followUpDate: "", followUpNote: "" }); setFollowFor(null); }}>Clear</button>}
+                          <input type="date" value={newFollowDate} onChange={e => setNewFollowDate(e.target.value)} />
+                          <input placeholder="What's this follow-up about?" value={newFollowNote} onChange={e => setNewFollowNote(e.target.value)} style={{ flex: 1 }} />
+                          <button className="btn-primary" onClick={() => addFollowUp(t.id)}>Add follow-up</button>
                         </div>
+                        {tenantFollowUps(t).length === 0 && <div className="hint">No follow-ups yet.</div>}
+                        {tenantFollowUps(t).slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map((f) => (
+                          <div key={f.id} className="row row-muted" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span>{fmtDate(f.date)}{f.note ? ` — ${f.note}` : ""}</span>
+                            <button className="checklist-remove" onClick={() => removeFollowUp(t.id, f.id)} title="Remove"><X size={12} /></button>
+                          </div>
+                        ))}
                       </td>
                     </tr>
                   )}
@@ -1454,27 +1538,12 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
                       <td colSpan={9}>
                         <strong>Notes</strong>
                         <div className="inline-form">
-                          <input placeholder="Payment plans, disputes, promises to pay…" value={noteText} onChange={e => setNoteText(e.target.value)} onKeyDown={e => e.key === "Enter" && addNote(t.id)} />
+                          <input placeholder="Payment plans, disputes, calls, texts, anything…" value={noteText} onChange={e => setNoteText(e.target.value)} onKeyDown={e => e.key === "Enter" && addNote(t.id)} />
                           <button className="btn-primary" onClick={() => addNote(t.id)}>Add note</button>
                         </div>
                         {notesArr(t).length === 0 && <div className="hint">No notes yet.</div>}
                         {notesArr(t).slice().reverse().map((n, i) => (
                           <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
-                        ))}
-                      </td>
-                    </tr>
-                  )}
-                  {msgFor === t.id && (
-                    <tr className="sheet-expand-row">
-                      <td colSpan={9}>
-                        <strong>Message log</strong>
-                        <div className="inline-form">
-                          <input placeholder="What did you send / say?" value={msgText} onChange={e => setMsgText(e.target.value)} onKeyDown={e => e.key === "Enter" && sendMsg(t.id)} />
-                          <button className="btn-primary" onClick={() => sendMsg(t.id)}>Log it</button>
-                        </div>
-                        {(t.messageLog || []).length === 0 && <div className="hint">No messages logged yet.</div>}
-                        {(t.messageLog || []).slice().reverse().map((m, i) => (
-                          <div key={i} className="row row-muted">{fmtDate(m.date)} — {m.text}</div>
                         ))}
                       </td>
                     </tr>
@@ -1815,7 +1884,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
           <Field label="Building">
             <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value })}>
               <option value="">—</option>
-              {data.buildings.map(b => <option key={b.id} value={b.id}>{b.address}</option>)}
+              {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
             </select>
           </Field>
           <Field label="Vendor">
@@ -1974,7 +2043,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           <Field label="Building">
             <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value })}>
               <option value="">—</option>
-              {data.buildings.map(b => <option key={b.id} value={b.id}>{b.address}</option>)}
+              {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
             </select>
           </Field>
           <Field label="Violation #"><input value={form.violationNumber} onChange={e => setForm({ ...form, violationNumber: e.target.value })} /></Field>
@@ -2156,9 +2225,20 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
   const [detailsFor, setDetailsFor] = useState(null);
 
   const submit = () => {
-    if (form.id) update("courtCases", form.id, form);
+    if (!form.tenantId) return; // a case with no tenant is a silent data-quality trap
+    // Only patch the fields this form actually manages — checklist, documents, and
+    // archived get edited from their own controls elsewhere on the card, so if we
+    // sent the whole `form` object here, saving this form after toggling a checklist
+    // item (both are on-screen at once) would silently revert that checklist change
+    // back to whatever it was when this form was opened.
+    const fields = {
+      tenantId: form.tenantId, buildingId: form.buildingId, caseNumber: form.caseNumber,
+      stage: form.stage, nextCourtDate: form.nextCourtDate, result: form.result,
+      stipulationTerms: form.stipulationTerms || "", nextPaymentDue: form.nextPaymentDue || "",
+    };
+    if (form.id) update("courtCases", form.id, fields);
     else add("courtCases", {
-      ...form, archived: false, documents: [],
+      ...fields, archived: false, documents: [],
       checklist: DEFAULT_ATTORNEY_CHECKLIST.map(label => ({ id: uid(), label, checked: false })),
     });
     setForm(null);
@@ -2226,7 +2306,7 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
             </select>
           </Field>
           {form.result === "Adjourned / next date set" && (
-            <Field label="New court date"><input type="date" value={form.nextCourtDate} onChange={e => setForm({ ...form, nextCourtDate: e.target.value })} /></Field>
+            <p className="hint" style={{ gridColumn: "1 / -1", marginTop: -6 }}>Update the "Court date" field above to the new date.</p>
           )}
           {form.result === "Stipulation (payment plan)" && (
             <>
@@ -2235,7 +2315,7 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
             </>
           )}
           <div className="form-actions">
-            <button className="btn-primary" onClick={submit}>Save</button>
+            <button className="btn-primary" onClick={submit} disabled={!form.tenantId}>Save</button>
             <button className="btn-ghost" onClick={() => setForm(null)}>Cancel</button>
           </div>
         </div>
@@ -2288,7 +2368,7 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
                   onAdd={(newDocs) => update("courtCases", c.id, { documents: [...(c.documents || []), ...newDocs] })}
                   onRemove={(id) => update("courtCases", c.id, { documents: (c.documents || []).filter(d => d.id !== id) })}
                 />
-                <button className="btn-primary" style={{ marginTop: 10 }} onClick={() => setDetailsFor(null)}>Save</button>
+                <button className="btn-primary" style={{ marginTop: 10 }} onClick={() => setDetailsFor(null)}>Done</button>
               </>
             ) : (
               <button className="btn-ghost" onClick={() => setDetailsFor(c.id)}>
@@ -2347,7 +2427,7 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
           <Field label="Building">
             <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value, unitId: "" })}>
               <option value="">—</option>
-              {data.buildings.map(b => <option key={b.id} value={b.id}>{b.address}</option>)}
+              {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
             </select>
           </Field>
           <Field label="Unit (optional)">
@@ -2405,7 +2485,7 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
               {reminderHit && <span className="pill pill-warn">Reminder</span>}
               <div className="spacer" />
               {view === "upcoming" && (
-                <a className="btn-ghost" href={icsFor(`${a.type} — ${buildingName(a.buildingId)}`, a.date, a.notes, a.timeFrom, a.timeTo)} download={`${a.type.replace(/\s/g, "-")}.ics`}>
+                <a className="btn-ghost" href={icsFor(`${a.type} — ${buildingName(a.buildingId)}`, a.date, a.notes, a.timeFrom, a.timeTo)} download={`${(a.type || "appointment").replace(/\s/g, "-")}.ics`}>
                   <Download size={14} /> Add to calendar
                 </a>
               )}
@@ -2428,7 +2508,10 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
 function LocalLawsTab({ data, add, update, remove, buildingName }) {
   const [buildingId, setBuildingId] = useState(data.buildings[0]?.id || "");
 
-  useEffect(() => { if (!buildingId && data.buildings[0]) setBuildingId(data.buildings[0].id); }, [data.buildings]);
+  useEffect(() => {
+    if (data.buildings.length === 0) return;
+    if (!data.buildings.some(b => b.id === buildingId)) setBuildingId(data.buildings[0].id);
+  }, [data.buildings, buildingId]);
 
   const rowsFor = (bid) => LOCAL_LAWS.map(law => {
     const existing = data.localLaws.find(l => l.buildingId === bid && l.lawKey === law.key);
@@ -2451,7 +2534,7 @@ function LocalLawsTab({ data, add, update, remove, buildingName }) {
       </div>
       <div className="filter-row">
         {data.buildings.map(b => (
-          <button key={b.id} className={`chip ${buildingId === b.id ? "chip-active" : ""}`} onClick={() => setBuildingId(b.id)}>{b.address}</button>
+          <button key={b.id} className={`chip ${buildingId === b.id ? "chip-active" : ""}`} onClick={() => setBuildingId(b.id)}>{shortAddress(b.address)}</button>
         ))}
       </div>
       <div className="law-table">
@@ -2825,6 +2908,10 @@ function Styles() {
         .topbar { flex-wrap: wrap; }
         .search-wrap { order: 3; max-width: 100%; width: 100%; margin: 0; flex: 1 1 100%; }
         .brand-sub { display: none; }
+      }
+      .save-error-banner {
+        display: flex; align-items: center; gap: 8px; background: var(--danger-bg); color: var(--danger);
+        padding: 10px 20px; font-size: 13px; border-bottom: 1px solid var(--danger);
       }
       .login-shell {
         min-height: 100vh; display: flex; align-items: center; justify-content: center;
