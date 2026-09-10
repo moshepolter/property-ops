@@ -729,13 +729,13 @@ export default function PropertyOpsApp() {
           <button className="menu-btn" onClick={() => setNavOpen(o => !o)} title="Menu">
             <Menu size={18} />
           </button>
-          <div className="brand">
+          <button className="brand" onClick={() => setTab("dashboard")} title="Go to Dashboard">
             <div className="brand-mark">PO</div>
             <div>
               <div className="brand-title">Property Ops</div>
               <div className="brand-sub">{data.buildings.length} buildings tracked</div>
             </div>
-          </div>
+          </button>
         </div>
         <div className="search-wrap">
           <Search size={16} className="search-icon" />
@@ -1150,7 +1150,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
               <button className="followup-panel-head" onClick={() => setRentPanelOpen(o => !o)}>
                 <Users size={18} className="attention-icon" style={{ color: "var(--danger)" }} />
                 <span className="attention-count">{rentPanelCount}</span>
-                <span className="attention-label">Tenants not current on rent / Tenants to follow up</span>
+                <span className="attention-label">Tenants not current on rent / Tenants to follow up <span className="dash-panel-sub">(follow-ups show once due)</span></span>
                 {rentPanelOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
               </button>
               {rentPanelOpen && (
@@ -1196,7 +1196,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label="HPD violations due or overdue" items={hpdDue} tab="violations" setTab={setTab}
+            label={<>HPD violations due or overdue <span className="dash-panel-sub">(within 10 days)</span></>} items={hpdDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1210,7 +1210,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label="DOB violations due or overdue" items={dobDue} tab="violations" setTab={setTab}
+            label={<>DOB violations due or overdue <span className="dash-panel-sub">(within 10 days)</span></>} items={dobDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1224,7 +1224,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label="FDNY violations due or overdue" items={fdnyDue} tab="violations" setTab={setTab}
+            label={<>FDNY violations due or overdue <span className="dash-panel-sub">(within 10 days)</span></>} items={fdnyDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1238,7 +1238,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label="Other violations due or overdue (DSNY, ECB, DEP, etc.)" items={otherViolationsDue} tab="violations" setTab={setTab}
+            label={<>Other violations due or overdue (DSNY, ECB, DEP, etc.) <span className="dash-panel-sub">(within 10 days)</span></>} items={otherViolationsDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1252,7 +1252,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<Gavel size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label="Court dates due or overdue" items={courtItems} tab="court" setTab={setTab}
+            label={<>Court dates due or overdue <span className="dash-panel-sub">(within 7 days)</span></>} items={courtItems} tab="court" setTab={setTab}
             itemKey={c => c.id}
             renderItem={c => (
               <>
@@ -1266,7 +1266,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<Gavel size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label="Stipulation payments due" items={stipItems} tab="court" setTab={setTab}
+            label={<>Stipulation payments due <span className="dash-panel-sub">(within 7 days)</span></>} items={stipItems} tab="court" setTab={setTab}
             itemKey={c => c.id}
             renderItem={c => (
               <>
@@ -1281,7 +1281,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<CalendarClock size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label="Recurring inspections due or overdue" items={recurringItems} tab="inspections" setTab={setTab}
+            label={<>Recurring inspections due or overdue <span className="dash-panel-sub">(within 7 days)</span></>} items={recurringItems} tab="inspections" setTab={setTab}
             itemKey={a => a.id}
             renderItem={a => (
               <>
@@ -1295,7 +1295,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<CalendarClock size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label="Appointments coming up" items={appointmentItems} tab="inspections" setTab={setTab}
+            label={<>Appointments coming up <span className="dash-panel-sub">(within 7 days)</span></>} items={appointmentItems} tab="inspections" setTab={setTab}
             itemKey={a => a.id}
             renderItem={a => (
               <>
@@ -1309,7 +1309,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<Pencil size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label="Quick notes to organize" items={quickNoteItems} tab="quicknotes" setTab={setTab}
+            label={<>Quick notes to organize <span className="dash-panel-sub">(shows once due, or always if no reminder set)</span></>} items={quickNoteItems} tab="quicknotes" setTab={setTab}
             itemKey={n => n.id}
             renderItem={n => (
               <div className="followup-item-main">
@@ -1321,7 +1321,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<MessageSquare size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label="Boss reminders" items={bossReminderItems} tab="reminders" setTab={setTab}
+            label={<>Boss reminders <span className="dash-panel-sub">(shows until checked off)</span></>} items={bossReminderItems} tab="reminders" setTab={setTab}
             itemKey={r => r.id}
             renderItem={r => (
               <div className="followup-item-main">
@@ -1333,7 +1333,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<Home size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label="Units with no tenant on file (vacant or a data gap)" items={vacantUnits} tab="buildings" setTab={setTab}
+            label={<>Units with no tenant on file <span className="dash-panel-sub">(vacant or a data gap)</span></>} items={vacantUnits} tab="buildings" setTab={setTab}
             itemKey={u => u.id}
             renderItem={u => (
               <div className="followup-item-main">
@@ -1429,7 +1429,17 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
 function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
   const [form, setForm] = useState(null);
-  const [expanded, setExpanded] = useState(null);
+  // Buildings default to expanded (showing their unit list) — track which ones
+  // have been explicitly collapsed instead of which are open, so anything new
+  // (or anything the user hasn't touched) shows up neat and open by default.
+  const [collapsedIds, setCollapsedIds] = useState(new Set());
+  const toggleExpanded = (id) => {
+    setCollapsedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
   const [expandedUnit, setExpandedUnit] = useState(null);
   const [section, setSection] = useState("buildings");
   const [pendingDelete, setPendingDelete] = useState(null);
@@ -1553,8 +1563,8 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
         const units = data.units.filter(u => u.buildingId === b.id);
         return (
           <div className="list-card" key={b.id}>
-            <div className="list-card-head" onClick={() => setExpanded(expanded === b.id ? null : b.id)}>
-              {expanded === b.id ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            <div className="list-card-head" onClick={() => toggleExpanded(b.id)}>
+              {!collapsedIds.has(b.id) ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
               <div className="list-card-title">{b.address}</div>
               <span className="pill pill-muted">{units.length} units</span>
               {(() => {
@@ -1590,7 +1600,7 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                 </>
               )}
             </div>
-            {expanded === b.id && (
+            {!collapsedIds.has(b.id) && (
               <div className="list-card-body">
                 {units.length === 0 && <div className="hint">No units added yet.</div>}
                 {units.slice().sort((a, b2) => compareUnits(a.unitNumber, b2.unitNumber)).map(u => {
@@ -3036,14 +3046,14 @@ function RemindersTab({ data, add, update, remove }) {
 
 /* ============================== quick notes ============================== */
 
-function QuickNotesTab({ data, add, update, remove, buildingName, setTab }) {
+function QuickNotesTab({ data, add, update, remove, buildingName }) {
   const [text, setText] = useState("");
   const [reminderDate, setReminderDate] = useState("");
   const [buildingId, setBuildingId] = useState("");
   const [editingId, setEditingId] = useState(null);
   const [editText, setEditText] = useState("");
   const [showDone, setShowDone] = useState(false);
-  const [showAllFollowUps, setShowAllFollowUps] = useState(false);
+  const [showAllReminders, setShowAllReminders] = useState(false);
 
   const submit = () => {
     if (!text.trim()) return;
@@ -3057,15 +3067,38 @@ function QuickNotesTab({ data, add, update, remove, buildingName, setTab }) {
     setEditingId(null);
   };
 
-  const allNotes = (data.quickNotes || []).slice().reverse();
-  const notes = showDone ? allNotes : allNotes.filter(n => !n.done);
-
   const today = todayISO();
-  const allFollowUpEntries = data.tenants
-    .flatMap(t => tenantFollowUps(t).map(f => ({ tenant: t, followUp: f })))
-    .filter(e => e.followUp.date)
-    .sort((a, b) => (a.followUp.date || "").localeCompare(b.followUp.date || ""));
-  const followUpsToShow = showAllFollowUps ? allFollowUpEntries : allFollowUpEntries.filter(e => e.followUp.date <= today);
+  const allNotes = (data.quickNotes || []).slice().reverse();
+  // Notes = the plain checklist (no reminder date). Reminders = notes that DO have
+  // a reminder date, shown separately, and only once due unless "All upcoming" is picked.
+  const plainNotes = (showDone ? allNotes : allNotes.filter(n => !n.done)).filter(n => !n.reminderDate);
+  const allReminders = (data.quickNotes || []).filter(n => n.reminderDate).sort((a, b) => a.reminderDate.localeCompare(b.reminderDate));
+  const remindersToShow = (showAllReminders ? allReminders : allReminders.filter(n => n.reminderDate <= today)).filter(n => showDone || !n.done);
+
+  const NoteRow = (n) => (
+    <div className="list-card" key={n.id}>
+      <div className="list-card-head">
+        <input type="checkbox" checked={!!n.done} onChange={e => update("quickNotes", n.id, { done: e.target.checked })} />
+        {editingId === n.id ? (
+          <>
+            <input className="sheet-input" style={{ flex: 1, border: "1px solid var(--border)", borderRadius: 4 }} value={editText} onChange={e => setEditText(e.target.value)} onKeyDown={e => e.key === "Enter" && saveEdit(n.id)} autoFocus />
+            <button className="btn-primary" onClick={() => saveEdit(n.id)}>Save</button>
+            <button className="btn-ghost" onClick={() => setEditingId(null)}>Cancel</button>
+          </>
+        ) : (
+          <>
+            <div className={`list-card-title ${n.done ? "strike" : ""}`}>{n.text}</div>
+            {n.reminderDate && <span className="pill pill-warn">Reminder: {fmtDate(n.reminderDate)}</span>}
+            {n.buildingId && <span className="pill pill-muted">{buildingName(n.buildingId)}</span>}
+            <span className="pill pill-muted">{fmtDate(n.date)}</span>
+            <div className="spacer" />
+            <IconBtn title="Edit" onClick={() => startEdit(n)}><Pencil size={14} /></IconBtn>
+            <IconBtn title="Delete" danger onClick={() => remove("quickNotes", n.id)}><Trash2 size={14} /></IconBtn>
+          </>
+        )}
+      </div>
+    </div>
+  );
 
   return (
     <div>
@@ -3074,11 +3107,11 @@ function QuickNotesTab({ data, add, update, remove, buildingName, setTab }) {
         <PrintButton label="Quick Notes" />
       </div>
 
-      <h2 className="section-heading">Quick notes</h2>
-      <p className="hint">A checklist for anything you need to jot down fast — check it off when it's handled, optionally set a reminder date, and tie it to a building if it's related to one. A note with a reminder date stays off the Dashboard until that date arrives.</p>
+      <h2 className="section-heading">Notes</h2>
+      <p className="hint">A checklist for anything you need to jot down fast — check it off when it's handled, and tie it to a building if it's related to one.</p>
       <div className="form-panel">
         <Field label="Note"><input placeholder="Jot something down…" value={text} onChange={e => setText(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} /></Field>
-        <Field label="Reminder date (optional)"><input type="date" value={reminderDate} onChange={e => setReminderDate(e.target.value)} /></Field>
+        <Field label="Reminder date (optional — makes this a Reminder instead)"><input type="date" value={reminderDate} onChange={e => setReminderDate(e.target.value)} /></Field>
         <Field label="Building (optional)">
           <select value={buildingId} onChange={e => setBuildingId(e.target.value)}>
             <option value="">—</option>
@@ -3093,52 +3126,17 @@ function QuickNotesTab({ data, add, update, remove, buildingName, setTab }) {
         <button className={`chip ${!showDone ? "chip-active" : ""}`} onClick={() => setShowDone(false)}>Open</button>
         <button className={`chip ${showDone ? "chip-active" : ""}`} onClick={() => setShowDone(true)}>All (incl. checked off)</button>
       </div>
-      {notes.length === 0 && <EmptyState text="Nothing here." />}
-      {notes.map(n => (
-        <div className="list-card" key={n.id}>
-          <div className="list-card-head">
-            <input type="checkbox" checked={!!n.done} onChange={e => update("quickNotes", n.id, { done: e.target.checked })} />
-            {editingId === n.id ? (
-              <>
-                <input className="sheet-input" style={{ flex: 1, border: "1px solid var(--border)", borderRadius: 4 }} value={editText} onChange={e => setEditText(e.target.value)} onKeyDown={e => e.key === "Enter" && saveEdit(n.id)} autoFocus />
-                <button className="btn-primary" onClick={() => saveEdit(n.id)}>Save</button>
-                <button className="btn-ghost" onClick={() => setEditingId(null)}>Cancel</button>
-              </>
-            ) : (
-              <>
-                <div className={`list-card-title ${n.done ? "strike" : ""}`}>{n.text}</div>
-                {n.reminderDate && <span className="pill pill-warn">Reminder: {fmtDate(n.reminderDate)}</span>}
-                {n.buildingId && <span className="pill pill-muted">{buildingName(n.buildingId)}</span>}
-                <span className="pill pill-muted">{fmtDate(n.date)}</span>
-                <div className="spacer" />
-                <IconBtn title="Edit" onClick={() => startEdit(n)}><Pencil size={14} /></IconBtn>
-                <IconBtn title="Delete" danger onClick={() => remove("quickNotes", n.id)}><Trash2 size={14} /></IconBtn>
-              </>
-            )}
-          </div>
-        </div>
-      ))}
+      {plainNotes.length === 0 && <EmptyState text="Nothing here." />}
+      {plainNotes.map(NoteRow)}
 
-      <h2 className="section-heading" style={{ marginTop: 28 }}>Follow-ups</h2>
-      <p className="hint">Tenant follow-ups set from Rent Collection. Only shows up here (and on the Dashboard) once due — edit or add follow-ups from the tenant's row in Rent Collection.</p>
+      <h2 className="section-heading" style={{ marginTop: 28 }}>Reminders <span className="dash-panel-sub">— notes with a date, shown once due</span></h2>
+      <p className="hint">Same checklist as above, just for anything you gave a reminder date. Stays off this list and the Dashboard until that date arrives.</p>
       <div className="filter-row">
-        <button className={`chip ${!showAllFollowUps ? "chip-active" : ""}`} onClick={() => setShowAllFollowUps(false)}>Due now</button>
-        <button className={`chip ${showAllFollowUps ? "chip-active" : ""}`} onClick={() => setShowAllFollowUps(true)}>All upcoming</button>
-        <button className="btn-ghost" onClick={() => setTab("rent")}>View in Rent Collection</button>
+        <button className={`chip ${!showAllReminders ? "chip-active" : ""}`} onClick={() => setShowAllReminders(false)}>Due now</button>
+        <button className={`chip ${showAllReminders ? "chip-active" : ""}`} onClick={() => setShowAllReminders(true)}>All upcoming</button>
       </div>
-      {followUpsToShow.length === 0 && <EmptyState text={showAllFollowUps ? "No follow-ups scheduled." : "Nothing due yet."} />}
-      {followUpsToShow.map(({ tenant: t, followUp: f }) => (
-        <div className="list-card" key={f.id}>
-          <div className="list-card-head">
-            <div className="list-card-title">{t.name}</div>
-            <span className="pill pill-muted">{buildingName(t.buildingId)}</span>
-            <span className={`pill ${f.date <= today ? "pill-warn" : "pill-muted"}`}>{fmtDate(f.date)}</span>
-            {f.note && <span className="row-muted" style={{ fontSize: 13 }}>{f.note}</span>}
-            <div className="spacer" />
-            <button className="btn-ghost" onClick={() => setTab("rent")}>Open</button>
-          </div>
-        </div>
-      ))}
+      {remindersToShow.length === 0 && <EmptyState text={showAllReminders ? "No reminders set." : "Nothing due yet."} />}
+      {remindersToShow.map(NoteRow)}
     </div>
   );
 }
@@ -3187,7 +3185,7 @@ function Styles() {
         border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0;
       }
       .menu-btn:hover { background: rgba(255,255,255,0.2); }
-      .brand { display: flex; align-items: center; gap: 10px; }
+      .brand { display: flex; align-items: center; gap: 10px; background: none; border: none; padding: 0; cursor: pointer; text-align: left; font: inherit; color: inherit; }
       .brand-mark {
         width: 34px; height: 34px; border-radius: 6px; background: var(--accent);
         display: flex; align-items: center; justify-content: center;
@@ -3359,6 +3357,7 @@ function Styles() {
       .attention-icon { flex-shrink: 0; }
       .attention-count { font-family: Georgia, serif; font-size: 17px; margin-right: 2px; }
       .attention-label { font-size: 13px; color: var(--ink-soft); flex: 1; }
+      .dash-panel-sub { font-size: 11px; color: var(--ink-soft); font-weight: 400; text-transform: none; letter-spacing: normal; }
       .all-clear {
         display: flex; align-items: center; gap: 10px; background: var(--ok-bg); color: var(--ok);
         border-radius: 8px; padding: 16px; font-size: 13px; margin-bottom: 24px;
