@@ -1163,40 +1163,108 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const rosterEntries = followUpEntries.slice(0, 8);
 
   const exportAllData = () => {
-    const buildingMap = Object.fromEntries(data.buildings.map(b => [b.id, b.address]));
+    const buildingMap = Object.fromEntries(data.buildings.map(b => [b.id, shortAddress(b.address)]));
     const unitMap = Object.fromEntries(data.units.map(u => [u.id, u.unitNumber]));
     const tenantMap = Object.fromEntries(data.tenants.map(t => [t.id, t.name]));
     const vendorMap = Object.fromEntries(data.vendors.map(v => [v.id, v.name]));
-
-    // Excel cells can't hold nested arrays/objects (notes, follow-ups, photos,
-    // checklists) — stringify those so nothing gets lost, and add resolved
-    // building/unit/tenant/vendor names alongside the raw ids so the sheet is
-    // actually readable, not just a restore file.
-    const flatten = (records, extra) => (records || []).map(r => {
-      const row = { ...r, ...(extra ? extra(r) : {}) };
-      Object.keys(row).forEach(k => {
-        if (Array.isArray(row[k]) || (row[k] && typeof row[k] === "object")) row[k] = JSON.stringify(row[k]);
-      });
-      return row;
-    });
+    const lawNameMap = Object.fromEntries(LOCAL_LAWS.map(l => [l.key, l.name]));
 
     const wb = XLSX.utils.book_new();
-    const addSheet = (name, records) => {
-      const ws = XLSX.utils.json_to_sheet(records.length ? records : [{}]);
+    const addSheet = (name, rows) => {
+      const ws = XLSX.utils.json_to_sheet(rows.length ? rows : [{}]);
       XLSX.utils.book_append_sheet(wb, ws, name.slice(0, 31));
     };
 
-    addSheet("Buildings", flatten(data.buildings));
-    addSheet("Units", flatten(data.units, u => ({ buildingAddress: buildingMap[u.buildingId] || "" })));
-    addSheet("Tenants", flatten(data.tenants, t => ({ buildingAddress: buildingMap[t.buildingId] || "", unitNumber: unitMap[t.unitId] || "" })));
-    addSheet("Violations", flatten(data.violations, v => ({ buildingAddress: buildingMap[v.buildingId] || "", unitNumber: unitMap[v.unitId] || "", vendorName: vendorMap[v.vendorId] || "" })));
-    addSheet("Work Orders", flatten(data.workOrders, w => ({ buildingAddress: buildingMap[w.buildingId] || "", unitNumber: unitMap[w.unitId] || "", vendorName: vendorMap[w.vendorId] || "" })));
-    addSheet("Court Cases", flatten(data.courtCases, c => ({ buildingAddress: buildingMap[c.buildingId] || "", unitNumber: unitMap[c.unitId] || "", tenantName: tenantMap[c.tenantId] || "" })));
-    addSheet("Appointments", flatten(data.appointments, a => ({ buildingAddress: buildingMap[a.buildingId] || "", unitNumber: unitMap[a.unitId] || "" })));
-    addSheet("Vendors", flatten(data.vendors));
-    addSheet("Local Laws", flatten(data.localLaws, l => ({ buildingAddress: buildingMap[l.buildingId] || "" })));
-    addSheet("Boss Reminders", flatten(data.bossReminders));
-    addSheet("Quick Notes", flatten(data.quickNotes, n => ({ buildingAddress: n.buildingId ? (buildingMap[n.buildingId] || "") : "" })));
+    // Building + unit + tenant + the numbers all live on one sheet — no separate
+    // Buildings/Units tabs, and no internal ids anywhere, just what's on screen.
+    addSheet("Tenants", data.tenants.map(t => ({
+      Building: buildingMap[t.buildingId] || "",
+      Unit: unitMap[t.unitId] || "",
+      Tenant: t.name || "",
+      Phone: t.phone || "",
+      Email: t.email || "",
+      Balance: t.balance || "",
+      Status: t.status || "",
+      "Latest Note": Array.isArray(t.notes) && t.notes.length ? t.notes[t.notes.length - 1].text : "",
+      "Next Follow-up": (() => { const d = earliestFollowUpDate(t); return d ? fmtDate(d) : ""; })(),
+    })));
+
+    addSheet("Violations", data.violations.map(v => ({
+      Building: buildingMap[v.buildingId] || "",
+      Unit: unitMap[v.unitId] || "",
+      Agency: v.agency === "Other" ? (v.otherAgency || "Other") : v.agency,
+      "Violation #": v.violationNumber || "",
+      Class: v.class || "",
+      Description: v.description || "",
+      "Cure Deadline": v.cureDeadline ? fmtDate(v.cureDeadline) : "",
+      "Fine Amount": v.fineAmount || "",
+      Company: v.company || "",
+      Status: v.status || "",
+      Vendor: vendorMap[v.vendorId] || "",
+    })));
+
+    addSheet("Work Orders", data.workOrders.map(w => ({
+      Building: buildingMap[w.buildingId] || "",
+      Unit: unitMap[w.unitId] || "",
+      Description: w.description || "",
+      Priority: w.priority || "",
+      Status: w.status || "",
+      Vendor: vendorMap[w.vendorId] || "",
+      "Date Opened": w.dateOpened ? fmtDate(w.dateOpened) : "",
+    })));
+
+    addSheet("Court Cases", data.courtCases.map(c => ({
+      Building: buildingMap[c.buildingId] || "",
+      Unit: unitMap[c.unitId] || "",
+      Tenant: tenantMap[c.tenantId] || "",
+      "Docket #": c.caseNumber || "",
+      Stage: c.stage || "",
+      "Court Date": c.nextCourtDate ? fmtDate(c.nextCourtDate) : "",
+      Result: c.result || "",
+      "Stipulation Terms": c.stipulationTerms || "",
+      "Next Payment Due": c.nextPaymentDue ? fmtDate(c.nextPaymentDue) : "",
+      Status: c.archived ? "Closed" : "Active",
+    })));
+
+    addSheet("Appointments", data.appointments.map(a => ({
+      Building: buildingMap[a.buildingId] || "",
+      Unit: unitMap[a.unitId] || "",
+      Type: a.type || "",
+      Date: a.date ? fmtDate(a.date) : "",
+      "Time From": a.timeFrom || "",
+      "Time To": a.timeTo || "",
+      Recurring: a.recurring ? "Yes" : "No",
+      Completed: a.completed ? "Yes" : "No",
+      Notes: a.notes || "",
+    })));
+
+    addSheet("Vendors", data.vendors.map(v => ({
+      Name: v.name || "",
+      Specialty: v.specialty || "",
+      Phone: v.phone || "",
+      Email: v.email || "",
+    })));
+
+    addSheet("Local Laws", data.localLaws.map(l => ({
+      Building: buildingMap[l.buildingId] || "",
+      Law: lawNameMap[l.lawKey] || l.lawKey || "",
+      Deadline: l.deadline ? fmtDate(l.deadline) : "",
+      Status: l.status || "",
+    })));
+
+    addSheet("Boss Reminders", data.bossReminders.map(r => ({
+      Text: r.text || "",
+      "Date Raised": r.dateRaised ? fmtDate(r.dateRaised) : "",
+      Status: r.status || "",
+    })));
+
+    addSheet("Quick Notes", (data.quickNotes || []).map(n => ({
+      Text: n.text || "",
+      Date: n.date ? fmtDate(n.date) : "",
+      "Reminder Date": n.reminderDate ? fmtDate(n.reminderDate) : "",
+      Building: n.buildingId ? (buildingMap[n.buildingId] || "") : "",
+      Done: n.done ? "Yes" : "No",
+    })));
 
     XLSX.writeFile(wb, `property-ops-backup-${today}.xlsx`);
   };
