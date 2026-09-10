@@ -260,23 +260,27 @@ function parseContactsText(text) {
   const cleaned = cleanLines(text).join(" ");
   const LABELS = "(?:CELL|EMAIL ADDRESS|HOME|WORK|OTHER|FAX)";
   // Some buildings also have commercial/storefront units identified by a bare
-  // number (no letter prefix, e.g. "9516 JH ORGANIC INC."). Support both forms,
-  // but require the numeric form to have a real name after it — otherwise a
-  // phone number written with spaces instead of dashes ("718 833 3607 FAX")
-  // can look just like a 4-digit unit code.
-  const NEXT_HEADER = `(?:${APT_RE}|\\d{4})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
+  // number (no letter prefix, e.g. "9516 JH ORGANIC INC."), and others use
+  // digit-then-letter codes ("1B", "2BB") instead of letter-then-digit. Support
+  // all three, but require the numeric/digit-first forms to have a real name
+  // after them — otherwise a phone number written with spaces instead of dashes
+  // ("718 833 3607 FAX") can look just like a unit code.
+  const ALT_APT_RE = "\\d{1,2}[A-Z]{1,2}";
+  const NEXT_HEADER = `(?:${APT_RE}|\\d{4}|${ALT_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
   const headerRe = new RegExp(
     `(?:^|\\s)(?:` +
       `(${APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]*?)` +
       `|` +
       `(\\d{4})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]+?)` +
+      `|` +
+      `(${ALT_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]*?)` +
     `)(?=\\s+${LABELS}\\b|\\s+${NEXT_HEADER}|$)`,
     "g"
   );
   const headers = [];
   let m;
   while ((m = headerRe.exec(cleaned))) {
-    headers.push({ apt: m[1] || m[3], name: (m[2] || m[4] || "").trim(), start: m.index, end: m.index + m[0].length });
+    headers.push({ apt: m[1] || m[3] || m[5], name: (m[2] || m[4] || m[6] || "").trim(), start: m.index, end: m.index + m[0].length });
   }
 
   const phoneRe = /\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}/;
@@ -866,6 +870,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const [rentPanelOpen, setRentPanelOpen] = useState(false);
   const [showAllOverdue, setShowAllOverdue] = useState(false);
   const [confirmingCleanup, setConfirmingCleanup] = useState(false);
+  const [expandedBuilding, setExpandedBuilding] = useState(null);
 
   const cleanupAllEmptyUnits = () => {
     setData(d => ({
@@ -889,6 +894,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const recurringItems = data.appointments.filter(a => !a.completed && a.recurring && flagFor(a.date));
   const appointmentItems = data.appointments.filter(a => !a.completed && !a.recurring && flagFor(a.date));
   const quickNoteItems = data.quickNotes || [];
+  const bossReminderItems = data.bossReminders.filter(r => r.status !== "Done");
   const followUpCutoff = addMonths(todayISO(), monthsToShow);
   const tenantsWithFollowUps = data.tenants.filter(t => tenantFollowUps(t).length > 0);
   const allFollowUps = tenantsWithFollowUps.length;
@@ -902,7 +908,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id));
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
-  const totalAttention = rentPanelCount + violationItems.length + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + hpdDue10.length + dobDue10.length + fdnyDue10.length;
+  const totalAttention = rentPanelCount + violationItems.length + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + hpdDue10.length + dobDue10.length + fdnyDue10.length + bossReminderItems.length;
 
   // Anything due TODAY is urgent enough that it shouldn't need a click to see —
   // pull every type of due-date item (follow-up, violation, court date, payment,
@@ -1140,6 +1146,18 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
           />
 
           <AttentionPanel
+            icon={<MessageSquare size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
+            label="Boss reminders" items={bossReminderItems} tab="reminders" setTab={setTab}
+            itemKey={r => r.id}
+            renderItem={r => (
+              <div className="followup-item-main">
+                <div className="followup-item-name">{r.text}</div>
+                <div className="followup-item-note">{fmtDate(r.dateRaised)}</div>
+              </div>
+            )}
+          />
+
+          <AttentionPanel
             icon={<Home size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
             label="Units with no tenant on file (vacant or a data gap)" items={vacantUnits} tab="buildings" setTab={setTab}
             itemKey={u => u.id}
@@ -1169,24 +1187,57 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
       ) : (
         <div className="dash-grid">
           {data.buildings.map(b => {
-            const bViolations = data.violations.filter(v => v.buildingId === b.id && !isViolationClosed(v)).length;
-            const bTenantsLate = data.tenants.filter(t => t.buildingId === b.id && t.status !== "Current").length;
-            const bWO = data.workOrders.filter(w => w.buildingId === b.id && w.status !== "Done").length;
-            const bCourt = data.courtCases.filter(c => c.buildingId === b.id && !c.archived).length;
+            const bViolationsList = data.violations.filter(v => v.buildingId === b.id && !isViolationClosed(v));
+            const bTenantsLateList = data.tenants.filter(t => t.buildingId === b.id && t.status !== "Current");
+            const bWOList = data.workOrders.filter(w => w.buildingId === b.id && w.status !== "Done");
+            const bCourtList = data.courtCases.filter(c => c.buildingId === b.id && !c.archived);
             const chips = [
-              bViolations > 0 && { text: `${bViolations} open violations`, tone: "warn" },
-              bTenantsLate > 0 && { text: `${bTenantsLate} tenants behind`, tone: "danger" },
-              bWO > 0 && { text: `${bWO} open work orders`, tone: "muted" },
-              bCourt > 0 && { text: `${bCourt} open cases`, tone: "danger" },
+              bViolationsList.length > 0 && { text: `${bViolationsList.length} open violations`, tone: "warn" },
+              bTenantsLateList.length > 0 && { text: `${bTenantsLateList.length} tenants behind`, tone: "danger" },
+              bWOList.length > 0 && { text: `${bWOList.length} open work orders`, tone: "muted" },
+              bCourtList.length > 0 && { text: `${bCourtList.length} open cases`, tone: "danger" },
             ].filter(Boolean);
+            const isExpanded = expandedBuilding === b.id;
             return (
-              <div className="dash-building-card" key={b.id}>
-                <div className="dash-building-name">{shortAddress(b.address)}</div>
+              <div className={`dash-building-card ${chips.length > 0 ? "dash-building-clickable" : ""}`} key={b.id}
+                onClick={() => chips.length > 0 && setExpandedBuilding(isExpanded ? null : b.id)}>
+                <div className="dash-building-name">
+                  {shortAddress(b.address)}
+                  {chips.length > 0 && (isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />)}
+                </div>
                 {chips.length === 0 ? (
                   <span className="dash-building-clear">All clear</span>
                 ) : (
                   <div className="dash-building-chips">
                     {chips.map((c, i) => <span key={i} className={`pill pill-${c.tone}`}>{c.text}</span>)}
+                  </div>
+                )}
+                {isExpanded && (
+                  <div className="dash-building-detail">
+                    {bTenantsLateList.map(t => (
+                      <button key={t.id} className="dash-detail-item" onClick={(e) => { e.stopPropagation(); setTab("rent"); }}>
+                        <span className="pill pill-danger">{t.status}</span>
+                        <div className="followup-item-main"><div className="followup-item-name">{t.name}{t.balance ? ` — $${t.balance}` : ""}</div></div>
+                      </button>
+                    ))}
+                    {bViolationsList.map(v => (
+                      <button key={v.id} className="dash-detail-item" onClick={(e) => { e.stopPropagation(); setTab("violations"); }}>
+                        <span className="pill pill-warn">{v.agency}</span>
+                        <div className="followup-item-main"><div className="followup-item-name">#{v.violationNumber}{v.cureDeadline ? ` — cure by ${fmtDate(v.cureDeadline)}` : ""}</div></div>
+                      </button>
+                    ))}
+                    {bCourtList.map(c => (
+                      <button key={c.id} className="dash-detail-item" onClick={(e) => { e.stopPropagation(); setTab("court"); }}>
+                        <span className="pill pill-danger">Court</span>
+                        <div className="followup-item-main"><div className="followup-item-name">{tenantName(c.tenantId)}{c.nextCourtDate ? ` — ${fmtDate(c.nextCourtDate)}` : ""}</div></div>
+                      </button>
+                    ))}
+                    {bWOList.map(w => (
+                      <button key={w.id} className="dash-detail-item" onClick={(e) => { e.stopPropagation(); setTab("workorders"); }}>
+                        <span className="pill pill-muted">{w.status}</span>
+                        <div className="followup-item-main"><div className="followup-item-name">{w.description}</div></div>
+                      </button>
+                    ))}
                   </div>
                 )}
               </div>
@@ -2755,11 +2806,19 @@ function LocalLawsTab({ data, add, update, remove, buildingName }) {
 
 function RemindersTab({ data, add, update, remove }) {
   const [text, setText] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editText, setEditText] = useState("");
 
   const submit = () => {
     if (!text.trim()) return;
     add("bossReminders", { text, dateRaised: todayISO(), status: "Open" });
     setText("");
+  };
+  const startEdit = (r) => { setEditingId(r.id); setEditText(r.text); };
+  const saveEdit = (id) => {
+    if (!editText.trim()) return;
+    update("bossReminders", id, { text: editText });
+    setEditingId(null);
   };
 
   return (
@@ -2777,10 +2836,21 @@ function RemindersTab({ data, add, update, remove }) {
         <div className="list-card" key={r.id}>
           <div className="list-card-head">
             <input type="checkbox" checked={r.status === "Done"} onChange={e => update("bossReminders", r.id, { status: e.target.checked ? "Done" : "Open" })} />
-            <div className={`list-card-title ${r.status === "Done" ? "strike" : ""}`}>{r.text}</div>
-            <span className="pill pill-muted">{fmtDate(r.dateRaised)}</span>
-            <div className="spacer" />
-            <IconBtn title="Delete" danger onClick={() => remove("bossReminders", r.id)}><Trash2 size={14} /></IconBtn>
+            {editingId === r.id ? (
+              <>
+                <input className="sheet-input" style={{ flex: 1, border: "1px solid var(--border)", borderRadius: 4 }} value={editText} onChange={e => setEditText(e.target.value)} onKeyDown={e => e.key === "Enter" && saveEdit(r.id)} autoFocus />
+                <button className="btn-primary" onClick={() => saveEdit(r.id)}>Save</button>
+                <button className="btn-ghost" onClick={() => setEditingId(null)}>Cancel</button>
+              </>
+            ) : (
+              <>
+                <div className={`list-card-title ${r.status === "Done" ? "strike" : ""}`}>{r.text}</div>
+                <span className="pill pill-muted">{fmtDate(r.dateRaised)}</span>
+                <div className="spacer" />
+                <IconBtn title="Edit" onClick={() => startEdit(r)}><Pencil size={14} /></IconBtn>
+                <IconBtn title="Delete" danger onClick={() => remove("bossReminders", r.id)}><Trash2 size={14} /></IconBtn>
+              </>
+            )}
           </div>
         </div>
       ))}
@@ -3049,7 +3119,16 @@ function Styles() {
       }
       .dash-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
       .dash-building-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
-      .dash-building-name { font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+      .dash-building-clickable { cursor: pointer; }
+      .dash-building-clickable:hover { border-color: var(--navy); }
+      .dash-building-name { display: flex; align-items: center; gap: 6px; justify-content: space-between; font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+      .dash-building-detail { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+      .dash-detail-item {
+        display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+        background: #fff; border: 1px solid var(--border); border-radius: 6px;
+        padding: 7px 10px; cursor: pointer; font: inherit;
+      }
+      .dash-detail-item:hover { background: var(--bg); border-color: var(--navy); }
       .dash-building-chips { display: flex; flex-wrap: wrap; gap: 6px; }
       .dash-building-clear { font-size: 12px; color: var(--ok); }
 
