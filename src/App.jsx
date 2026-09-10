@@ -267,7 +267,7 @@ function parseContactsText(text) {
   const NEXT_HEADER = `(?:${APT_RE}|\\d{4})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
   const headerRe = new RegExp(
     `(?:^|\\s)(?:` +
-      `(${APT_RE})\\s+((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]*?)` +
+      `(${APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]*?)` +
       `|` +
       `(\\d{4})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]+?)` +
     `)(?=\\s+${LABELS}\\b|\\s+${NEXT_HEADER}|$)`,
