@@ -49,6 +49,13 @@ function compareUnits(a, b) {
   return an - bn;
 }
 
+// Used anywhere a unit picker needs to show who lives there, not just the bare
+// apt number — makes it obvious at a glance which apt you're actually picking.
+function unitOptionLabel(unit, allTenants) {
+  const names = allTenants.filter(t => t.unitId === unit.id).map(t => t.name).filter(Boolean);
+  return names.length ? `${unit.unitNumber} — ${names.join(" & ")}` : `${unit.unitNumber} (no tenant on file)`;
+}
+
 // Full addresses ("333 OVINGTON AVENUE BROOKLYN, NEW YORK 11209") are useful in
 // the Buildings tab itself, but everywhere else a short form ("333 OVINGTON
 // AVENUE") is plenty and keeps rows/pills from getting cluttered.
@@ -2014,7 +2021,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
           <Field label="Apt # (optional)">
             <select value={form.unitId || ""} onChange={e => setForm({ ...form, unitId: e.target.value })}>
               <option value="">Whole building</option>
-              {data.units.filter(u => u.buildingId === form.buildingId).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber)).map(u => <option key={u.id} value={u.id}>{u.unitNumber}</option>)}
+              {data.units.filter(u => u.buildingId === form.buildingId).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber)).map(u => <option key={u.id} value={u.id}>{unitOptionLabel(u, data.tenants)}</option>)}
             </select>
           </Field>
           <Field label="Vendor">
@@ -2193,7 +2200,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           <Field label="Apt # (optional)">
             <select value={form.unitId || ""} onChange={e => setForm({ ...form, unitId: e.target.value })}>
               <option value="">Whole building</option>
-              {data.units.filter(u => u.buildingId === form.buildingId).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber)).map(u => <option key={u.id} value={u.id}>{u.unitNumber}</option>)}
+              {data.units.filter(u => u.buildingId === form.buildingId).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber)).map(u => <option key={u.id} value={u.id}>{unitOptionLabel(u, data.tenants)}</option>)}
             </select>
           </Field>
           <Field label="Violation #"><input value={form.violationNumber} onChange={e => setForm({ ...form, violationNumber: e.target.value })} /></Field>
@@ -2605,7 +2612,7 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
           <Field label="Unit (optional)">
             <select value={form.unitId} onChange={e => setForm({ ...form, unitId: e.target.value })}>
               <option value="">General / whole building</option>
-              {data.units.filter(u => u.buildingId === form.buildingId).map(u => <option key={u.id} value={u.id}>Unit {u.unitNumber}</option>)}
+              {data.units.filter(u => u.buildingId === form.buildingId).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber)).map(u => <option key={u.id} value={u.id}>{unitOptionLabel(u, data.tenants)}</option>)}
             </select>
           </Field>
           <Field label="Type">
