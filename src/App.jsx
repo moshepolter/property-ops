@@ -854,7 +854,7 @@ const TAB_LABELS = {
 };
 
 function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, extraAction }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   if (items.length === 0) return null;
   return (
     <div className="followup-panel">
@@ -1042,7 +1042,7 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
 }
 
 function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
-  const [rentPanelOpen, setRentPanelOpen] = useState(true);
+  const [rentPanelOpen, setRentPanelOpen] = useState(false);
   const [showAllOverdue, setShowAllOverdue] = useState(false);
   const [confirmingCleanup, setConfirmingCleanup] = useState(false);
   const [expandedBuilding, setExpandedBuilding] = useState(null);
