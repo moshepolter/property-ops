@@ -158,7 +158,12 @@ function isInFollowUpWindow(dateStr) {
 // so nothing already saved gets lost.
 function tenantFollowUps(t) {
   if (Array.isArray(t.followUps)) return t.followUps;
-  if (t.followUpDate) return [{ id: "legacy", date: t.followUpDate, note: t.followUpNote || "" }];
+  // Every tenant on the old single-follow-up format used to get the exact same
+  // literal id "legacy" here — harmless for one tenant, but the instant a SECOND
+  // tenant also had an old-format follow-up, every list keyed by that id (Due
+  // Today, the follow-up panel, the calendar) would collide and silently drop
+  // or misrender one of them. Tie the id to the tenant so it's always unique.
+  if (t.followUpDate) return [{ id: `legacy-${t.id}`, date: t.followUpDate, note: t.followUpNote || "" }];
   return [];
 }
 function earliestFollowUpDate(t) {
@@ -873,85 +878,158 @@ function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, 
 
 // Pulls together everything due on one specific date, across every part of the
 // app, so the dashboard calendar can show a single day view of it all.
-function itemsForDate(data, dateStr, tenantName, buildingName) {
+// Pulls together every dated item across the whole app — no single-date filter,
+// so nothing (overdue included) can silently fall outside a visible window.
+function allDatedItems(data, tenantName, buildingName) {
   const items = [];
   data.violations.forEach(v => {
-    if (v.cureDeadline === dateStr && !isViolationClosed(v)) {
-      items.push({ key: `v-${v.id}`, type: `${v.agency} cure deadline`, label: `#${v.violationNumber}`, sub: buildingName(v.buildingId), tab: "violations" });
+    if (v.cureDeadline && !isViolationClosed(v)) {
+      items.push({ key: `v-${v.id}`, date: v.cureDeadline, type: `${v.agency} cure deadline`, label: `#${v.violationNumber}`, sub: buildingName(v.buildingId), tab: "violations" });
     }
   });
   data.courtCases.forEach(c => {
     if (c.archived) return;
-    if (c.nextCourtDate === dateStr) items.push({ key: `c-${c.id}`, type: "Court date", label: tenantName(c.tenantId), sub: buildingName(c.buildingId), tab: "court" });
-    if (c.result === "Stipulation (payment plan)" && c.nextPaymentDue === dateStr) items.push({ key: `p-${c.id}`, type: "Payment due", label: tenantName(c.tenantId), sub: buildingName(c.buildingId), tab: "court" });
+    if (c.nextCourtDate) items.push({ key: `c-${c.id}`, date: c.nextCourtDate, type: "Court date", label: tenantName(c.tenantId), sub: buildingName(c.buildingId), tab: "court" });
+    if (c.result === "Stipulation (payment plan)" && c.nextPaymentDue) items.push({ key: `p-${c.id}`, date: c.nextPaymentDue, type: "Payment due", label: tenantName(c.tenantId), sub: buildingName(c.buildingId), tab: "court" });
   });
   data.appointments.forEach(a => {
-    if (!a.completed && a.date === dateStr) {
-      items.push({ key: `a-${a.id}`, type: a.recurring ? "Recurring appointment" : "Appointment", label: a.type, sub: buildingName(a.buildingId), tab: "inspections" });
+    if (!a.completed && a.date) {
+      items.push({ key: `a-${a.id}`, date: a.date, type: a.recurring ? "Recurring appointment" : "Appointment", label: a.type, sub: buildingName(a.buildingId), tab: "inspections" });
     }
   });
   data.tenants.forEach(t => {
     tenantFollowUps(t).forEach(f => {
-      if (f.date === dateStr) items.push({ key: `f-${f.id}`, type: "Follow-up", label: t.name, sub: buildingName(t.buildingId), note: f.note, tab: "rent" });
+      if (f.date) items.push({ key: `f-${f.id}`, date: f.date, type: "Follow-up", label: t.name, sub: buildingName(t.buildingId), note: f.note, tab: "rent" });
     });
   });
   (data.quickNotes || []).forEach(n => {
-    if (n.reminderDate === dateStr && !n.done) {
-      items.push({ key: `n-${n.id}`, type: "Reminder", label: n.text, sub: n.buildingId ? buildingName(n.buildingId) : "", tab: "quicknotes" });
+    if (n.reminderDate && !n.done) {
+      items.push({ key: `n-${n.id}`, date: n.reminderDate, type: "Reminder", label: n.text, sub: n.buildingId ? buildingName(n.buildingId) : "", tab: "quicknotes" });
     }
   });
   return items;
 }
 
+function monthGridDays(refDate) {
+  const d = new Date(refDate + "T00:00:00");
+  const firstOfMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+  const gridStart = new Date(firstOfMonth);
+  gridStart.setDate(gridStart.getDate() - firstOfMonth.getDay());
+  return Array.from({ length: 42 }, (_, i) => {
+    const cell = new Date(gridStart);
+    cell.setDate(cell.getDate() + i);
+    return cell.toISOString().slice(0, 10);
+  });
+}
+
 function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
-  const [startOffset, setStartOffset] = useState(0);
-  const [selectedDate, setSelectedDate] = useState(todayISO());
+  const [viewMode, setViewMode] = useState("day"); // day | week | month | year
+  const [refDate, setRefDate] = useState(todayISO());
+  const [showingOverdue, setShowingOverdue] = useState(false);
   const today = todayISO();
 
-  const days = Array.from({ length: 7 }, (_, i) => addDays(today, startOffset + i));
-  const selectedItems = itemsForDate(data, selectedDate, tenantName, buildingName);
+  const all = allDatedItems(data, tenantName, buildingName);
+  const itemsByDate = {};
+  all.forEach(i => { (itemsByDate[i.date] = itemsByDate[i.date] || []).push(i); });
+  const overdueItems = all.filter(i => i.date < today).sort((a, b) => a.date.localeCompare(b.date));
+
+  const shift = (n) => {
+    setShowingOverdue(false);
+    if (viewMode === "day") setRefDate(d => addDays(d, n));
+    else if (viewMode === "week") setRefDate(d => addDays(d, n * 7));
+    else if (viewMode === "month") setRefDate(d => addMonths(d, n));
+    else setRefDate(d => addMonths(d, n * 12));
+  };
+  const pickDate = (d) => { setRefDate(d); setShowingOverdue(false); };
+
+  const weekDays = Array.from({ length: 7 }, (_, i) => addDays(addDays(refDate, -new Date(refDate + "T00:00:00").getDay()), i));
+  const monthDays = monthGridDays(refDate);
+  const monthLabel = new Date(refDate + "T00:00:00").toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  const yearNum = new Date(refDate + "T00:00:00").getFullYear();
+  const monthCounts = Array.from({ length: 12 }, (_, m) => {
+    const prefix = `${yearNum}-${String(m + 1).padStart(2, "0")}`;
+    return all.filter(i => i.date.startsWith(prefix)).length;
+  });
+
+  const selectedItems = showingOverdue ? overdueItems : (itemsByDate[refDate] || []);
+  const selectedLabel = showingOverdue
+    ? `Overdue (${overdueItems.length})`
+    : (refDate === today ? "Today" : new Date(refDate + "T00:00:00").toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" }));
+
+  const Row = (item) => (
+    <button key={item.key} className="dash-detail-item" onClick={() => setTab(item.tab)}>
+      <span className="pill pill-danger">{item.type}</span>
+      <div className="followup-item-main">
+        <div className="followup-item-name">{item.label}{item.sub ? <span className="row-muted"> — {item.sub}</span> : null}</div>
+        {item.note && <div className="followup-item-note">{item.note}</div>}
+      </div>
+    </button>
+  );
 
   return (
-    <div className="dash-calendar">
+    <div className="dash-calendar dash-calendar-compact">
       <div className="dash-calendar-head">
-        <button className="icon-btn" onClick={() => setStartOffset(o => o - 7)} title="Previous week"><ChevronLeft size={16} /></button>
-        <span className="dash-calendar-title">Calendar</span>
-        <button className="icon-btn" onClick={() => setStartOffset(o => o + 7)} title="Next week"><ChevronRight size={16} /></button>
-        {(startOffset !== 0 || selectedDate !== today) && (
-          <button className="btn-ghost" onClick={() => { setStartOffset(0); setSelectedDate(today); }}>Today</button>
+        <button className="icon-btn" onClick={() => shift(-1)}><ChevronLeft size={15} /></button>
+        <span className="dash-calendar-title">
+          {viewMode === "month" ? monthLabel : viewMode === "year" ? yearNum : viewMode === "week" ? `Week of ${fmtDate(weekDays[0])}` : new Date(refDate + "T00:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+        </span>
+        <button className="icon-btn" onClick={() => shift(1)}><ChevronRight size={15} /></button>
+        <div className="spacer" />
+        {overdueItems.length > 0 && (
+          <button className={`chip dash-cal-overdue-chip ${showingOverdue ? "chip-active" : ""}`} onClick={() => setShowingOverdue(s => !s)}>
+            {overdueItems.length} overdue
+          </button>
         )}
       </div>
-      <div className="dash-calendar-days">
-        {days.map(d => {
-          const count = itemsForDate(data, d, tenantName, buildingName).length;
-          const dateObj = new Date(d + "T00:00:00");
-          return (
-            <button
-              key={d}
-              className={`dash-calendar-day ${d === selectedDate ? "dash-calendar-day-selected" : ""} ${d === today ? "dash-calendar-day-today" : ""}`}
-              onClick={() => setSelectedDate(d)}
-            >
-              <div className="dash-calendar-day-label">{dateObj.toLocaleDateString("en-US", { weekday: "short" })}</div>
-              <div className="dash-calendar-day-num">{dateObj.getDate()}</div>
-              {count > 0 && <span className="dash-calendar-day-count">{count}</span>}
-            </button>
-          );
-        })}
+
+      <div className="filter-row dash-cal-modes">
+        {["day", "week", "month", "year"].map(m => (
+          <button key={m} className={`chip ${viewMode === m ? "chip-active" : ""}`} onClick={() => { setViewMode(m); setShowingOverdue(false); }}>{m[0].toUpperCase() + m.slice(1)}</button>
+        ))}
+        {refDate !== today && <button className="btn-ghost" onClick={() => pickDate(today)}>Today</button>}
       </div>
-      <div className="dash-calendar-detail">
-        {selectedItems.length === 0 ? (
-          <div className="hint">Nothing due {selectedDate === today ? "today" : `on ${fmtDate(selectedDate)}`}.</div>
-        ) : (
-          selectedItems.map(item => (
-            <button key={item.key} className="dash-detail-item" onClick={() => setTab(item.tab)}>
-              <span className="pill pill-danger">{item.type}</span>
-              <div className="followup-item-main">
-                <div className="followup-item-name">{item.label}{item.sub ? <span className="row-muted"> — {item.sub}</span> : null}</div>
-                {item.note && <div className="followup-item-note">{item.note}</div>}
-              </div>
+
+      {viewMode === "week" && (
+        <div className="dash-cal-week">
+          {weekDays.map(d => (
+            <button key={d} className={`dash-cal-cell ${d === refDate ? "dash-cal-cell-selected" : ""} ${d === today ? "dash-cal-cell-today" : ""}`} onClick={() => pickDate(d)}>
+              <div className="dash-cal-cell-label">{new Date(d + "T00:00:00").toLocaleDateString("en-US", { weekday: "short" })}</div>
+              <div className="dash-cal-cell-num">{new Date(d + "T00:00:00").getDate()}</div>
+              {(itemsByDate[d] || []).length > 0 && <span className="dash-cal-dot" />}
             </button>
-          ))
-        )}
+          ))}
+        </div>
+      )}
+
+      {viewMode === "month" && (
+        <div className="dash-cal-month">
+          {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => <div key={i} className="dash-cal-month-dow">{d}</div>)}
+          {monthDays.map(d => {
+            const inMonth = d.slice(0, 7) === refDate.slice(0, 7);
+            return (
+              <button key={d} className={`dash-cal-cell dash-cal-cell-sm ${d === refDate ? "dash-cal-cell-selected" : ""} ${d === today ? "dash-cal-cell-today" : ""} ${!inMonth ? "dash-cal-cell-dim" : ""}`} onClick={() => pickDate(d)}>
+                <div className="dash-cal-cell-num">{new Date(d + "T00:00:00").getDate()}</div>
+                {(itemsByDate[d] || []).length > 0 && <span className="dash-cal-dot" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {viewMode === "year" && (
+        <div className="dash-cal-year">
+          {Array.from({ length: 12 }, (_, m) => (
+            <button key={m} className="dash-cal-month-cell" onClick={() => { setViewMode("month"); setRefDate(`${yearNum}-${String(m + 1).padStart(2, "0")}-01`); }}>
+              <div>{new Date(yearNum, m, 1).toLocaleDateString("en-US", { month: "short" })}</div>
+              {monthCounts[m] > 0 && <span className="dash-cal-dot" />}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="dash-cal-section">
+        <div className={`dash-cal-section-title ${showingOverdue ? "dash-cal-overdue" : ""}`}>{selectedLabel}</div>
+        {selectedItems.length === 0 ? <div className="hint">Nothing here.</div> : selectedItems.map(Row)}
       </div>
     </div>
   );
@@ -975,11 +1053,15 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   // Tenants with a follow-up already scheduled show up under "to follow up" —
   // no need to also flag them under "not current on rent", that's just noise.
   const overdueTenants = data.tenants.filter(t => t.status !== "Current" && tenantFollowUps(t).length === 0);
-  const violationItems = data.violations.filter(v => !isViolationClosed(v) && flagFor(v.cureDeadline));
-  const dueWithin10 = (v) => { const d = daysUntil(v.cureDeadline); return d !== null && d <= 10 && !isViolationClosed(v); };
-  const hpdDue10 = data.violations.filter(v => v.agency === "HPD" && dueWithin10(v));
-  const dobDue10 = data.violations.filter(v => v.agency === "Other" && v.otherAgency === "DOB" && dueWithin10(v));
-  const fdnyDue10 = data.violations.filter(v => v.agency === "Other" && v.otherAgency === "FDNY" && dueWithin10(v));
+  // Each open violation goes into exactly ONE of these buckets, by agency, so it
+  // never shows up twice on the dashboard. Window covers overdue + due within 10 days.
+  const violationDue = (v) => { const d = daysUntil(v.cureDeadline); return d !== null && d <= 10 && !isViolationClosed(v); };
+  const hpdDue = data.violations.filter(v => v.agency === "HPD" && violationDue(v));
+  const dobDue = data.violations.filter(v => v.agency === "Other" && v.otherAgency === "DOB" && violationDue(v));
+  const fdnyDue = data.violations.filter(v => v.agency === "Other" && v.otherAgency === "FDNY" && violationDue(v));
+  const otherViolationsDue = data.violations.filter(v =>
+    (v.agency === "DSNY" || (v.agency === "Other" && v.otherAgency !== "DOB" && v.otherAgency !== "FDNY")) && violationDue(v)
+  );
   const courtItems = data.courtCases.filter(c => !c.archived && flagFor(c.nextCourtDate));
   const stipItems = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && flagFor(c.nextPaymentDue));
   const recurringItems = data.appointments.filter(a => !a.completed && a.recurring && flagFor(a.date));
@@ -994,39 +1076,11 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
     .flatMap(t => tenantFollowUps(t).map(f => ({ tenant: t, followUp: f })))
     .filter(e => e.followUp.date && e.followUp.date <= followUpCutoff)
     .sort((a, b) => (a.followUp.date || "").localeCompare(b.followUp.date || ""));
-  const openViolations = data.violations.filter(v => !isViolationClosed(v)).length;
   const overdueShown = showAllOverdue ? overdueTenants : overdueTenants.slice(0, 5);
   const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id));
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
-  const totalAttention = rentPanelCount + violationItems.length + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + hpdDue10.length + dobDue10.length + fdnyDue10.length + bossReminderItems.length;
-
-  // Anything due TODAY is urgent enough that it shouldn't need a click to see —
-  // pull every type of due-date item (follow-up, violation, court date, payment,
-  // appointment) into one always-visible list at the very top of the dashboard.
-  const isToday = (d) => d === todayISO();
-  const dueToday = [
-    ...followUpEntries.filter(e => isToday(e.followUp.date)).map(e => ({
-      key: `f-${e.followUp.id}`, type: "Follow-up", label: e.tenant.name,
-      sub: buildingName(e.tenant.buildingId), note: e.followUp.note, tab: "rent",
-    })),
-    ...data.violations.filter(v => !isViolationClosed(v) && isToday(v.cureDeadline)).map(v => ({
-      key: `v-${v.id}`, type: `${v.agency} cure deadline`, label: `#${v.violationNumber}`,
-      sub: buildingName(v.buildingId), tab: "violations",
-    })),
-    ...data.courtCases.filter(c => !c.archived && isToday(c.nextCourtDate)).map(c => ({
-      key: `c-${c.id}`, type: "Court date", label: tenantName(c.tenantId),
-      sub: buildingName(c.buildingId), tab: "court",
-    })),
-    ...data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && isToday(c.nextPaymentDue)).map(c => ({
-      key: `p-${c.id}`, type: "Payment due", label: tenantName(c.tenantId),
-      sub: buildingName(c.buildingId), tab: "court",
-    })),
-    ...data.appointments.filter(a => !a.completed && isToday(a.date)).map(a => ({
-      key: `a-${a.id}`, type: a.recurring ? "Recurring appointment" : "Appointment", label: a.type,
-      sub: buildingName(a.buildingId), tab: "inspections",
-    })),
-  ];
+  const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + hpdDue.length + dobDue.length + fdnyDue.length + otherViolationsDue.length + bossReminderItems.length;
 
   return (
     <div>
@@ -1034,24 +1088,6 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
         <h1 className="page-title">Dashboard</h1>
         <PrintButton label="Dashboard" />
       </div>
-
-      {dueToday.length > 0 && (
-        <div className="due-today">
-          <div className="due-today-head">
-            <AlertTriangle size={18} />
-            <span>Due today ({dueToday.length})</span>
-          </div>
-          {dueToday.map(item => (
-            <button className="due-today-item" key={item.key} onClick={() => setTab(item.tab)}>
-              <span className="pill pill-danger">{item.type}</span>
-              <div className="followup-item-main">
-                <div className="followup-item-name">{item.label} <span className="row-muted">— {item.sub}</span></div>
-                {item.note && <div className="followup-item-note">{item.note}</div>}
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
 
       <DashboardCalendar data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} />
 
@@ -1115,21 +1151,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label="Violation deadlines due or overdue" items={violationItems} tab="violations" setTab={setTab}
-            itemKey={v => v.id}
-            renderItem={v => (
-              <>
-                <Flag date={v.cureDeadline} />
-                <div className="followup-item-main">
-                  <div className="followup-item-name">#{v.violationNumber} · {v.agency} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
-                </div>
-              </>
-            )}
-          />
-
-          <AttentionPanel
-            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label="HPD violations due within 10 days" items={hpdDue10} tab="violations" setTab={setTab}
+            label="HPD violations due or overdue" items={hpdDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1142,8 +1164,8 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
           />
 
           <AttentionPanel
-            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label="DOB violations due within 10 days" items={dobDue10} tab="violations" setTab={setTab}
+            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
+            label="DOB violations due or overdue" items={dobDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1156,14 +1178,28 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
           />
 
           <AttentionPanel
-            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label="FDNY violations due within 10 days" items={fdnyDue10} tab="violations" setTab={setTab}
+            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
+            label="FDNY violations due or overdue" items={fdnyDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
                 <Flag date={v.cureDeadline} />
                 <div className="followup-item-main">
                   <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
+                </div>
+              </>
+            )}
+          />
+
+          <AttentionPanel
+            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
+            label="Other violations due or overdue (DSNY, ECB, DEP, etc.)" items={otherViolationsDue} tab="violations" setTab={setTab}
+            itemKey={v => v.id}
+            renderItem={v => (
+              <>
+                <Flag date={v.cureDeadline} />
+                <div className="followup-item-main">
+                  <div className="followup-item-name">#{v.violationNumber} · {v.agency === "Other" ? v.otherAgency : v.agency} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
                 </div>
               </>
             )}
@@ -3306,46 +3342,43 @@ function Styles() {
       .sheet-follow-btn:hover { background: #F0EEE7; color: var(--navy); }
       .sheet-follow-date { font-size: 10px; }
       .followup-scroll { max-height: 520px; overflow-y: auto; padding-right: 4px; }
-      .due-today {
-        background: var(--danger-bg); border: 2px solid var(--danger); border-radius: 8px;
-        margin-bottom: 20px; padding: 14px 16px;
-      }
-      .due-today-head {
-        display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--danger);
-        font-size: 15px; margin-bottom: 10px;
-      }
-      .due-today-item {
-        display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-        background: #fff; border: 1px solid var(--danger); border-radius: 6px;
-        padding: 8px 10px; margin-bottom: 6px; cursor: pointer; font: inherit;
-      }
-      .due-today-item:last-child { margin-bottom: 0; }
       .dash-calendar {
         background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-        padding: 14px 16px; margin-bottom: 20px;
+        padding: 12px 14px; margin-bottom: 18px;
       }
-      .dash-calendar-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-      .dash-calendar-title { font-weight: 700; font-size: 14px; }
-      .dash-calendar-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 12px; }
-      .dash-calendar-day {
-        display: flex; flex-direction: column; align-items: center; gap: 2px;
+      .dash-calendar-compact { max-width: 480px; }
+      .dash-calendar-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; color: var(--navy); }
+      .dash-calendar-title { font-weight: 700; font-size: 13px; }
+      .dash-cal-overdue-chip { border-color: var(--danger); color: var(--danger); }
+      .dash-cal-modes { margin-bottom: 8px; gap: 4px; }
+      .dash-cal-modes .chip { font-size: 11px; padding: 3px 9px; }
+      .dash-cal-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-bottom: 8px; }
+      .dash-cal-month { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; margin-bottom: 8px; }
+      .dash-cal-month-dow { text-align: center; font-size: 9px; color: var(--ink-soft); font-weight: 700; padding-bottom: 2px; }
+      .dash-cal-cell {
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+        background: #fff; border: 1px solid var(--border); border-radius: 5px;
+        padding: 5px 2px; cursor: pointer; position: relative; font: inherit;
+      }
+      .dash-cal-cell-sm { padding: 3px 2px; aspect-ratio: 1; }
+      .dash-cal-cell:hover { border-color: var(--navy); }
+      .dash-cal-cell-today { border-color: var(--navy); border-width: 2px; }
+      .dash-cal-cell-selected { background: var(--navy); }
+      .dash-cal-cell-selected .dash-cal-cell-label, .dash-cal-cell-selected .dash-cal-cell-num { color: #fff; }
+      .dash-cal-cell-dim { opacity: 0.35; }
+      .dash-cal-cell-label { font-size: 9px; text-transform: uppercase; color: var(--ink-soft); letter-spacing: 0.02em; }
+      .dash-cal-cell-num { font-size: 13px; font-weight: 700; }
+      .dash-cal-dot { width: 5px; height: 5px; border-radius: 999px; background: var(--danger); }
+      .dash-cal-year { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 8px; }
+      .dash-cal-month-cell {
+        display: flex; flex-direction: column; align-items: center; gap: 3px;
         background: #fff; border: 1px solid var(--border); border-radius: 6px;
-        padding: 8px 4px; cursor: pointer; position: relative; font: inherit;
+        padding: 10px 4px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
       }
-      .dash-calendar-day:hover { border-color: var(--navy); }
-      .dash-calendar-day-today { border-color: var(--navy); border-width: 2px; }
-      .dash-calendar-day-selected { background: var(--navy); }
-      .dash-calendar-day-selected .dash-calendar-day-label,
-      .dash-calendar-day-selected .dash-calendar-day-num { color: #fff; }
-      .dash-calendar-day-label { font-size: 10px; text-transform: uppercase; color: var(--ink-soft); letter-spacing: 0.03em; }
-      .dash-calendar-day-num { font-size: 16px; font-weight: 700; }
-      .dash-calendar-day-count {
-        position: absolute; top: -6px; right: -6px; background: var(--danger); color: #fff;
-        font-size: 10px; font-weight: 700; border-radius: 999px; min-width: 16px; height: 16px;
-        display: flex; align-items: center; justify-content: center; padding: 0 3px;
-      }
-      .dash-calendar-detail { display: flex; flex-direction: column; gap: 6px; }
-      .due-today-item:hover { background: var(--danger-bg); }
+      .dash-cal-month-cell:hover { border-color: var(--navy); }
+      .dash-cal-section { margin-top: 4px; }
+      .dash-cal-section-title { font-size: 11px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 6px; }
+      .dash-cal-overdue { color: var(--danger); }
       .followup-panel { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--warn); border-radius: 8px; margin-bottom: 24px; overflow: hidden; }
       .followup-panel-head {
         display: flex; align-items: center; gap: 12px; width: 100%; background: none; border: none;
@@ -3371,10 +3404,6 @@ function Styles() {
         .search-wrap { order: 3; max-width: 100%; width: 100%; margin: 0; flex: 1 1 100%; }
         .brand-sub { display: none; }
         .content { padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
-        .dash-calendar-days { gap: 3px; }
-        .dash-calendar-day { padding: 6px 2px; }
-        .dash-calendar-day-label { font-size: 9px; }
-        .dash-calendar-day-num { font-size: 13px; }
         /* iOS Safari auto-zooms the whole page when you tap an input with a font
            smaller than 16px — jarring on every single field in an app this
            form-heavy. Force 16px on mobile only, so desktop stays compact. */
