@@ -698,7 +698,7 @@ export default function PropertyOpsApp() {
     { key: "inspections", label: "Appointments", icon: <CalendarClock size={16} /> },
     { key: "laws", label: "NYC Local Laws", icon: <ScrollText size={16} /> },
     { key: "reminders", label: "Boss Reminders", icon: <MessageSquare size={16} /> },
-    { key: "quicknotes", label: "Quick Notes / Follow-up", icon: <Pencil size={16} /> },
+    { key: "quicknotes", label: "Quick Notes / Reminder", icon: <Pencil size={16} /> },
   ];
 
   const searchResults = useMemo(() => {
@@ -850,7 +850,7 @@ function SearchResults({ results, buildingName, onClose }) {
 
 const TAB_LABELS = {
   rent: "Rent Collection", violations: "Violations", court: "Court Cases",
-  inspections: "Appointments", quicknotes: "Quick Notes / Follow-up",
+  inspections: "Appointments", quicknotes: "Quick Notes / Reminder",
 };
 
 function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, extraAction }) {
@@ -1103,11 +1103,29 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   }).length;
   const rosterEntries = followUpEntries.slice(0, 8);
 
+  const exportAllData = () => {
+    const backup = {
+      exportedAt: new Date().toISOString(),
+      app: "Property Ops",
+      data,
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `property-ops-backup-${today}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div>
       <div className="page-head">
         <h1 className="page-title">Dashboard</h1>
-        <PrintButton label="Dashboard" />
+        <div className="page-actions">
+          <button className="btn-ghost" onClick={exportAllData}><Download size={14} /> Export backup</button>
+          <PrintButton label="Dashboard" />
+        </div>
       </div>
 
       <div className="dash-stats-row">
@@ -1441,6 +1459,7 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
     });
   };
   const [expandedUnit, setExpandedUnit] = useState(null);
+  const [unitSearch, setUnitSearch] = useState("");
   const [section, setSection] = useState("buildings");
   const [pendingDelete, setPendingDelete] = useState(null);
   const fileRef = useRef(null);
@@ -1558,24 +1577,36 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
         </div>
       )}
 
+      {data.buildings.length > 0 && (
+        <div className="inline-form" style={{ marginBottom: 14 }}>
+          <input placeholder="Find a unit or tenant across every building…" value={unitSearch} onChange={e => setUnitSearch(e.target.value)} />
+          {unitSearch && <button className="btn-ghost" onClick={() => setUnitSearch("")}>Clear</button>}
+        </div>
+      )}
+
       {data.buildings.length === 0 && <EmptyState text="No buildings yet — import a CSV or add one manually." />}
       {data.buildings.map(b => {
-        const units = data.units.filter(u => u.buildingId === b.id);
+        const q = unitSearch.trim().toLowerCase();
+        const allUnits = data.units.filter(u => u.buildingId === b.id);
+        const units = q
+          ? allUnits.filter(u => (u.unitNumber || "").toLowerCase().includes(q) || data.tenants.some(t => t.unitId === u.id && (t.name || "").toLowerCase().includes(q)))
+          : allUnits;
+        if (q && units.length === 0) return null;
         return (
           <div className="list-card" key={b.id}>
             <div className="list-card-head" onClick={() => toggleExpanded(b.id)}>
-              {!collapsedIds.has(b.id) ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+              {(q || !collapsedIds.has(b.id)) ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
               <div className="list-card-title">{b.address}</div>
-              <span className="pill pill-muted">{units.length} units</span>
+              <span className="pill pill-muted">{q ? `${units.length} match${units.length === 1 ? "" : "es"} of ${allUnits.length}` : `${units.length} units`}</span>
               {(() => {
-                const emptyCount = units.filter(u => !data.tenants.some(t => t.unitId === u.id)).length;
+                const emptyCount = allUnits.filter(u => !data.tenants.some(t => t.unitId === u.id)).length;
                 return emptyCount > 0 && <span className="pill pill-warn">{emptyCount} empty</span>;
               })()}
               <div className="spacer" />
               {pendingDelete === b.id ? (
                 <>
                   <span className="row-muted" style={{ fontSize: 12, color: data.tenants.some(t => t.buildingId === b.id && (data.courtCases || []).some(c => c.tenantId === t.id && !c.archived)) ? "var(--danger)" : undefined }}>
-                    Delete building + {units.length} units + {data.tenants.filter(t => t.buildingId === b.id).length} tenants
+                    Delete building + {allUnits.length} units + {data.tenants.filter(t => t.buildingId === b.id).length} tenants
                     {(() => {
                       const n = data.tenants.filter(t => t.buildingId === b.id && (data.courtCases || []).some(c => c.tenantId === t.id && !c.archived)).length;
                       return n > 0 ? ` — ${n} of them ${n === 1 ? "has" : "have"} an OPEN COURT CASE` : "";
@@ -1586,13 +1617,13 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                 </>
               ) : pendingCleanup === b.id ? (
                 <>
-                  <span className="row-muted" style={{ fontSize: 12 }}>Remove {units.filter(u => !data.tenants.some(t => t.unitId === u.id)).length} empty units from this building?</span>
+                  <span className="row-muted" style={{ fontSize: 12 }}>Remove {allUnits.filter(u => !data.tenants.some(t => t.unitId === u.id)).length} empty units from this building?</span>
                   <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); cleanupEmptyUnits(b.id); }} style={{ color: "var(--danger)" }}>Yes, clean up</button>
                   <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); setPendingCleanup(null); }}>Cancel</button>
                 </>
               ) : (
                 <>
-                  {units.some(u => !data.tenants.some(t => t.unitId === u.id)) && (
+                  {allUnits.some(u => !data.tenants.some(t => t.unitId === u.id)) && (
                     <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); setPendingCleanup(b.id); }}>Clean up empty units</button>
                   )}
                   <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(b); }}><Pencil size={14} /></IconBtn>
@@ -1600,7 +1631,7 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                 </>
               )}
             </div>
-            {!collapsedIds.has(b.id) && (
+            {(q || !collapsedIds.has(b.id)) && (
               <div className="list-card-body">
                 {units.length === 0 && <div className="hint">No units added yet.</div>}
                 {units.slice().sort((a, b2) => compareUnits(a.unitNumber, b2.unitNumber)).map(u => {
@@ -3103,7 +3134,7 @@ function QuickNotesTab({ data, add, update, remove, buildingName }) {
   return (
     <div>
       <div className="page-head">
-        <h1 className="page-title">Quick Notes / Follow-up</h1>
+        <h1 className="page-title">Quick Notes / Reminder</h1>
         <PrintButton label="Quick Notes" />
       </div>
 
