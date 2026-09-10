@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import Papa from "papaparse";
+import * as XLSX from "xlsx";
 // PDF upload support for RIS reports. Requires: npm install pdfjs-dist
 // The worker is loaded from a CDN so it works with any bundler — no local worker file needed.
 import * as pdfjsLib from "pdfjs-dist";
@@ -9,6 +10,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs
 import { initializeApp } from "firebase/app";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
+import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA5Op33F-BQSfKVbe3zx3jlbfZdsCSWT2c",
@@ -22,6 +24,7 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
+const storage = getStorage(firebaseApp);
 import {
   Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat, Home, Phone,
   CalendarClock, ScrollText, MessageSquare, Archive as ArchiveIcon,
@@ -72,14 +75,59 @@ function shortAddress(address) {
   return s.trim() || address;
 }
 
-function filesToDataUrls(fileList) {
-  const files = Array.from(fileList);
-  return Promise.all(files.map(file => new Promise((resolve, reject) => {
+// Uploads go to Firebase Storage now, not straight into Firestore as base64 —
+// a single un-resized phone photo can be several MB, and Firestore caps an
+// entire document at 1MB total. Storage has no meaningful size limit, and we
+// only ever keep a small URL string in the actual data record.
+// Resizes and re-compresses a photo in the browser before it ever leaves the
+// device — a straight-from-camera phone photo can be several MB, which is
+// wasteful once it's headed to storage. This keeps most photos in the tens-
+// to-low-hundreds of KB range instead, with no visible quality loss at the
+// sizes anyone actually views a violation/work-order photo at.
+function compressImage(file, maxDimension = 1600, quality = 0.75) {
+  return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve({ id: uid(), name: file.name, dataUrl: reader.result });
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDimension || height > maxDimension) {
+          if (width > height) { height = Math.round(height * (maxDimension / width)); width = maxDimension; }
+          else { width = Math.round(width * (maxDimension / height)); height = maxDimension; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        canvas.toBlob(
+          (blob) => blob ? resolve(new File([blob], file.name.replace(/\.\w+$/, ".jpg"), { type: "image/jpeg" })) : reject(new Error("compression produced no blob")),
+          "image/jpeg", quality
+        );
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
     reader.onerror = reject;
     reader.readAsDataURL(file);
-  })));
+  });
+}
+
+function uploadFilesToStorage(fileList, pathPrefix, { compressImages: shouldCompress = false } = {}) {
+  const uidPart = auth.currentUser?.uid || "unknown";
+  const files = Array.from(fileList);
+  return Promise.all(files.map(async (file) => {
+    let uploadFile = file;
+    if (shouldCompress && file.type.startsWith("image/")) {
+      try { uploadFile = await compressImage(file); }
+      catch (err) { console.error("photo compression failed, uploading original", err); }
+    }
+    const id = uid();
+    const storagePath = `users/${uidPart}/${pathPrefix}/${id}-${uploadFile.name}`;
+    const fileRef = storageRef(storage, storagePath);
+    await uploadBytes(fileRef, uploadFile);
+    const url = await getDownloadURL(fileRef);
+    return { id, name: file.name, url, storagePath };
+  }));
 }
 
 const AGENCIES = ["HPD", "DSNY", "Other"];
@@ -494,27 +542,33 @@ function TypeSelectWithAdd({ value, options, onChange, onAddType }) {
   );
 }
 
-function PhotoUploader({ photos, onAdd, onRemove }) {
+function PhotoUploader({ photos, onAdd, onRemove, pathPrefix }) {
   const ref = useRef(null);
+  const [uploading, setUploading] = useState(false);
   return (
     <div className="photo-uploader">
       <div className="photo-grid">
         {(photos || []).map(p => (
           <div className="photo-thumb" key={p.id}>
-            <img src={p.dataUrl} alt={p.name} />
-            <button className="photo-remove" onClick={() => onRemove(p.id)} title="Remove"><X size={12} /></button>
+            <img src={p.url || p.dataUrl} alt={p.name} />
+            <button className="photo-remove" onClick={() => onRemove(p)} title="Remove"><X size={12} /></button>
           </div>
         ))}
-        <button className="photo-add" onClick={() => ref.current.click()} type="button">
+        <button className="photo-add" onClick={() => ref.current.click()} type="button" disabled={uploading}>
           <Camera size={16} />
         </button>
       </div>
+      {uploading && <div className="hint">Uploading…</div>}
       <input
         ref={ref} type="file" accept="image/*" multiple hidden
         onChange={async (e) => {
           if (!e.target.files.length) return;
-          const uploaded = await filesToDataUrls(e.target.files);
-          onAdd(uploaded);
+          setUploading(true);
+          try {
+            const uploaded = await uploadFilesToStorage(e.target.files, pathPrefix, { compressImages: true });
+            onAdd(uploaded);
+          } catch (err) { console.error("photo upload failed", err); }
+          setUploading(false);
           e.target.value = "";
         }}
       />
@@ -522,25 +576,30 @@ function PhotoUploader({ photos, onAdd, onRemove }) {
   );
 }
 
-function DocumentUploader({ documents, onAdd, onRemove }) {
+function DocumentUploader({ documents, onAdd, onRemove, pathPrefix }) {
   const ref = useRef(null);
+  const [uploading, setUploading] = useState(false);
   return (
     <div className="doc-uploader">
       {(documents || []).map(d => (
         <div className="doc-chip" key={d.id}>
-          <a href={d.dataUrl} download={d.name} className="doc-chip-name" title={d.name}>{d.name}</a>
-          <button className="doc-remove" onClick={() => onRemove(d.id)} title="Remove"><X size={12} /></button>
+          <a href={d.url || d.dataUrl} download={d.name} target={d.url ? "_blank" : undefined} rel="noreferrer" className="doc-chip-name" title={d.name}>{d.name}</a>
+          <button className="doc-remove" onClick={() => onRemove(d)} title="Remove"><X size={12} /></button>
         </div>
       ))}
-      <button className="btn-ghost" type="button" onClick={() => ref.current.click()}>
-        <Upload size={14} /> Upload document
+      <button className="btn-ghost" type="button" onClick={() => ref.current.click()} disabled={uploading}>
+        <Upload size={14} /> {uploading ? "Uploading…" : "Upload document"}
       </button>
       <input
         ref={ref} type="file" multiple hidden
         onChange={async (e) => {
           if (!e.target.files.length) return;
-          const uploaded = await filesToDataUrls(e.target.files);
-          onAdd(uploaded);
+          setUploading(true);
+          try {
+            const uploaded = await uploadFilesToStorage(e.target.files, pathPrefix);
+            onAdd(uploaded);
+          } catch (err) { console.error("document upload failed", err); }
+          setUploading(false);
           e.target.value = "";
         }}
       />
@@ -1104,18 +1163,42 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const rosterEntries = followUpEntries.slice(0, 8);
 
   const exportAllData = () => {
-    const backup = {
-      exportedAt: new Date().toISOString(),
-      app: "Property Ops",
-      data,
+    const buildingMap = Object.fromEntries(data.buildings.map(b => [b.id, b.address]));
+    const unitMap = Object.fromEntries(data.units.map(u => [u.id, u.unitNumber]));
+    const tenantMap = Object.fromEntries(data.tenants.map(t => [t.id, t.name]));
+    const vendorMap = Object.fromEntries(data.vendors.map(v => [v.id, v.name]));
+
+    // Excel cells can't hold nested arrays/objects (notes, follow-ups, photos,
+    // checklists) — stringify those so nothing gets lost, and add resolved
+    // building/unit/tenant/vendor names alongside the raw ids so the sheet is
+    // actually readable, not just a restore file.
+    const flatten = (records, extra) => (records || []).map(r => {
+      const row = { ...r, ...(extra ? extra(r) : {}) };
+      Object.keys(row).forEach(k => {
+        if (Array.isArray(row[k]) || (row[k] && typeof row[k] === "object")) row[k] = JSON.stringify(row[k]);
+      });
+      return row;
+    });
+
+    const wb = XLSX.utils.book_new();
+    const addSheet = (name, records) => {
+      const ws = XLSX.utils.json_to_sheet(records.length ? records : [{}]);
+      XLSX.utils.book_append_sheet(wb, ws, name.slice(0, 31));
     };
-    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `property-ops-backup-${today}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+
+    addSheet("Buildings", flatten(data.buildings));
+    addSheet("Units", flatten(data.units, u => ({ buildingAddress: buildingMap[u.buildingId] || "" })));
+    addSheet("Tenants", flatten(data.tenants, t => ({ buildingAddress: buildingMap[t.buildingId] || "", unitNumber: unitMap[t.unitId] || "" })));
+    addSheet("Violations", flatten(data.violations, v => ({ buildingAddress: buildingMap[v.buildingId] || "", unitNumber: unitMap[v.unitId] || "", vendorName: vendorMap[v.vendorId] || "" })));
+    addSheet("Work Orders", flatten(data.workOrders, w => ({ buildingAddress: buildingMap[w.buildingId] || "", unitNumber: unitMap[w.unitId] || "", vendorName: vendorMap[w.vendorId] || "" })));
+    addSheet("Court Cases", flatten(data.courtCases, c => ({ buildingAddress: buildingMap[c.buildingId] || "", unitNumber: unitMap[c.unitId] || "", tenantName: tenantMap[c.tenantId] || "" })));
+    addSheet("Appointments", flatten(data.appointments, a => ({ buildingAddress: buildingMap[a.buildingId] || "", unitNumber: unitMap[a.unitId] || "" })));
+    addSheet("Vendors", flatten(data.vendors));
+    addSheet("Local Laws", flatten(data.localLaws, l => ({ buildingAddress: buildingMap[l.buildingId] || "" })));
+    addSheet("Boss Reminders", flatten(data.bossReminders));
+    addSheet("Quick Notes", flatten(data.quickNotes, n => ({ buildingAddress: n.buildingId ? (buildingMap[n.buildingId] || "") : "" })));
+
+    XLSX.writeFile(wb, `property-ops-backup-${today}.xlsx`);
   };
 
   return (
@@ -2570,8 +2653,12 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
                 {v.description && <div className="row">{v.description}</div>}
                 <PhotoUploader
                   photos={v.photos}
+                  pathPrefix={`violations/${v.id}/photos`}
                   onAdd={(newPhotos) => update("violations", v.id, { photos: [...(v.photos || []), ...newPhotos] })}
-                  onRemove={(id) => update("violations", v.id, { photos: (v.photos || []).filter(p => p.id !== id) })}
+                  onRemove={(p) => {
+                    update("violations", v.id, { photos: (v.photos || []).filter(x => x.id !== p.id) });
+                    if (p.storagePath) deleteObject(storageRef(storage, p.storagePath)).catch(() => {});
+                  }}
                 />
                 <div className="row" style={{ marginTop: 8 }}>
                   <strong>Notes</strong>
@@ -2829,8 +2916,12 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
                 <div className="row" style={{ marginTop: 6 }}><strong>Documents</strong></div>
                 <DocumentUploader
                   documents={c.documents}
+                  pathPrefix={`courtCases/${c.id}/documents`}
                   onAdd={(newDocs) => update("courtCases", c.id, { documents: [...(c.documents || []), ...newDocs] })}
-                  onRemove={(id) => update("courtCases", c.id, { documents: (c.documents || []).filter(d => d.id !== id) })}
+                  onRemove={(d) => {
+                    update("courtCases", c.id, { documents: (c.documents || []).filter(x => x.id !== d.id) });
+                    if (d.storagePath) deleteObject(storageRef(storage, d.storagePath)).catch(() => {});
+                  }}
                 />
                 <button className="btn-primary" style={{ marginTop: 10 }} onClick={() => setDetailsFor(null)}>Done</button>
               </>
