@@ -33,7 +33,13 @@ import {
 
 const STORAGE_KEY = "pm-ops-data-v1";
 const uid = () => Math.random().toString(36).slice(2, 10);
-const todayISO = () => new Date().toISOString().slice(0, 10);
+// IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
+// date, not the local one. For anyone west of UTC (all of the US), once evening
+// hits, UTC has already rolled over to tomorrow — the app would think "today"
+// is tomorrow, misclassifying everything due today as overdue and everything
+// due tomorrow as due today. Always build the date string from local components.
+const toLocalISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const todayISO = () => toLocalISO(new Date());
 
 // "B4" must sort before "B39", not after it — plain string sort gets this wrong
 // because it compares character by character. Split into a letter prefix and a
@@ -141,12 +147,12 @@ function fmtDate(dateStr) {
 function addMonths(dateStr, n) {
   const d = new Date(dateStr + "T00:00:00");
   d.setMonth(d.getMonth() + n);
-  return d.toISOString().slice(0, 10);
+  return toLocalISO(d);
 }
 function addDays(dateStr, n) {
   const d = new Date(dateStr + "T00:00:00");
   d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
+  return toLocalISO(d);
 }
 function isInFollowUpWindow(dateStr) {
   const d = daysUntil(dateStr);
@@ -918,7 +924,7 @@ function monthGridDays(refDate) {
   return Array.from({ length: 42 }, (_, i) => {
     const cell = new Date(gridStart);
     cell.setDate(cell.getDate() + i);
-    return cell.toISOString().slice(0, 10);
+    return toLocalISO(cell);
   });
 }
 
