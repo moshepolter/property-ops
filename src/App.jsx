@@ -25,7 +25,7 @@ const db = getFirestore(firebaseApp);
 import {
   Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat, Home,
   CalendarClock, ScrollText, MessageSquare, Archive as ArchiveIcon,
-  Plus, X, Camera, Download, LayoutDashboard, ChevronDown, ChevronRight,
+  Plus, X, Camera, Download, LayoutDashboard, ChevronDown, ChevronRight, ChevronLeft,
   Trash2, Pencil, Upload, Menu, Printer, CheckCircle2
 } from "lucide-react";
 
@@ -141,6 +141,11 @@ function fmtDate(dateStr) {
 function addMonths(dateStr, n) {
   const d = new Date(dateStr + "T00:00:00");
   d.setMonth(d.getMonth() + n);
+  return d.toISOString().slice(0, 10);
+}
+function addDays(dateStr, n) {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + n);
   return d.toISOString().slice(0, 10);
 }
 function isInFollowUpWindow(dateStr) {
@@ -269,11 +274,11 @@ function parseContactsText(text) {
   const NEXT_HEADER = `(?:${APT_RE}|\\d{4}|${ALT_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
   const headerRe = new RegExp(
     `(?:^|\\s)(?:` +
-      `(${APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]*?)` +
+      `(${APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
       `|` +
-      `(\\d{4})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]+?)` +
+      `(\\d{4})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]+?)` +
       `|` +
-      `(${ALT_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]*?)` +
+      `(${ALT_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
     `)(?=\\s+${LABELS}\\b|\\s+${NEXT_HEADER}|$)`,
     "g"
   );
@@ -774,7 +779,7 @@ export default function PropertyOpsApp() {
             {tab === "inspections" && <AppointmentsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} />}
             {tab === "laws" && <LocalLawsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
             {tab === "reminders" && <RemindersTab data={data} add={add} update={update} remove={remove} />}
-            {tab === "quicknotes" && <QuickNotesTab data={data} add={add} update={update} remove={remove} />}
+            {tab === "quicknotes" && <QuickNotesTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
           </main>
         </div>
       )}
@@ -866,6 +871,92 @@ function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, 
   );
 }
 
+// Pulls together everything due on one specific date, across every part of the
+// app, so the dashboard calendar can show a single day view of it all.
+function itemsForDate(data, dateStr, tenantName, buildingName) {
+  const items = [];
+  data.violations.forEach(v => {
+    if (v.cureDeadline === dateStr && !isViolationClosed(v)) {
+      items.push({ key: `v-${v.id}`, type: `${v.agency} cure deadline`, label: `#${v.violationNumber}`, sub: buildingName(v.buildingId), tab: "violations" });
+    }
+  });
+  data.courtCases.forEach(c => {
+    if (c.archived) return;
+    if (c.nextCourtDate === dateStr) items.push({ key: `c-${c.id}`, type: "Court date", label: tenantName(c.tenantId), sub: buildingName(c.buildingId), tab: "court" });
+    if (c.result === "Stipulation (payment plan)" && c.nextPaymentDue === dateStr) items.push({ key: `p-${c.id}`, type: "Payment due", label: tenantName(c.tenantId), sub: buildingName(c.buildingId), tab: "court" });
+  });
+  data.appointments.forEach(a => {
+    if (!a.completed && a.date === dateStr) {
+      items.push({ key: `a-${a.id}`, type: a.recurring ? "Recurring appointment" : "Appointment", label: a.type, sub: buildingName(a.buildingId), tab: "inspections" });
+    }
+  });
+  data.tenants.forEach(t => {
+    tenantFollowUps(t).forEach(f => {
+      if (f.date === dateStr) items.push({ key: `f-${f.id}`, type: "Follow-up", label: t.name, sub: buildingName(t.buildingId), note: f.note, tab: "rent" });
+    });
+  });
+  (data.quickNotes || []).forEach(n => {
+    if (n.reminderDate === dateStr && !n.done) {
+      items.push({ key: `n-${n.id}`, type: "Reminder", label: n.text, sub: n.buildingId ? buildingName(n.buildingId) : "", tab: "quicknotes" });
+    }
+  });
+  return items;
+}
+
+function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
+  const [startOffset, setStartOffset] = useState(0);
+  const [selectedDate, setSelectedDate] = useState(todayISO());
+  const today = todayISO();
+
+  const days = Array.from({ length: 7 }, (_, i) => addDays(today, startOffset + i));
+  const selectedItems = itemsForDate(data, selectedDate, tenantName, buildingName);
+
+  return (
+    <div className="dash-calendar">
+      <div className="dash-calendar-head">
+        <button className="icon-btn" onClick={() => setStartOffset(o => o - 7)} title="Previous week"><ChevronLeft size={16} /></button>
+        <span className="dash-calendar-title">Calendar</span>
+        <button className="icon-btn" onClick={() => setStartOffset(o => o + 7)} title="Next week"><ChevronRight size={16} /></button>
+        {(startOffset !== 0 || selectedDate !== today) && (
+          <button className="btn-ghost" onClick={() => { setStartOffset(0); setSelectedDate(today); }}>Today</button>
+        )}
+      </div>
+      <div className="dash-calendar-days">
+        {days.map(d => {
+          const count = itemsForDate(data, d, tenantName, buildingName).length;
+          const dateObj = new Date(d + "T00:00:00");
+          return (
+            <button
+              key={d}
+              className={`dash-calendar-day ${d === selectedDate ? "dash-calendar-day-selected" : ""} ${d === today ? "dash-calendar-day-today" : ""}`}
+              onClick={() => setSelectedDate(d)}
+            >
+              <div className="dash-calendar-day-label">{dateObj.toLocaleDateString("en-US", { weekday: "short" })}</div>
+              <div className="dash-calendar-day-num">{dateObj.getDate()}</div>
+              {count > 0 && <span className="dash-calendar-day-count">{count}</span>}
+            </button>
+          );
+        })}
+      </div>
+      <div className="dash-calendar-detail">
+        {selectedItems.length === 0 ? (
+          <div className="hint">Nothing due {selectedDate === today ? "today" : `on ${fmtDate(selectedDate)}`}.</div>
+        ) : (
+          selectedItems.map(item => (
+            <button key={item.key} className="dash-detail-item" onClick={() => setTab(item.tab)}>
+              <span className="pill pill-danger">{item.type}</span>
+              <div className="followup-item-main">
+                <div className="followup-item-name">{item.label}{item.sub ? <span className="row-muted"> — {item.sub}</span> : null}</div>
+                {item.note && <div className="followup-item-note">{item.note}</div>}
+              </div>
+            </button>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const [rentPanelOpen, setRentPanelOpen] = useState(false);
   const [showAllOverdue, setShowAllOverdue] = useState(false);
@@ -893,7 +984,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const stipItems = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && flagFor(c.nextPaymentDue));
   const recurringItems = data.appointments.filter(a => !a.completed && a.recurring && flagFor(a.date));
   const appointmentItems = data.appointments.filter(a => !a.completed && !a.recurring && flagFor(a.date));
-  const quickNoteItems = data.quickNotes || [];
+  const quickNoteItems = (data.quickNotes || []).filter(n => !n.done);
   const bossReminderItems = data.bossReminders.filter(r => r.status !== "Done");
   const followUpCutoff = addMonths(todayISO(), monthsToShow);
   const tenantsWithFollowUps = data.tenants.filter(t => tenantFollowUps(t).length > 0);
@@ -961,6 +1052,8 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
           ))}
         </div>
       )}
+
+      <DashboardCalendar data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} />
 
       {totalAttention === 0 ? (
         <div className="all-clear"><CheckCircle2 size={18} /> Nothing needs attention right now.</div>
@@ -1139,8 +1232,8 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
             itemKey={n => n.id}
             renderItem={n => (
               <div className="followup-item-main">
-                <div className="followup-item-name">{n.text}</div>
-                <div className="followup-item-note">{fmtDate(n.date)}</div>
+                <div className="followup-item-name">{n.text}{n.buildingId ? ` — ${buildingName(n.buildingId)}` : ""}</div>
+                <div className="followup-item-note">{n.reminderDate ? `Reminder: ${fmtDate(n.reminderDate)}` : fmtDate(n.date)}</div>
               </div>
             )}
           />
@@ -2860,16 +2953,28 @@ function RemindersTab({ data, add, update, remove }) {
 
 /* ============================== quick notes ============================== */
 
-function QuickNotesTab({ data, add, update, remove }) {
+function QuickNotesTab({ data, add, update, remove, buildingName }) {
   const [text, setText] = useState("");
+  const [reminderDate, setReminderDate] = useState("");
+  const [buildingId, setBuildingId] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editText, setEditText] = useState("");
+  const [showDone, setShowDone] = useState(false);
 
   const submit = () => {
     if (!text.trim()) return;
-    add("quickNotes", { text, date: todayISO() });
-    setText("");
+    add("quickNotes", { text, date: todayISO(), done: false, reminderDate, buildingId });
+    setText(""); setReminderDate(""); setBuildingId("");
+  };
+  const startEdit = (n) => { setEditingId(n.id); setEditText(n.text); };
+  const saveEdit = (id) => {
+    if (!editText.trim()) return;
+    update("quickNotes", id, { text: editText });
+    setEditingId(null);
   };
 
-  const notes = (data.quickNotes || []).slice().reverse();
+  const allNotes = (data.quickNotes || []).slice().reverse();
+  const notes = showDone ? allNotes : allNotes.filter(n => !n.done);
 
   return (
     <div>
@@ -2877,19 +2982,46 @@ function QuickNotesTab({ data, add, update, remove }) {
         <h1 className="page-title">Quick Notes</h1>
         <PrintButton label="Quick Notes" />
       </div>
-      <p className="hint">A scratchpad for anything you need to jot down fast — sort it into the right tab later.</p>
-      <div className="inline-form">
-        <input placeholder="Jot something down…" value={text} onChange={e => setText(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} />
-        <button className="btn-primary" onClick={submit}>Add</button>
+      <p className="hint">A checklist for anything you need to jot down fast — check it off when it's handled, optionally set a reminder date, and tie it to a building if it's related to one.</p>
+      <div className="form-panel">
+        <Field label="Note"><input placeholder="Jot something down…" value={text} onChange={e => setText(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} /></Field>
+        <Field label="Reminder date (optional)"><input type="date" value={reminderDate} onChange={e => setReminderDate(e.target.value)} /></Field>
+        <Field label="Building (optional)">
+          <select value={buildingId} onChange={e => setBuildingId(e.target.value)}>
+            <option value="">—</option>
+            {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
+          </select>
+        </Field>
+        <div className="form-actions">
+          <button className="btn-primary" onClick={submit}>Add</button>
+        </div>
       </div>
-      {notes.length === 0 && <EmptyState text="Nothing jotted down yet." />}
+      <div className="filter-row">
+        <button className={`chip ${!showDone ? "chip-active" : ""}`} onClick={() => setShowDone(false)}>Open</button>
+        <button className={`chip ${showDone ? "chip-active" : ""}`} onClick={() => setShowDone(true)}>All (incl. checked off)</button>
+      </div>
+      {notes.length === 0 && <EmptyState text="Nothing here." />}
       {notes.map(n => (
         <div className="list-card" key={n.id}>
           <div className="list-card-head">
-            <div className="list-card-title">{n.text}</div>
-            <span className="pill pill-muted">{fmtDate(n.date)}</span>
-            <div className="spacer" />
-            <IconBtn title="Delete" danger onClick={() => remove("quickNotes", n.id)}><Trash2 size={14} /></IconBtn>
+            <input type="checkbox" checked={!!n.done} onChange={e => update("quickNotes", n.id, { done: e.target.checked })} />
+            {editingId === n.id ? (
+              <>
+                <input className="sheet-input" style={{ flex: 1, border: "1px solid var(--border)", borderRadius: 4 }} value={editText} onChange={e => setEditText(e.target.value)} onKeyDown={e => e.key === "Enter" && saveEdit(n.id)} autoFocus />
+                <button className="btn-primary" onClick={() => saveEdit(n.id)}>Save</button>
+                <button className="btn-ghost" onClick={() => setEditingId(null)}>Cancel</button>
+              </>
+            ) : (
+              <>
+                <div className={`list-card-title ${n.done ? "strike" : ""}`}>{n.text}</div>
+                {n.reminderDate && <span className="pill pill-warn">Reminder: {fmtDate(n.reminderDate)}</span>}
+                {n.buildingId && <span className="pill pill-muted">{buildingName(n.buildingId)}</span>}
+                <span className="pill pill-muted">{fmtDate(n.date)}</span>
+                <div className="spacer" />
+                <IconBtn title="Edit" onClick={() => startEdit(n)}><Pencil size={14} /></IconBtn>
+                <IconBtn title="Delete" danger onClick={() => remove("quickNotes", n.id)}><Trash2 size={14} /></IconBtn>
+              </>
+            )}
           </div>
         </div>
       ))}
@@ -3188,6 +3320,31 @@ function Styles() {
         padding: 8px 10px; margin-bottom: 6px; cursor: pointer; font: inherit;
       }
       .due-today-item:last-child { margin-bottom: 0; }
+      .dash-calendar {
+        background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+        padding: 14px 16px; margin-bottom: 20px;
+      }
+      .dash-calendar-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+      .dash-calendar-title { font-weight: 700; font-size: 14px; }
+      .dash-calendar-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 12px; }
+      .dash-calendar-day {
+        display: flex; flex-direction: column; align-items: center; gap: 2px;
+        background: #fff; border: 1px solid var(--border); border-radius: 6px;
+        padding: 8px 4px; cursor: pointer; position: relative; font: inherit;
+      }
+      .dash-calendar-day:hover { border-color: var(--navy); }
+      .dash-calendar-day-today { border-color: var(--navy); border-width: 2px; }
+      .dash-calendar-day-selected { background: var(--navy); }
+      .dash-calendar-day-selected .dash-calendar-day-label,
+      .dash-calendar-day-selected .dash-calendar-day-num { color: #fff; }
+      .dash-calendar-day-label { font-size: 10px; text-transform: uppercase; color: var(--ink-soft); letter-spacing: 0.03em; }
+      .dash-calendar-day-num { font-size: 16px; font-weight: 700; }
+      .dash-calendar-day-count {
+        position: absolute; top: -6px; right: -6px; background: var(--danger); color: #fff;
+        font-size: 10px; font-weight: 700; border-radius: 999px; min-width: 16px; height: 16px;
+        display: flex; align-items: center; justify-content: center; padding: 0 3px;
+      }
+      .dash-calendar-detail { display: flex; flex-direction: column; gap: 6px; }
       .due-today-item:hover { background: var(--danger-bg); }
       .followup-panel { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--warn); border-radius: 8px; margin-bottom: 24px; overflow: hidden; }
       .followup-panel-head {
@@ -3214,6 +3371,10 @@ function Styles() {
         .search-wrap { order: 3; max-width: 100%; width: 100%; margin: 0; flex: 1 1 100%; }
         .brand-sub { display: none; }
         .content { padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+        .dash-calendar-days { gap: 3px; }
+        .dash-calendar-day { padding: 6px 2px; }
+        .dash-calendar-day-label { font-size: 9px; }
+        .dash-calendar-day-num { font-size: 13px; }
         /* iOS Safari auto-zooms the whole page when you tap an input with a font
            smaller than 16px — jarring on every single field in an app this
            form-heavy. Force 16px on mobile only, so desktop stays compact. */
