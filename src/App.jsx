@@ -203,10 +203,16 @@ const TIME_OPTIONS = (() => {
 /* ============================== RIS report parsing ============================== */
 
 const APT_RE = "[A-Z]{1,3}\\d{1,4}";
-const SKIP_LINE_RE = /^\d{2}\/\d{2}\/\d{4}|FISCAL PERIOD|^Page:|PROP #|TELEPHONE\/EMAIL LIST|^APT:|BUILDING DIRECTORY|AGED ARREARS|^LEGAL:|^\*\s*-\s*MOVED OUT|^TOTALS:/i;
+const SKIP_LINE_RE = /^\d{2}\/\d{2}\/\d{4}|FISCAL PERIOD|^Page:|PROP #|TELEPHONE\/EMAIL LIST|BUILDING DIRECTORY|AGED ARREARS|^LEGAL:|^\*\s*-\s*MOVED OUT|^TOTALS:|^TENANT NAME:/i;
 
 function cleanLines(text) {
-  return text.split("\n").map(l => l.trim()).filter(l => l && !SKIP_LINE_RE.test(l));
+  return text.split("\n").map(l => l.trim()).map(l => {
+    // Some reports print "APT: A1" as one line (the real code merged with the
+    // column label) instead of the usual separate "APT: TENANT NAME:" header
+    // row — keep the code, drop just the label, so that apartment isn't lost.
+    const m = l.match(/^APT:\s*(.+)$/i);
+    return m ? m[1].trim() : l;
+  }).filter(l => l && !SKIP_LINE_RE.test(l) && !/^APT:?$/i.test(l));
 }
 
 // Every RIS report repeats a header like:
@@ -252,14 +258,25 @@ function parseContactsText(text) {
   // every apartment header, then pull the first phone number and first email
   // found anywhere between that header and the next one, wherever it landed.
   const cleaned = cleanLines(text).join(" ");
+  const LABELS = "(?:CELL|EMAIL ADDRESS|HOME|WORK|OTHER|FAX)";
+  // Some buildings also have commercial/storefront units identified by a bare
+  // number (no letter prefix, e.g. "9516 JH ORGANIC INC."). Support both forms,
+  // but require the numeric form to have a real name after it — otherwise a
+  // phone number written with spaces instead of dashes ("718 833 3607 FAX")
+  // can look just like a 4-digit unit code.
+  const NEXT_HEADER = `(?:${APT_RE}|\\d{4})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
   const headerRe = new RegExp(
-    `(?:^|\\s)(${APT_RE})\\s+((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]*?)(?=\\s+(?:CELL|EMAIL ADDRESS|HOME|WORK|OTHER|FAX)\\b|\\s+${APT_RE}\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])|$)`,
+    `(?:^|\\s)(?:` +
+      `(${APT_RE})\\s+((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]*?)` +
+      `|` +
+      `(\\d{4})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.'\\-\\s]+?)` +
+    `)(?=\\s+${LABELS}\\b|\\s+${NEXT_HEADER}|$)`,
     "g"
   );
   const headers = [];
   let m;
   while ((m = headerRe.exec(cleaned))) {
-    headers.push({ apt: m[1], name: m[2].trim(), start: m.index, end: m.index + m[0].length });
+    headers.push({ apt: m[1] || m[3], name: (m[2] || m[4] || "").trim(), start: m.index, end: m.index + m[0].length });
   }
 
   const phoneRe = /\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}/;
