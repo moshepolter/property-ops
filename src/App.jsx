@@ -23,7 +23,7 @@ const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
 import {
-  Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat, Home,
+  Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat, Home, Phone,
   CalendarClock, ScrollText, MessageSquare, Archive as ArchiveIcon,
   Plus, X, Camera, Download, LayoutDashboard, ChevronDown, ChevronRight, ChevronLeft,
   Trash2, Pencil, Upload, Menu, Printer, CheckCircle2
@@ -698,7 +698,7 @@ export default function PropertyOpsApp() {
     { key: "inspections", label: "Appointments", icon: <CalendarClock size={16} /> },
     { key: "laws", label: "NYC Local Laws", icon: <ScrollText size={16} /> },
     { key: "reminders", label: "Boss Reminders", icon: <MessageSquare size={16} /> },
-    { key: "quicknotes", label: "Quick Notes", icon: <Pencil size={16} /> },
+    { key: "quicknotes", label: "Quick Notes / Follow-up", icon: <Pencil size={16} /> },
   ];
 
   const searchResults = useMemo(() => {
@@ -790,7 +790,7 @@ export default function PropertyOpsApp() {
             {tab === "inspections" && <AppointmentsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} />}
             {tab === "laws" && <LocalLawsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
             {tab === "reminders" && <RemindersTab data={data} add={add} update={update} remove={remove} />}
-            {tab === "quicknotes" && <QuickNotesTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
+            {tab === "quicknotes" && <QuickNotesTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setTab={setTab} />}
           </main>
         </div>
       )}
@@ -850,7 +850,7 @@ function SearchResults({ results, buildingName, onClose }) {
 
 const TAB_LABELS = {
   rent: "Rent Collection", violations: "Violations", court: "Court Cases",
-  inspections: "Appointments", quicknotes: "Quick Notes",
+  inspections: "Appointments", quicknotes: "Quick Notes / Follow-up",
 };
 
 function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, extraAction }) {
@@ -1054,11 +1054,11 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
     }));
     setConfirmingCleanup(false);
   };
-  const [monthsToShow, setMonthsToShow] = useState(1);
 
   // Tenants with a follow-up already scheduled show up under "to follow up" —
   // no need to also flag them under "not current on rent", that's just noise.
   const overdueTenants = data.tenants.filter(t => t.status !== "Current" && tenantFollowUps(t).length === 0);
+  const today = todayISO();
   // Each open violation goes into exactly ONE of these buckets, by agency, so it
   // never shows up twice on the dashboard. Window covers overdue + due within 10 days.
   const violationDue = (v) => { const d = daysUntil(v.cureDeadline); return d !== null && d <= 10 && !isViolationClosed(v); };
@@ -1072,21 +1072,36 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const stipItems = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && flagFor(c.nextPaymentDue));
   const recurringItems = data.appointments.filter(a => !a.completed && a.recurring && flagFor(a.date));
   const appointmentItems = data.appointments.filter(a => !a.completed && !a.recurring && flagFor(a.date));
-  const quickNoteItems = (data.quickNotes || []).filter(n => !n.done);
+  // A reminder set for later stays off the dashboard until that date actually
+  // arrives — no need to see it every day until then, it'll show up on its own.
+  const quickNoteItems = (data.quickNotes || []).filter(n => !n.done && (!n.reminderDate || n.reminderDate <= today));
   const bossReminderItems = data.bossReminders.filter(r => r.status !== "Done");
-  const followUpCutoff = addMonths(todayISO(), monthsToShow);
-  const tenantsWithFollowUps = data.tenants.filter(t => tenantFollowUps(t).length > 0);
+  // Same snooze rule for tenant follow-ups — only show once due (or overdue),
+  // not the whole month in advance.
+  const tenantsWithFollowUps = data.tenants.filter(t => tenantFollowUps(t).some(f => f.date && f.date <= today));
   const allFollowUps = tenantsWithFollowUps.length;
   // Flatten to one row per (tenant, follow-up) pair, since a tenant can have several.
   const followUpEntries = tenantsWithFollowUps
-    .flatMap(t => tenantFollowUps(t).map(f => ({ tenant: t, followUp: f })))
-    .filter(e => e.followUp.date && e.followUp.date <= followUpCutoff)
+    .flatMap(t => tenantFollowUps(t).filter(f => f.date && f.date <= today).map(f => ({ tenant: t, followUp: f })))
     .sort((a, b) => (a.followUp.date || "").localeCompare(b.followUp.date || ""));
   const overdueShown = showAllOverdue ? overdueTenants : overdueTenants.slice(0, 5);
   const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id));
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
   const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + hpdDue.length + dobDue.length + fdnyDue.length + otherViolationsDue.length + bossReminderItems.length;
+
+  // Top stat row + follow-up roster
+  const allDated = allDatedItems(data, tenantName, buildingName);
+  const overdueCount = allDated.filter(i => i.date < today).length;
+  const todayCount = allDated.filter(i => i.date === today).length;
+  const buildingsClearCount = data.buildings.filter(b => {
+    const hasViolation = data.violations.some(v => v.buildingId === b.id && !isViolationClosed(v));
+    const hasLateTenant = data.tenants.some(t => t.buildingId === b.id && t.status !== "Current");
+    const hasOpenWO = data.workOrders.some(w => w.buildingId === b.id && w.status !== "Done");
+    const hasOpenCourt = data.courtCases.some(c => c.buildingId === b.id && !c.archived);
+    return !hasViolation && !hasLateTenant && !hasOpenWO && !hasOpenCourt;
+  }).length;
+  const rosterEntries = followUpEntries.slice(0, 8);
 
   return (
     <div>
@@ -1095,7 +1110,36 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
         <PrintButton label="Dashboard" />
       </div>
 
-      <DashboardCalendar data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} />
+      <div className="dash-stats-row">
+        <div className="dash-stat-card"><div className="dash-stat-num" style={{ color: "var(--danger)" }}>{overdueCount}</div><div className="dash-stat-label">Overdue</div></div>
+        <div className="dash-stat-card"><div className="dash-stat-num" style={{ color: "var(--warn)" }}>{todayCount}</div><div className="dash-stat-label">Today</div></div>
+        <div className="dash-stat-card"><div className="dash-stat-num">{allFollowUps}</div><div className="dash-stat-label">Follow-ups</div></div>
+        <div className="dash-stat-card"><div className="dash-stat-num" style={{ color: "var(--ok)" }}>{buildingsClearCount}</div><div className="dash-stat-label">Buildings clear</div></div>
+      </div>
+
+      <div className="dash-two-col">
+        <div className="dash-col-side">
+          <DashboardCalendar data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} />
+        </div>
+        <div className="dash-col-main">
+          {rosterEntries.length > 0 && (
+            <div className="dash-roster">
+              <div className="dash-roster-title">Follow up with</div>
+              {rosterEntries.map(({ tenant: t, followUp: f }) => (
+                <div className="dash-roster-row" key={f.id}>
+                  <div className="dash-roster-info">
+                    <div className="dash-roster-name">{t.name}</div>
+                    <div className="dash-roster-sub">{buildingName(t.buildingId)}{f.note ? ` — ${f.note}` : ""}{!f.note && t.balance ? ` — $${t.balance} behind` : ""}</div>
+                  </div>
+                  <div className="dash-roster-meta">
+                    {t.phone && <a href={`tel:${t.phone}`} className="dash-roster-phone" onClick={(e) => e.stopPropagation()} title={t.phone}><Phone size={14} /></a>}
+                    <span className="pill pill-muted">{fmtDate(f.date)}</span>
+                  </div>
+                </div>
+              ))}
+              <button className="btn-ghost" style={{ marginTop: 6 }} onClick={() => setTab("rent")}>View in Rent Collection</button>
+            </div>
+          )}
 
       {totalAttention === 0 ? (
         <div className="all-clear"><CheckCircle2 size={18} /> Nothing needs attention right now.</div>
@@ -1142,11 +1186,6 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
                           </div>
                         </div>
                       ))}
-                      {followUpEntries.length < tenantsWithFollowUps.flatMap(t => tenantFollowUps(t)).length && (
-                        <button className="btn-ghost" style={{ marginTop: 6 }} onClick={() => setMonthsToShow(m => m + 1)}>
-                          Show next month
-                        </button>
-                      )}
                     </div>
                   )}
                   <button className="btn-ghost" style={{ marginTop: 6 }} onClick={() => setTab("rent")}>View in Rent Collection</button>
@@ -1315,6 +1354,8 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
           />
         </>
       )}
+        </div>
+      </div>
 
       <h2 className="section-heading">By building</h2>
       {data.buildings.length === 0 ? (
@@ -2995,13 +3036,14 @@ function RemindersTab({ data, add, update, remove }) {
 
 /* ============================== quick notes ============================== */
 
-function QuickNotesTab({ data, add, update, remove, buildingName }) {
+function QuickNotesTab({ data, add, update, remove, buildingName, setTab }) {
   const [text, setText] = useState("");
   const [reminderDate, setReminderDate] = useState("");
   const [buildingId, setBuildingId] = useState("");
   const [editingId, setEditingId] = useState(null);
   const [editText, setEditText] = useState("");
   const [showDone, setShowDone] = useState(false);
+  const [showAllFollowUps, setShowAllFollowUps] = useState(false);
 
   const submit = () => {
     if (!text.trim()) return;
@@ -3018,13 +3060,22 @@ function QuickNotesTab({ data, add, update, remove, buildingName }) {
   const allNotes = (data.quickNotes || []).slice().reverse();
   const notes = showDone ? allNotes : allNotes.filter(n => !n.done);
 
+  const today = todayISO();
+  const allFollowUpEntries = data.tenants
+    .flatMap(t => tenantFollowUps(t).map(f => ({ tenant: t, followUp: f })))
+    .filter(e => e.followUp.date)
+    .sort((a, b) => (a.followUp.date || "").localeCompare(b.followUp.date || ""));
+  const followUpsToShow = showAllFollowUps ? allFollowUpEntries : allFollowUpEntries.filter(e => e.followUp.date <= today);
+
   return (
     <div>
       <div className="page-head">
-        <h1 className="page-title">Quick Notes</h1>
+        <h1 className="page-title">Quick Notes / Follow-up</h1>
         <PrintButton label="Quick Notes" />
       </div>
-      <p className="hint">A checklist for anything you need to jot down fast — check it off when it's handled, optionally set a reminder date, and tie it to a building if it's related to one.</p>
+
+      <h2 className="section-heading">Quick notes</h2>
+      <p className="hint">A checklist for anything you need to jot down fast — check it off when it's handled, optionally set a reminder date, and tie it to a building if it's related to one. A note with a reminder date stays off the Dashboard until that date arrives.</p>
       <div className="form-panel">
         <Field label="Note"><input placeholder="Jot something down…" value={text} onChange={e => setText(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} /></Field>
         <Field label="Reminder date (optional)"><input type="date" value={reminderDate} onChange={e => setReminderDate(e.target.value)} /></Field>
@@ -3064,6 +3115,27 @@ function QuickNotesTab({ data, add, update, remove, buildingName }) {
                 <IconBtn title="Delete" danger onClick={() => remove("quickNotes", n.id)}><Trash2 size={14} /></IconBtn>
               </>
             )}
+          </div>
+        </div>
+      ))}
+
+      <h2 className="section-heading" style={{ marginTop: 28 }}>Follow-ups</h2>
+      <p className="hint">Tenant follow-ups set from Rent Collection. Only shows up here (and on the Dashboard) once due — edit or add follow-ups from the tenant's row in Rent Collection.</p>
+      <div className="filter-row">
+        <button className={`chip ${!showAllFollowUps ? "chip-active" : ""}`} onClick={() => setShowAllFollowUps(false)}>Due now</button>
+        <button className={`chip ${showAllFollowUps ? "chip-active" : ""}`} onClick={() => setShowAllFollowUps(true)}>All upcoming</button>
+        <button className="btn-ghost" onClick={() => setTab("rent")}>View in Rent Collection</button>
+      </div>
+      {followUpsToShow.length === 0 && <EmptyState text={showAllFollowUps ? "No follow-ups scheduled." : "Nothing due yet."} />}
+      {followUpsToShow.map(({ tenant: t, followUp: f }) => (
+        <div className="list-card" key={f.id}>
+          <div className="list-card-head">
+            <div className="list-card-title">{t.name}</div>
+            <span className="pill pill-muted">{buildingName(t.buildingId)}</span>
+            <span className={`pill ${f.date <= today ? "pill-warn" : "pill-muted"}`}>{fmtDate(f.date)}</span>
+            {f.note && <span className="row-muted" style={{ fontSize: 13 }}>{f.note}</span>}
+            <div className="spacer" />
+            <button className="btn-ghost" onClick={() => setTab("rent")}>Open</button>
           </div>
         </div>
       ))}
@@ -3291,6 +3363,20 @@ function Styles() {
         display: flex; align-items: center; gap: 10px; background: var(--ok-bg); color: var(--ok);
         border-radius: 8px; padding: 16px; font-size: 13px; margin-bottom: 24px;
       }
+      .dash-stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+      .dash-stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center; }
+      .dash-stat-num { font-size: 22px; font-weight: 700; color: var(--navy); line-height: 1.2; }
+      .dash-stat-label { font-size: 11px; color: var(--ink-soft); margin-top: 2px; }
+      .dash-two-col { display: grid; grid-template-columns: 260px 1fr; gap: 16px; align-items: start; }
+      .dash-col-side .dash-calendar-compact { max-width: none; }
+      .dash-roster { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; }
+      .dash-roster-title { font-size: 12px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 8px; }
+      .dash-roster-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+      .dash-roster-row:last-of-type { border-bottom: none; }
+      .dash-roster-name { font-size: 13px; font-weight: 500; }
+      .dash-roster-sub { font-size: 12px; color: var(--ink-soft); }
+      .dash-roster-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+      .dash-roster-phone { display: flex; color: var(--navy); }
       .dash-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
       .dash-building-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
       .dash-building-clickable { cursor: pointer; }
@@ -3403,6 +3489,8 @@ function Styles() {
       .followup-item-note { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
 
       @media (max-width: 720px) {
+        .dash-two-col { grid-template-columns: 1fr; }
+        .dash-stats-row { grid-template-columns: repeat(2, 1fr); }
         .form-panel { grid-template-columns: 1fr; }
         .law-row { grid-template-columns: 1fr; }
         .sidenav { width: 78%; }
