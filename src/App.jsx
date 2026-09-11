@@ -1274,24 +1274,6 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const stipItems = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && dateDue(c.nextPaymentDue));
   const recurringItems = data.appointments.filter(a => !a.completed && a.recurring && dateDue(a.date));
   const appointmentItems = data.appointments.filter(a => !a.completed && !a.recurring && dateDue(a.date));
-  // Compliance deadlines need more lead time than a violation cure date, so
-  // this uses a 30-day window instead of 7-10. Every building x law
-  // combination is checked, even ones with no row saved yet — a law that's
-  // never been touched defaults to "Not started" with no deadline, exactly
-  // like the Local Laws page itself already treats it, and that default
-  // counts as needing attention rather than being invisible just because
-  // no one has entered a date for it yet.
-  const lawDue = (row) => {
-    if (row.status === "Filed / compliant" || row.status === "Not applicable") return false;
-    const days = daysUntil(row.deadline);
-    return days === null || days <= 30;
-  };
-  const lawItems = data.buildings.flatMap(b =>
-    LOCAL_LAWS.map(law => {
-      const existing = data.localLaws.find(l => l.buildingId === b.id && l.lawKey === law.key);
-      return existing || { buildingId: b.id, lawKey: law.key, deadline: "", status: "Not started" };
-    }).filter(lawDue).map(row => ({ ...row, lawName: LOCAL_LAWS.find(l => l.key === row.lawKey)?.name || row.lawKey }))
-  );
   // A reminder set for later stays off the dashboard until that date actually
   // arrives — no need to see it every day until then, it'll show up on its own.
   const quickNoteItems = (data.quickNotes || []).filter(n => !n.done && (!n.reminderDate || n.reminderDate <= today));
@@ -1308,7 +1290,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id));
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
-  const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + hpdDue.length + dobDue.length + fdnyDue.length + otherViolationsDue.length + bossReminderItems.length + lawItems.length;
+  const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + hpdDue.length + dobDue.length + fdnyDue.length + otherViolationsDue.length + bossReminderItems.length;
 
   // Top stat row + follow-up roster
   const allDated = allDatedItems(data, tenantName, buildingName);
@@ -1320,8 +1302,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
     const hasLateTenant = data.tenants.some(t => t.buildingId === b.id && t.status !== "Current");
     const hasOpenWO = data.workOrders.some(w => w.buildingId === b.id && w.status !== "Done");
     const hasOpenCourt = data.courtCases.some(c => c.buildingId === b.id && !c.archived);
-    const hasLawDue = lawItems.some(i => i.buildingId === b.id);
-    return !hasViolation && !hasLateTenant && !hasOpenWO && !hasOpenCourt && !hasLawDue;
+    return !hasViolation && !hasLateTenant && !hasOpenWO && !hasOpenCourt;
   }).map(b => b.id));
   const buildingsClearCount = clearBuildingIds.size;
   const rosterEntries = followUpEntries.slice(0, 8);
@@ -1771,21 +1752,6 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
               )
             }
           />
-
-          <AttentionPanel
-            icon={<ScrollText size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label={<>Local Law compliance due or overdue <span className="dash-panel-sub">(within 30 days, includes anything with no deadline set yet)</span></>} items={lawItems} tab="laws" setTab={setTab}
-            itemKey={row => row.buildingId + row.lawKey}
-            renderItem={row => (
-              <>
-                <Flag date={row.deadline} />
-                <div className="followup-item-main">
-                  <div className="followup-item-name">{row.lawName} <span className="row-muted">— {buildingName(row.buildingId)}</span></div>
-                  <div className="followup-item-note">{row.status}{!row.deadline ? " — no deadline set" : ""}</div>
-                </div>
-              </>
-            )}
-          />
         </>
       )}
         </div>
@@ -1801,13 +1767,11 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
             const bTenantsLateList = data.tenants.filter(t => t.buildingId === b.id && t.status !== "Current");
             const bWOList = data.workOrders.filter(w => w.buildingId === b.id && w.status !== "Done");
             const bCourtList = data.courtCases.filter(c => c.buildingId === b.id && !c.archived);
-            const bLawList = lawItems.filter(i => i.buildingId === b.id);
             const chips = [
               bViolationsList.length > 0 && { text: `${bViolationsList.length} open violations`, tone: "warn" },
               bTenantsLateList.length > 0 && { text: `${bTenantsLateList.length} tenants behind`, tone: "danger" },
               bWOList.length > 0 && { text: `${bWOList.length} open work orders`, tone: "muted" },
               bCourtList.length > 0 && { text: `${bCourtList.length} open cases`, tone: "danger" },
-              bLawList.length > 0 && { text: `${bLawList.length} local law item${bLawList.length === 1 ? "" : "s"}`, tone: "warn" },
             ].filter(Boolean);
             const isExpanded = expandedBuilding === b.id;
             return (
@@ -1848,12 +1812,6 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
                       <button key={w.id} className="dash-detail-item" onClick={(e) => { e.stopPropagation(); setTab("workorders"); }}>
                         <span className="pill pill-muted">{w.status}</span>
                         <div className="followup-item-main"><div className="followup-item-name">{w.description}</div></div>
-                      </button>
-                    ))}
-                    {bLawList.map(row => (
-                      <button key={row.buildingId + row.lawKey} className="dash-detail-item" onClick={(e) => { e.stopPropagation(); setTab("laws"); }}>
-                        <span className="pill pill-warn">{row.status}</span>
-                        <div className="followup-item-main"><div className="followup-item-name">{LOCAL_LAWS.find(l => l.key === row.lawKey)?.name || row.lawKey}{row.deadline ? ` — ${fmtDate(row.deadline)}` : ""}</div></div>
                       </button>
                     ))}
                   </div>
@@ -3295,6 +3253,21 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
             </select>
           </Field>
           <Field label="Violation #"><input value={form.violationNumber} onChange={e => setForm({ ...form, violationNumber: e.target.value })} /></Field>
+          <Field label="Agency">
+            <select value={form.agency} onChange={e => {
+              const newAgency = e.target.value;
+              setForm({
+                ...form,
+                agency: newAgency,
+                otherAgency: newAgency === "Other" ? (form.otherAgency || otherAgencyOptions[0] || "") : "",
+                status: statusesFor(newAgency)[0],
+              });
+            }}>
+              <option value="HPD">HPD</option>
+              <option value="DSNY">DSNY</option>
+              <option value="Other">Other</option>
+            </select>
+          </Field>
 
           {form.agency === "HPD" && (
             <>
@@ -4139,7 +4112,7 @@ function Styles() {
       .law-table { display: flex; flex-direction: column; gap: 6px; }
       .law-row { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 10px; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
       .law-name { font-size: 13px; }
-      .law-row input, .law-row select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; }
+      .law-row input, .law-row select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; width: 100%; box-sizing: border-box; }
       .search-results-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
       .photo-uploader { margin-top: 4px; }
       .photo-grid { display: flex; gap: 8px; flex-wrap: wrap; }
