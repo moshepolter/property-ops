@@ -1256,16 +1256,42 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   // never shows up twice on the dashboard. Window covers overdue + due within 10 days.
   const violationDue = (v) => { if (isViolationClosed(v)) return false; const d = daysUntil(v.cureDeadline); return d === null || d <= 10; };
   const hpdDue = data.violations.filter(v => v.agency === "HPD" && violationDue(v));
-  const dobDue = data.violations.filter(v => v.agency === "Other" && v.otherAgency === "DOB" && violationDue(v));
-  const fdnyDue = data.violations.filter(v => v.agency === "Other" && v.otherAgency === "FDNY" && violationDue(v));
+  const sameAgency = (a, b) => (a || "").trim().toUpperCase() === b;
+  const dobDue = data.violations.filter(v => v.agency === "Other" && sameAgency(v.otherAgency, "DOB") && violationDue(v));
+  const fdnyDue = data.violations.filter(v => v.agency === "Other" && sameAgency(v.otherAgency, "FDNY") && violationDue(v));
   const otherViolationsDue = data.violations.filter(v =>
-    (v.agency === "DSNY" || (v.agency === "Other" && v.otherAgency !== "DOB" && v.otherAgency !== "FDNY")) && violationDue(v)
+    (v.agency === "DSNY" || (v.agency === "Other" && !sameAgency(v.otherAgency, "DOB") && !sameAgency(v.otherAgency, "FDNY"))) && violationDue(v)
   );
   const dateDue = (d) => { const days = daysUntil(d); return days === null || days <= 7; };
-  const courtItems = data.courtCases.filter(c => !c.archived && dateDue(c.nextCourtDate));
+  const dateDueStrict = (d) => { const days = daysUntil(d); return days !== null && days <= 7; };
+  // A stipulation case's normal resting state is having NO next court date —
+  // proceedings are over, all that's left is the payment schedule (tracked
+  // separately below). Treating that empty field as "needs attention" would
+  // make every settled stipulation permanently show up here for no reason.
+  // A case still actively in litigation with no date set is a real gap
+  // though, so that one still counts.
+  const courtItems = data.courtCases.filter(c => !c.archived && (c.result === "Stipulation (payment plan)" ? dateDueStrict(c.nextCourtDate) : dateDue(c.nextCourtDate)));
   const stipItems = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && dateDue(c.nextPaymentDue));
   const recurringItems = data.appointments.filter(a => !a.completed && a.recurring && dateDue(a.date));
   const appointmentItems = data.appointments.filter(a => !a.completed && !a.recurring && dateDue(a.date));
+  // Compliance deadlines need more lead time than a violation cure date, so
+  // this uses a 30-day window instead of 7-10. Every building x law
+  // combination is checked, even ones with no row saved yet — a law that's
+  // never been touched defaults to "Not started" with no deadline, exactly
+  // like the Local Laws page itself already treats it, and that default
+  // counts as needing attention rather than being invisible just because
+  // no one has entered a date for it yet.
+  const lawDue = (row) => {
+    if (row.status === "Filed / compliant" || row.status === "Not applicable") return false;
+    const days = daysUntil(row.deadline);
+    return days === null || days <= 30;
+  };
+  const lawItems = data.buildings.flatMap(b =>
+    LOCAL_LAWS.map(law => {
+      const existing = data.localLaws.find(l => l.buildingId === b.id && l.lawKey === law.key);
+      return existing || { buildingId: b.id, lawKey: law.key, deadline: "", status: "Not started" };
+    }).filter(lawDue).map(row => ({ ...row, lawName: LOCAL_LAWS.find(l => l.key === row.lawKey)?.name || row.lawKey }))
+  );
   // A reminder set for later stays off the dashboard until that date actually
   // arrives — no need to see it every day until then, it'll show up on its own.
   const quickNoteItems = (data.quickNotes || []).filter(n => !n.done && (!n.reminderDate || n.reminderDate <= today));
@@ -1282,7 +1308,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id));
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
-  const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + hpdDue.length + dobDue.length + fdnyDue.length + otherViolationsDue.length + bossReminderItems.length;
+  const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + hpdDue.length + dobDue.length + fdnyDue.length + otherViolationsDue.length + bossReminderItems.length + lawItems.length;
 
   // Top stat row + follow-up roster
   const allDated = allDatedItems(data, tenantName, buildingName);
@@ -1294,7 +1320,8 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
     const hasLateTenant = data.tenants.some(t => t.buildingId === b.id && t.status !== "Current");
     const hasOpenWO = data.workOrders.some(w => w.buildingId === b.id && w.status !== "Done");
     const hasOpenCourt = data.courtCases.some(c => c.buildingId === b.id && !c.archived);
-    return !hasViolation && !hasLateTenant && !hasOpenWO && !hasOpenCourt;
+    const hasLawDue = lawItems.some(i => i.buildingId === b.id);
+    return !hasViolation && !hasLateTenant && !hasOpenWO && !hasOpenCourt && !hasLawDue;
   }).map(b => b.id));
   const buildingsClearCount = clearBuildingIds.size;
   const rosterEntries = followUpEntries.slice(0, 8);
@@ -1522,7 +1549,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
         <div className="dash-col-main">
           {rosterEntries.length > 0 && (
             <div className="dash-roster">
-              <div className="dash-roster-title">Follow up with</div>
+              <div className="dash-roster-title">Follow up with ({followUpEntries.length})</div>
               {rosterEntries.map(({ tenant: t, followUp: f }) => (
                 <div className="dash-roster-row" key={f.id}>
                   <div className="dash-roster-info">
@@ -1535,6 +1562,11 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
                   </div>
                 </div>
               ))}
+              {followUpEntries.length > rosterEntries.length && (
+                <div className="row-muted" style={{ fontSize: 12, marginTop: 4 }}>
+                  + {followUpEntries.length - rosterEntries.length} more not shown here
+                </div>
+              )}
               <button className="btn-ghost" style={{ marginTop: 6 }} onClick={() => setTab("rent")}>View in Rent Collection</button>
             </div>
           )}
@@ -1577,7 +1609,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>HPD violations due or overdue <span className="dash-panel-sub">(within 10 days)</span></>} items={hpdDue} tab="violations" setTab={setTab}
+            label={<>HPD violations due or overdue <span className="dash-panel-sub">(within 10 days, or no cure deadline set)</span></>} items={hpdDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1591,7 +1623,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>DOB violations due or overdue <span className="dash-panel-sub">(within 10 days)</span></>} items={dobDue} tab="violations" setTab={setTab}
+            label={<>DOB violations due or overdue <span className="dash-panel-sub">(within 10 days, or no cure deadline set)</span></>} items={dobDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1605,7 +1637,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>FDNY violations due or overdue <span className="dash-panel-sub">(within 10 days)</span></>} items={fdnyDue} tab="violations" setTab={setTab}
+            label={<>FDNY violations due or overdue <span className="dash-panel-sub">(within 10 days, or no cure deadline set)</span></>} items={fdnyDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1619,7 +1651,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>Other violations due or overdue (DSNY, ECB, DEP, etc.) <span className="dash-panel-sub">(within 10 days)</span></>} items={otherViolationsDue} tab="violations" setTab={setTab}
+            label={<>Other violations due or overdue (DSNY, ECB, DEP, etc.) <span className="dash-panel-sub">(within 10 days, or no cure deadline set)</span></>} items={otherViolationsDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1633,7 +1665,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<Gavel size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>Court dates due or overdue <span className="dash-panel-sub">(within 7 days)</span></>} items={courtItems} tab="court" setTab={setTab}
+            label={<>Court dates due or overdue <span className="dash-panel-sub">(within 7 days, or no date set — except settled payment plans)</span></>} items={courtItems} tab="court" setTab={setTab}
             itemKey={c => c.id}
             renderItem={c => (
               <>
@@ -1647,7 +1679,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<Gavel size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>Stipulation payments due <span className="dash-panel-sub">(within 7 days)</span></>} items={stipItems} tab="court" setTab={setTab}
+            label={<>Stipulation payments due <span className="dash-panel-sub">(within 7 days, or no payment date set)</span></>} items={stipItems} tab="court" setTab={setTab}
             itemKey={c => c.id}
             renderItem={c => (
               <>
@@ -1662,7 +1694,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<CalendarClock size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label={<>Recurring inspections due or overdue <span className="dash-panel-sub">(within 7 days)</span></>} items={recurringItems} tab="inspections" setTab={setTab}
+            label={<>Recurring inspections due or overdue <span className="dash-panel-sub">(within 7 days, or no date set)</span></>} items={recurringItems} tab="inspections" setTab={setTab}
             itemKey={a => a.id}
             renderItem={a => (
               <>
@@ -1679,7 +1711,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<CalendarClock size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label={<>Appointments coming up <span className="dash-panel-sub">(within 7 days)</span></>} items={appointmentItems} tab="inspections" setTab={setTab}
+            label={<>Appointments coming up <span className="dash-panel-sub">(within 7 days, or no date set)</span></>} items={appointmentItems} tab="inspections" setTab={setTab}
             itemKey={a => a.id}
             renderItem={a => (
               <>
@@ -1739,6 +1771,21 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
               )
             }
           />
+
+          <AttentionPanel
+            icon={<ScrollText size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
+            label={<>Local Law compliance due or overdue <span className="dash-panel-sub">(within 30 days, includes anything with no deadline set yet)</span></>} items={lawItems} tab="laws" setTab={setTab}
+            itemKey={row => row.buildingId + row.lawKey}
+            renderItem={row => (
+              <>
+                <Flag date={row.deadline} />
+                <div className="followup-item-main">
+                  <div className="followup-item-name">{row.lawName} <span className="row-muted">— {buildingName(row.buildingId)}</span></div>
+                  <div className="followup-item-note">{row.status}{!row.deadline ? " — no deadline set" : ""}</div>
+                </div>
+              </>
+            )}
+          />
         </>
       )}
         </div>
@@ -1754,11 +1801,13 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
             const bTenantsLateList = data.tenants.filter(t => t.buildingId === b.id && t.status !== "Current");
             const bWOList = data.workOrders.filter(w => w.buildingId === b.id && w.status !== "Done");
             const bCourtList = data.courtCases.filter(c => c.buildingId === b.id && !c.archived);
+            const bLawList = lawItems.filter(i => i.buildingId === b.id);
             const chips = [
               bViolationsList.length > 0 && { text: `${bViolationsList.length} open violations`, tone: "warn" },
               bTenantsLateList.length > 0 && { text: `${bTenantsLateList.length} tenants behind`, tone: "danger" },
               bWOList.length > 0 && { text: `${bWOList.length} open work orders`, tone: "muted" },
               bCourtList.length > 0 && { text: `${bCourtList.length} open cases`, tone: "danger" },
+              bLawList.length > 0 && { text: `${bLawList.length} local law item${bLawList.length === 1 ? "" : "s"}`, tone: "warn" },
             ].filter(Boolean);
             const isExpanded = expandedBuilding === b.id;
             return (
@@ -1799,6 +1848,12 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
                       <button key={w.id} className="dash-detail-item" onClick={(e) => { e.stopPropagation(); setTab("workorders"); }}>
                         <span className="pill pill-muted">{w.status}</span>
                         <div className="followup-item-main"><div className="followup-item-name">{w.description}</div></div>
+                      </button>
+                    ))}
+                    {bLawList.map(row => (
+                      <button key={row.buildingId + row.lawKey} className="dash-detail-item" onClick={(e) => { e.stopPropagation(); setTab("laws"); }}>
+                        <span className="pill pill-warn">{row.status}</span>
+                        <div className="followup-item-main"><div className="followup-item-name">{LOCAL_LAWS.find(l => l.key === row.lawKey)?.name || row.lawKey}{row.deadline ? ` — ${fmtDate(row.deadline)}` : ""}</div></div>
                       </button>
                     ))}
                   </div>
@@ -3753,7 +3808,7 @@ function LocalLawsTab({ data, add, update, remove, buildingName }) {
       <div className="law-table">
         {rowsFor(buildingId).map(row => (
           <div className="law-row" key={row.lawKey}>
-            <div className="law-name">{LOCAL_LAWS.find(l => l.key === row.lawKey).name}</div>
+            <div className="law-name">{LOCAL_LAWS.find(l => l.key === row.lawKey)?.name || row.lawKey}</div>
             <input type="date" value={row.deadline} onChange={e => saveRow({ ...row, deadline: e.target.value })} />
             <select value={row.status} onChange={e => saveRow({ ...row, status: e.target.value })}>
               <option>Not started</option>
@@ -4032,7 +4087,7 @@ function Styles() {
       .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-soft); }
       .field input, .field select, .field textarea {
         font-size: 13px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 5px;
-        background: #fff; color: var(--ink); font-family: inherit;
+        background: #fff; color: var(--ink); font-family: inherit; width: 100%; box-sizing: border-box;
       }
       .field textarea { min-height: 60px; resize: vertical; }
       .list-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
