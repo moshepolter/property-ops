@@ -1105,6 +1105,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const [showAllOverdue, setShowAllOverdue] = useState(false);
   const [confirmingCleanup, setConfirmingCleanup] = useState(false);
   const [expandedBuilding, setExpandedBuilding] = useState(null);
+  const [statOpen, setStatOpen] = useState(null);
 
   const cleanupAllEmptyUnits = () => {
     setData(d => ({
@@ -1152,14 +1153,16 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   // Top stat row + follow-up roster
   const allDated = allDatedItems(data, tenantName, buildingName);
   const overdueCount = allDated.filter(i => i.date < today).length;
-  const todayCount = allDated.filter(i => i.date === today).length;
-  const buildingsClearCount = data.buildings.filter(b => {
+  const openWorkOrders = data.workOrders.filter(w => w.status !== "Done");
+  const openCourtCases = data.courtCases.filter(c => !c.archived);
+  const clearBuildingIds = new Set(data.buildings.filter(b => {
     const hasViolation = data.violations.some(v => v.buildingId === b.id && !isViolationClosed(v));
     const hasLateTenant = data.tenants.some(t => t.buildingId === b.id && t.status !== "Current");
     const hasOpenWO = data.workOrders.some(w => w.buildingId === b.id && w.status !== "Done");
     const hasOpenCourt = data.courtCases.some(c => c.buildingId === b.id && !c.archived);
     return !hasViolation && !hasLateTenant && !hasOpenWO && !hasOpenCourt;
-  }).length;
+  }).map(b => b.id));
+  const buildingsClearCount = clearBuildingIds.size;
   const rosterEntries = followUpEntries.slice(0, 8);
 
   const exportAllData = () => {
@@ -1280,11 +1283,81 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
       </div>
 
       <div className="dash-stats-row">
-        <div className="dash-stat-card"><div className="dash-stat-num" style={{ color: "var(--danger)" }}>{overdueCount}</div><div className="dash-stat-label">Overdue</div></div>
-        <div className="dash-stat-card"><div className="dash-stat-num" style={{ color: "var(--warn)" }}>{todayCount}</div><div className="dash-stat-label">Today</div></div>
-        <div className="dash-stat-card"><div className="dash-stat-num">{allFollowUps}</div><div className="dash-stat-label">Follow-ups</div></div>
-        <div className="dash-stat-card"><div className="dash-stat-num" style={{ color: "var(--ok)" }}>{buildingsClearCount}</div><div className="dash-stat-label">Buildings clear</div></div>
+        <button className="dash-stat-card" onClick={() => setStatOpen(s => s === "overdue" ? null : "overdue")}>
+          <div className="dash-stat-num" style={{ color: "var(--danger)" }}>{overdueCount}</div>
+          <div className="dash-stat-label">Overdue</div>
+          <div className="dash-stat-sub">Past due date, any type</div>
+        </button>
+        <button className="dash-stat-card" onClick={() => setStatOpen(s => s === "workorders" ? null : "workorders")}>
+          <div className="dash-stat-num" style={{ color: "var(--warn)" }}>{openWorkOrders.length}</div>
+          <div className="dash-stat-label">Open work orders</div>
+          <div className="dash-stat-sub">Not marked done</div>
+        </button>
+        <button className="dash-stat-card" onClick={() => setStatOpen(s => s === "courtcases" ? null : "courtcases")}>
+          <div className="dash-stat-num">{openCourtCases.length}</div>
+          <div className="dash-stat-label">Open court cases</div>
+          <div className="dash-stat-sub">Active, not archived</div>
+        </button>
+        <button className="dash-stat-card" onClick={() => setStatOpen(s => s === "clear" ? null : "clear")}>
+          <div className="dash-stat-num" style={{ color: "var(--ok)" }}>{buildingsClearCount}</div>
+          <div className="dash-stat-label">Buildings clear</div>
+          <div className="dash-stat-sub">No open issues</div>
+        </button>
       </div>
+
+      {statOpen && (
+        <div className="dash-stat-detail">
+          {statOpen === "overdue" && (
+            allDated.filter(i => i.date < today).length === 0
+              ? <div className="hint">Nothing overdue.</div>
+              : allDated.filter(i => i.date < today).sort((a, b) => a.date.localeCompare(b.date)).map(item => (
+                <button key={item.key} className="dash-detail-item" onClick={() => setTab(item.tab)}>
+                  <span className="pill pill-danger">{item.type}</span>
+                  <div className="followup-item-main">
+                    <div className="followup-item-name">{item.label}{item.sub ? <span className="row-muted"> — {item.sub}</span> : null}</div>
+                  </div>
+                  <span className="pill pill-muted">{fmtDate(item.date)}</span>
+                </button>
+              ))
+          )}
+          {statOpen === "workorders" && (
+            openWorkOrders.length === 0
+              ? <div className="hint">No open work orders.</div>
+              : openWorkOrders.map(w => (
+                <button key={w.id} className="dash-detail-item" onClick={() => setTab("workorders")}>
+                  <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : w.priority === "Urgent" ? "pill-warn" : "pill-muted"}`}>{w.priority}</span>
+                  <div className="followup-item-main">
+                    <div className="followup-item-name">{w.description}<span className="row-muted"> — {buildingName(w.buildingId)}</span></div>
+                  </div>
+                  <span className="pill pill-muted">{w.status}</span>
+                </button>
+              ))
+          )}
+          {statOpen === "courtcases" && (
+            openCourtCases.length === 0
+              ? <div className="hint">No open court cases.</div>
+              : openCourtCases.map(c => (
+                <button key={c.id} className="dash-detail-item" onClick={() => setTab("court")}>
+                  <span className="pill pill-muted">{c.stage || "—"}</span>
+                  <div className="followup-item-main">
+                    <div className="followup-item-name">{tenantName(c.tenantId)}<span className="row-muted"> — {buildingName(c.buildingId)}</span></div>
+                  </div>
+                  {c.nextCourtDate && <span className="pill pill-muted">{fmtDate(c.nextCourtDate)}</span>}
+                </button>
+              ))
+          )}
+          {statOpen === "clear" && (
+            data.buildings.filter(b => clearBuildingIds.has(b.id)).length === 0
+              ? <div className="hint">No buildings are fully clear right now.</div>
+              : data.buildings.filter(b => clearBuildingIds.has(b.id)).map(b => (
+                <button key={b.id} className="dash-detail-item" onClick={() => setTab("buildings")}>
+                  <span className="pill pill-ok">All clear</span>
+                  <div className="followup-item-main"><div className="followup-item-name">{shortAddress(b.address)}</div></div>
+                </button>
+              ))
+          )}
+        </div>
+      )}
 
       <div className="dash-two-col">
         <div className="dash-col-side">
@@ -1314,49 +1387,32 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
         <div className="all-clear"><CheckCircle2 size={18} /> Nothing needs attention right now.</div>
       ) : (
         <>
-          {rentPanelCount > 0 && (
+          {overdueTenants.length > 0 && (
             <div className="followup-panel">
               <button className="followup-panel-head" onClick={() => setRentPanelOpen(o => !o)}>
                 <Users size={18} className="attention-icon" style={{ color: "var(--danger)" }} />
-                <span className="attention-count">{rentPanelCount}</span>
-                <span className="attention-label">Tenants not current on rent / Tenants to follow up <span className="dash-panel-sub">(follow-ups show once due)</span></span>
+                <span className="attention-count">{overdueTenants.length}</span>
+                <span className="attention-label">Tenants not current on rent</span>
                 {rentPanelOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
               </button>
               {rentPanelOpen && (
                 <div className="followup-panel-body">
-                  {overdueTenants.length > 0 && (
-                    <div className="followup-subsection">
-                      <div className="followup-subsection-title">Not current on rent ({overdueTenants.length})</div>
-                      {overdueShown.map(t => (
-                        <div className="followup-item" key={t.id}>
-                          <span className={`pill ${t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status}</span>
-                          <div className="followup-item-main">
-                            <div className="followup-item-name">{t.name} <span className="row-muted">— {buildingName(t.buildingId)}</span></div>
-                            {t.balance && <div className="followup-item-note">Balance: ${t.balance}</div>}
-                          </div>
+                  <div className="followup-subsection">
+                    {overdueShown.map(t => (
+                      <div className="followup-item" key={t.id}>
+                        <span className={`pill ${t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status}</span>
+                        <div className="followup-item-main">
+                          <div className="followup-item-name">{t.name} <span className="row-muted">— {buildingName(t.buildingId)}</span></div>
+                          {t.balance && <div className="followup-item-note">Balance: ${t.balance}</div>}
                         </div>
-                      ))}
-                      {overdueTenants.length > 5 && (
-                        <button className="btn-ghost" style={{ marginTop: 6 }} onClick={() => setShowAllOverdue(s => !s)}>
-                          {showAllOverdue ? "Show fewer" : `Show all ${overdueTenants.length}`}
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  {allFollowUps > 0 && (
-                    <div className="followup-subsection">
-                      <div className="followup-subsection-title">Tenants to follow up ({allFollowUps})</div>
-                      {followUpEntries.map(({ tenant: t, followUp: f }) => (
-                        <div className={`followup-item ${isInFollowUpWindow(f.date) ? "followup-item-due" : ""}`} key={f.id}>
-                          <span className="pill pill-muted">{fmtDate(f.date)}</span>
-                          <div className="followup-item-main">
-                            <div className="followup-item-name">{t.name} <span className="row-muted">— {buildingName(t.buildingId)}</span></div>
-                            {f.note && <div className="followup-item-note">{f.note}</div>}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                      </div>
+                    ))}
+                    {overdueTenants.length > 5 && (
+                      <button className="btn-ghost" style={{ marginTop: 6 }} onClick={() => setShowAllOverdue(s => !s)}>
+                        {showAllOverdue ? "Show fewer" : `Show all ${overdueTenants.length}`}
+                      </button>
+                    )}
+                  </div>
                   <button className="btn-ghost" style={{ marginTop: 6 }} onClick={() => setTab("rent")}>View in Rent Collection</button>
                 </div>
               )}
@@ -1456,7 +1512,10 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
               <>
                 <Flag date={a.date} />
                 <div className="followup-item-main">
-                  <div className="followup-item-name">{a.type} <span className="row-muted">— {buildingName(a.buildingId)}</span></div>
+                  <div className="followup-item-name">
+                    {a.type} <span className="row-muted">— {buildingName(a.buildingId)}{a.unitId ? ` (Unit ${data.units.find(u => u.id === a.unitId)?.unitNumber || "—"})` : ""}</span>
+                  </div>
+                  {(a.timeFrom || a.timeTo) && <div className="followup-item-note">{fmtTime(a.timeFrom)}{a.timeTo ? ` – ${fmtTime(a.timeTo)}` : ""}</div>}
                 </div>
               </>
             )}
@@ -1470,7 +1529,10 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
               <>
                 <Flag date={a.date} />
                 <div className="followup-item-main">
-                  <div className="followup-item-name">{a.type} <span className="row-muted">— {buildingName(a.buildingId)}</span></div>
+                  <div className="followup-item-name">
+                    {a.type} <span className="row-muted">— {buildingName(a.buildingId)}{a.unitId ? ` (Unit ${data.units.find(u => u.id === a.unitId)?.unitNumber || "—"})` : ""}</span>
+                  </div>
+                  {(a.timeFrom || a.timeTo) && <div className="followup-item-note">{fmtTime(a.timeFrom)}{a.timeTo ? ` – ${fmtTime(a.timeTo)}` : ""}</div>}
                 </div>
               </>
             )}
@@ -3010,6 +3072,7 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
 function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
   const [form, setForm] = useState(null);
   const [view, setView] = useState("upcoming");
+  const [expandedRow, setExpandedRow] = useState(null);
   const allTypes = [...APPOINTMENT_TYPES, ...(data.customAppointmentTypes || [])];
 
   const submit = () => {
@@ -3025,7 +3088,9 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
     }
   };
 
-  const blank = () => ({ buildingId: data.buildings[0]?.id || "", unitId: "", type: allTypes[0] || "Other", date: "", timeFrom: "", timeTo: "", notes: "", recurring: false, completed: false });
+  // Defaults to 9am-11am so the time picker opens near a normal workday start
+  // instead of midnight — still fully editable to anything earlier or later.
+  const blank = () => ({ buildingId: data.buildings[0]?.id || "", unitId: "", type: allTypes[0] || "Other", date: "", timeFrom: "09:00", timeTo: "11:00", notes: "", recurring: false, completed: false });
 
   const list = data.appointments.filter(a => view === "upcoming" ? !a.completed : a.completed);
 
@@ -3093,11 +3158,12 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
       {list.map(a => {
         const d = daysUntil(a.date);
         const reminderHit = view === "upcoming" && d !== null && [0, 1, 3, 7].includes(d);
+        const isOpen = expandedRow === a.id;
         return (
           <div className="list-card" key={a.id}>
-            <div className="list-card-head">
+            <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : a.id)} style={{ cursor: "pointer" }}>
+              {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
               <div className="list-card-title">{a.type}</div>
-              {a.recurring && <span className="pill pill-muted">Recurring</span>}
               <span className="pill pill-muted">{buildingName(a.buildingId)}</span>
               {a.unitId && <span className="pill pill-muted">Unit {data.units.find(u => u.id === a.unitId)?.unitNumber || "—"}</span>}
               {view === "upcoming" && <Flag date={a.date} />}
@@ -3105,20 +3171,27 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
               {(a.timeFrom || a.timeTo) && (
                 <span className="pill pill-muted">{fmtTime(a.timeFrom)}{a.timeTo ? ` – ${fmtTime(a.timeTo)}` : ""}</span>
               )}
-              {reminderHit && <span className="pill pill-warn">Reminder</span>}
               <div className="spacer" />
-              {view === "upcoming" && (
-                <a className="btn-ghost" href={icsFor(`${a.type} — ${buildingName(a.buildingId)}`, a.date, a.notes, a.timeFrom, a.timeTo)} download={`${(a.type || "appointment").replace(/\s/g, "-")}.ics`}>
-                  <Download size={14} /> Add to calendar
-                </a>
-              )}
-              <IconBtn title={view === "upcoming" ? "Mark completed" : "Move back to upcoming"} onClick={() => update("appointments", a.id, { completed: !a.completed })}>
+              <IconBtn title={view === "upcoming" ? "Mark completed" : "Move back to upcoming"} onClick={(e) => { e.stopPropagation(); update("appointments", a.id, { completed: !a.completed }); }}>
                 <CheckCircle2 size={14} />
               </IconBtn>
-              <IconBtn title="Edit" onClick={() => setForm(a)}><Pencil size={14} /></IconBtn>
-              <IconBtn title="Delete" danger onClick={() => remove("appointments", a.id)}><Trash2 size={14} /></IconBtn>
+              <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(a); }}><Pencil size={14} /></IconBtn>
+              <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("appointments", a.id); }}><Trash2 size={14} /></IconBtn>
             </div>
-            {a.notes && <div className="list-card-body"><div className="row">{a.notes}</div></div>}
+            {isOpen && (
+              <div className="list-card-body">
+                <div className="row" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {a.recurring && <span className="pill pill-muted">Recurring</span>}
+                  {reminderHit && <span className="pill pill-warn">Reminder</span>}
+                </div>
+                {a.notes && <div className="row">{a.notes}</div>}
+                {view === "upcoming" && (
+                  <a className="btn-ghost" style={{ marginTop: 6, display: "inline-flex" }} href={icsFor(`${a.type} — ${buildingName(a.buildingId)}`, a.date, a.notes, a.timeFrom, a.timeTo)} download={`${(a.type || "appointment").replace(/\s/g, "-")}.ics`}>
+                    <Download size={14} /> Add to calendar
+                  </a>
+                )}
+              </div>
+            )}
           </div>
         );
       })}
@@ -3553,9 +3626,18 @@ function Styles() {
         border-radius: 8px; padding: 16px; font-size: 13px; margin-bottom: 24px;
       }
       .dash-stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
-      .dash-stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center; }
+      .dash-stat-card {
+        background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center;
+        cursor: pointer; font: inherit; width: 100%;
+      }
+      .dash-stat-card:hover { border-color: var(--navy); }
+      .dash-stat-detail {
+        background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+        padding: 10px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px;
+      }
       .dash-stat-num { font-size: 22px; font-weight: 700; color: var(--navy); line-height: 1.2; }
       .dash-stat-label { font-size: 11px; color: var(--ink-soft); margin-top: 2px; }
+      .dash-stat-sub { font-size: 10px; color: var(--ink-soft); margin-top: 1px; }
       .dash-two-col { display: grid; grid-template-columns: 260px 1fr; gap: 16px; align-items: start; }
       .dash-col-side .dash-calendar-compact { max-width: none; }
       .dash-roster { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; }
