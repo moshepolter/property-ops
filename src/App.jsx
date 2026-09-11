@@ -1226,6 +1226,7 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
 
 function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const [rentPanelOpen, setRentPanelOpen] = useState(false);
+  const [violationsPanelOpen, setViolationsPanelOpen] = useState(false);
   const [showAllOverdue, setShowAllOverdue] = useState(false);
   const [confirmingCleanup, setConfirmingCleanup] = useState(false);
   const [expandedBuilding, setExpandedBuilding] = useState(null);
@@ -1622,22 +1623,34 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
             </div>
           )}
 
-          {violationAgencyGroups.map(g => (
-            <AttentionPanel
-              key={g.name}
-              icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-              label={<>{g.name} violations — all open <span className="dash-panel-sub">(sorted by cure deadline)</span></>} items={g.items} tab="violations" setTab={setTab}
-              itemKey={v => v.id}
-              renderItem={v => (
-                <>
-                  <Flag date={v.cureDeadline} />
-                  <div className="followup-item-main">
-                    <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
-                  </div>
-                </>
+          {violationAgencyGroups.length > 0 && (
+            <div className="followup-panel">
+              <button className="followup-panel-head" onClick={() => setViolationsPanelOpen(o => !o)}>
+                <AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />
+                <span className="attention-count">{violationAgencyGroups.reduce((sum, g) => sum + g.items.length, 0)}</span>
+                <span className="attention-label">Violations — all open <span className="dash-panel-sub">(grouped by agency, sorted by cure deadline)</span></span>
+                {violationsPanelOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+              </button>
+              {violationsPanelOpen && (
+                <div className="followup-panel-body">
+                  {violationAgencyGroups.map((g, gi) => (
+                    <div key={g.name} style={{ marginTop: gi === 0 ? 0 : 14 }}>
+                      <div className="violations-group-heading">{g.name} <span className="dash-panel-sub">({g.items.length})</span></div>
+                      {g.items.map(v => (
+                        <button key={v.id} className="dash-detail-item" onClick={() => setTab("violations")}>
+                          <Flag date={v.cureDeadline} />
+                          <div className="followup-item-main">
+                            <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                  <button className="btn-ghost" style={{ marginTop: 10 }} onClick={() => setTab("violations")}>View in Violations</button>
+                </div>
               )}
-            />
-          ))}
+            </div>
+          )}
 
           <AttentionPanel
             icon={<Gavel size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
@@ -4077,8 +4090,8 @@ function Styles() {
       .search-result-row:hover { background: var(--panel); padding-left: 4px; }
       .row-muted { color: var(--ink-soft); }
       .strike { text-decoration: line-through; color: var(--ink-soft); }
-      .inline-form { display: flex; gap: 8px; margin: 8px 0; }
-      .inline-form input { flex: 1; padding: 7px 9px; border: 1px solid var(--border); border-radius: 5px; font-size: 13px; }
+      .inline-form { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+      .inline-form input { flex: 1; min-width: 120px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 5px; font-size: 13px; }
       .filter-row { display: flex; gap: 6px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
       .chip { border: 1px solid var(--border); background: #fff; padding: 6px 12px; border-radius: 20px; font-size: 12px; cursor: pointer; color: var(--ink-soft); }
       .chip-active { background: var(--navy); border-color: var(--navy); color: #fff; }
