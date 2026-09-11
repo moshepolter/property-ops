@@ -2629,20 +2629,113 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
     e.target.value = "";
   };
 
-  let list = data.violations.filter(v => v.agency === agency && (view === "active" ? !isClosed(v) : isClosed(v)));
-  if (view === "active") {
-    if (dueFilter !== "all") {
-      const maxDays = dueFilter === "24h" ? 1 : dueFilter === "1w" ? 7 : 10;
-      list = list.filter(v => { const d = daysUntil(v.cureDeadline); return d !== null && d <= maxDays; });
+  // Any distinct "Other Agency" value actually in use (DOB, FDNY, DEP, etc.)
+  // gets its own top-level tab automatically, instead of being buried inside
+  // a generic "Other" bucket — "Other" stays as the catch-all for anything
+  // without a specific agency set.
+  const dynamicOtherAgencies = [...new Set(data.violations.filter(v => v.agency === "Other" && v.otherAgency).map(v => v.otherAgency))].sort();
+  const agencyTabs = ["All", "HPD", "DSNY", ...dynamicOtherAgencies, "Other"];
+
+  const matchesAgency = (v, a) => {
+    if (a === "HPD") return v.agency === "HPD";
+    if (a === "DSNY") return v.agency === "DSNY";
+    if (a === "Other") return v.agency === "Other" && !v.otherAgency;
+    return v.agency === "Other" && v.otherAgency === a;
+  };
+  const filterAndSort = (a) => {
+    let l = data.violations.filter(v => matchesAgency(v, a) && (view === "active" ? !isClosed(v) : isClosed(v)));
+    if (view === "active") {
+      if (dueFilter !== "all") {
+        const maxDays = dueFilter === "24h" ? 1 : dueFilter === "1w" ? 7 : 10;
+        l = l.filter(v => { const d = daysUntil(v.cureDeadline); return d !== null && d <= maxDays; });
+      }
+      l = [...l].sort((a2, b2) => {
+        const da = daysUntil(a2.cureDeadline); const db = daysUntil(b2.cureDeadline);
+        if (da === null && db === null) return 0;
+        if (da === null) return 1;
+        if (db === null) return -1;
+        return da - db;
+      });
     }
-    list = [...list].sort((a, b) => {
-      const da = daysUntil(a.cureDeadline); const db = daysUntil(b.cureDeadline);
-      if (da === null && db === null) return 0;
-      if (da === null) return 1;
-      if (db === null) return -1;
-      return da - db;
-    });
-  }
+    return l;
+  };
+
+  const renderRow = (v, rowAgency) => {
+    const flag = view === "active" ? flagFor(v.cureDeadline) : null;
+    const isOpen = expandedRow === v.id;
+    return (
+      <div className={`list-card ${flag === "overdue" ? "list-card-danger" : flag === "soon" ? "list-card-warn" : ""}`} key={v.id}>
+        <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : v.id)} style={{ cursor: "pointer", alignItems: "flex-start" }}>
+          {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          {v.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === v.unitId)?.unitNumber || "—"}</span>}
+          <div className="violation-title-group">
+            <div className="list-card-title">#{v.violationNumber}</div>
+            {v.description && <div className="violation-desc-preview">{v.description}</div>}
+          </div>
+          <span className={`pill ${isClosed(v) ? "pill-ok" : "pill-muted"}`}>{v.status}</span>
+          <span className="pill pill-muted">{buildingName(v.buildingId)}</span>
+          {rowAgency === "HPD" && v.vendorId && <span className="pill pill-muted">{vendorName(v.vendorId)}</span>}
+          {rowAgency === "DSNY" && v.fineAmount && <span className="pill pill-muted">{v.fineAmount}</span>}
+          {rowAgency !== "HPD" && rowAgency !== "DSNY" && v.otherAgency && <span className="pill pill-muted">{v.otherAgency}</span>}
+          {rowAgency !== "HPD" && rowAgency !== "DSNY" && v.company && <span className="pill pill-muted">{v.company}</span>}
+          {rowAgency !== "DSNY" && view === "active" && <Flag date={v.cureDeadline} />}
+          <div className="spacer" />
+          {rowAgency === "HPD" && view === "active" && (
+            <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); update("violations", v.id, { status: "Certified" }); }}>
+              Mark Certified
+            </button>
+          )}
+          {rowAgency === "DSNY" && view === "active" && (
+            <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); update("violations", v.id, { status: "Paid" }); }}>
+              Mark paid
+            </button>
+          )}
+          <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(v); }}><Pencil size={14} /></IconBtn>
+          <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("violations", v.id); }}><Trash2 size={14} /></IconBtn>
+        </div>
+        {isOpen && (
+          <div className="list-card-body">
+            {rowAgency === "DSNY" && view === "active" && (
+              <div className="row" style={{ display: "flex", gap: 8, marginBottom: 4 }}>
+                <button className={`chip ${v.status === "Disputing online" ? "chip-active" : ""}`} onClick={() => update("violations", v.id, { status: "Disputing online" })}>
+                  Fighting it
+                </button>
+                <button className={`chip ${v.status === "Paid" ? "chip-active" : ""}`} onClick={() => update("violations", v.id, { status: "Paid" })}>
+                  Paying it
+                </button>
+              </div>
+            )}
+            {v.class && <div className="row"><strong>Class:</strong> {v.class}</div>}
+            {v.description && <div className="row">{v.description}</div>}
+            <PhotoUploader
+              photos={v.photos}
+              pathPrefix={`violations/${v.id}/photos`}
+              onAdd={(newPhotos) => update("violations", v.id, { photos: [...(v.photos || []), ...newPhotos] })}
+              onRemove={(p) => {
+                update("violations", v.id, { photos: (v.photos || []).filter(x => x.id !== p.id) });
+                if (p.storagePath) deleteObject(storageRef(storage, p.storagePath)).catch(() => {});
+              }}
+            />
+            <div className="row" style={{ marginTop: 8 }}>
+              <strong>Notes</strong>
+              <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => setNoteFor(noteFor === v.id ? null : v.id)}><Plus size={14} /> Add note</button>
+            </div>
+            {noteFor === v.id && (
+              <div className="inline-form">
+                <input placeholder="Update…" value={noteText} onChange={e => setNoteText(e.target.value)} />
+                <button className="btn-primary" onClick={() => addNote(v)}>Save</button>
+              </div>
+            )}
+            {(v.notes || []).slice().reverse().map((n, i) => (
+              <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  let list = agency === "All" ? [] : filterAndSort(agency);
 
   return (
     <div>
@@ -2652,7 +2745,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           <PrintButton label="Violations" />
           <button className="btn-ghost" onClick={() => fileRef.current.click()}><Upload size={14} /> Import CSV</button>
           <input ref={fileRef} type="file" accept=".csv" hidden onChange={handleCSV} />
-          <button className="btn-primary" onClick={() => setForm(blankForm(agency))}>
+          <button className="btn-primary" onClick={() => setForm(blankForm(agency === "All" ? "HPD" : agency))}>
             <Plus size={14} /> Add violation
           </button>
         </div>
@@ -2660,7 +2753,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
       <p className="hint">CSV columns recognized: agency, violationNumber, address, class, description, dateIssued, cureDeadline, fineAmount, company, status.</p>
 
       <div className="filter-row">
-        {AGENCIES.map(a => (
+        {agencyTabs.map(a => (
           <button key={a} className={`chip ${agency === a ? "chip-active" : ""}`} onClick={() => setAgency(a)}>{a}</button>
         ))}
         <div className="spacer" />
@@ -2737,81 +2830,23 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
         </div>
       )}
 
-      {list.length === 0 && <EmptyState text={`No ${agency} violations here.`} />}
-      {list.map(v => {
-        const flag = view === "active" ? flagFor(v.cureDeadline) : null;
-        const isOpen = expandedRow === v.id;
-        return (
-          <div className={`list-card ${flag === "overdue" ? "list-card-danger" : flag === "soon" ? "list-card-warn" : ""}`} key={v.id}>
-            <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : v.id)} style={{ cursor: "pointer", alignItems: "flex-start" }}>
-              {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              {v.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === v.unitId)?.unitNumber || "—"}</span>}
-              <div className="violation-title-group">
-                <div className="list-card-title">#{v.violationNumber}</div>
-                {v.description && <div className="violation-desc-preview">{v.description}</div>}
-              </div>
-              <span className={`pill ${isClosed(v) ? "pill-ok" : "pill-muted"}`}>{v.status}</span>
-              <span className="pill pill-muted">{buildingName(v.buildingId)}</span>
-              {agency === "HPD" && v.vendorId && <span className="pill pill-muted">{vendorName(v.vendorId)}</span>}
-              {agency === "DSNY" && v.fineAmount && <span className="pill pill-muted">{v.fineAmount}</span>}
-              {agency === "Other" && v.otherAgency && <span className="pill pill-muted">{v.otherAgency}</span>}
-              {agency === "Other" && v.company && <span className="pill pill-muted">{v.company}</span>}
-              {agency !== "DSNY" && view === "active" && <Flag date={v.cureDeadline} />}
-              <div className="spacer" />
-              {agency === "HPD" && view === "active" && (
-                <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); update("violations", v.id, { status: "Certified" }); }}>
-                  Mark Certified
-                </button>
-              )}
-              {agency === "DSNY" && view === "active" && (
-                <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); update("violations", v.id, { status: "Paid" }); }}>
-                  Mark paid
-                </button>
-              )}
-              <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(v); }}><Pencil size={14} /></IconBtn>
-              <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("violations", v.id); }}><Trash2 size={14} /></IconBtn>
+      {agency === "All" ? (
+        (() => {
+          const groups = ["HPD", "DSNY", ...dynamicOtherAgencies, "Other"].map(a => ({ agency: a, items: filterAndSort(a) })).filter(g => g.items.length > 0);
+          if (groups.length === 0) return <EmptyState text="No violations here." />;
+          return groups.map((g, gi) => (
+            <div key={g.agency} style={{ marginTop: gi === 0 ? 0 : 20 }}>
+              <div className="violations-group-heading">{g.agency} <span className="dash-panel-sub">({g.items.length})</span></div>
+              {g.items.map(v => renderRow(v, g.agency))}
             </div>
-            {isOpen && (
-              <div className="list-card-body">
-                {agency === "DSNY" && view === "active" && (
-                  <div className="row" style={{ display: "flex", gap: 8, marginBottom: 4 }}>
-                    <button className={`chip ${v.status === "Disputing online" ? "chip-active" : ""}`} onClick={() => update("violations", v.id, { status: "Disputing online" })}>
-                      Fighting it
-                    </button>
-                    <button className={`chip ${v.status === "Paid" ? "chip-active" : ""}`} onClick={() => update("violations", v.id, { status: "Paid" })}>
-                      Paying it
-                    </button>
-                  </div>
-                )}
-                {v.class && <div className="row"><strong>Class:</strong> {v.class}</div>}
-                {v.description && <div className="row">{v.description}</div>}
-                <PhotoUploader
-                  photos={v.photos}
-                  pathPrefix={`violations/${v.id}/photos`}
-                  onAdd={(newPhotos) => update("violations", v.id, { photos: [...(v.photos || []), ...newPhotos] })}
-                  onRemove={(p) => {
-                    update("violations", v.id, { photos: (v.photos || []).filter(x => x.id !== p.id) });
-                    if (p.storagePath) deleteObject(storageRef(storage, p.storagePath)).catch(() => {});
-                  }}
-                />
-                <div className="row" style={{ marginTop: 8 }}>
-                  <strong>Notes</strong>
-                  <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => setNoteFor(noteFor === v.id ? null : v.id)}><Plus size={14} /> Add note</button>
-                </div>
-                {noteFor === v.id && (
-                  <div className="inline-form">
-                    <input placeholder="Update…" value={noteText} onChange={e => setNoteText(e.target.value)} />
-                    <button className="btn-primary" onClick={() => addNote(v)}>Save</button>
-                  </div>
-                )}
-                {(v.notes || []).slice().reverse().map((n, i) => (
-                  <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })}
+          ));
+        })()
+      ) : (
+        <>
+          {list.length === 0 && <EmptyState text={`No ${agency} violations here.`} />}
+          {list.map(v => renderRow(v, agency))}
+        </>
+      )}
     </div>
   );
 }
@@ -3492,6 +3527,7 @@ function Styles() {
       .content { flex: 1; padding: 24px 28px; padding-bottom: max(24px, env(safe-area-inset-bottom)); min-width: 0; }
       .page-title { font-family: Georgia, "Times New Roman", serif; font-size: 24px; margin: 0 0 14px; }
       .section-heading { font-family: Georgia, "Times New Roman", serif; font-size: 18px; margin: 28px 0 10px; }
+      .violations-group-heading { font-size: 13px; font-weight: 700; color: var(--ink); text-transform: uppercase; letter-spacing: 0.03em; padding-bottom: 6px; margin-bottom: 8px; border-bottom: 2px solid var(--border); }
       .page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; flex-wrap: wrap; gap: 8px; }
       .page-actions { display: flex; gap: 8px; }
       .hint { color: var(--ink-soft); font-size: 12px; margin: 4px 0 16px; }
