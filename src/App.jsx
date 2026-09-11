@@ -1254,17 +1254,18 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const today = todayISO();
   // Each open violation goes into exactly ONE of these buckets, by agency, so it
   // never shows up twice on the dashboard. Window covers overdue + due within 10 days.
-  const violationDue = (v) => { const d = daysUntil(v.cureDeadline); return d !== null && d <= 10 && !isViolationClosed(v); };
+  const violationDue = (v) => { if (isViolationClosed(v)) return false; const d = daysUntil(v.cureDeadline); return d === null || d <= 10; };
   const hpdDue = data.violations.filter(v => v.agency === "HPD" && violationDue(v));
   const dobDue = data.violations.filter(v => v.agency === "Other" && v.otherAgency === "DOB" && violationDue(v));
   const fdnyDue = data.violations.filter(v => v.agency === "Other" && v.otherAgency === "FDNY" && violationDue(v));
   const otherViolationsDue = data.violations.filter(v =>
     (v.agency === "DSNY" || (v.agency === "Other" && v.otherAgency !== "DOB" && v.otherAgency !== "FDNY")) && violationDue(v)
   );
-  const courtItems = data.courtCases.filter(c => !c.archived && flagFor(c.nextCourtDate));
-  const stipItems = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && flagFor(c.nextPaymentDue));
-  const recurringItems = data.appointments.filter(a => !a.completed && a.recurring && flagFor(a.date));
-  const appointmentItems = data.appointments.filter(a => !a.completed && !a.recurring && flagFor(a.date));
+  const dateDue = (d) => { const days = daysUntil(d); return days === null || days <= 7; };
+  const courtItems = data.courtCases.filter(c => !c.archived && dateDue(c.nextCourtDate));
+  const stipItems = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && dateDue(c.nextPaymentDue));
+  const recurringItems = data.appointments.filter(a => !a.completed && a.recurring && dateDue(a.date));
+  const appointmentItems = data.appointments.filter(a => !a.completed && !a.recurring && dateDue(a.date));
   // A reminder set for later stays off the dashboard until that date actually
   // arrives — no need to see it every day until then, it'll show up on its own.
   const quickNoteItems = (data.quickNotes || []).filter(n => !n.done && (!n.reminderDate || n.reminderDate <= today));
@@ -4154,10 +4155,11 @@ function Styles() {
       .dash-quick-note input { border: none; background: none; outline: none; font-size: 13px; width: 100%; padding: 4px 0; }
       .dash-arrears-nudge {
         display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-        background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn);
+        background: var(--panel); color: var(--ink); border: 1px solid var(--border); border-left: 3px solid var(--warn);
         border-radius: 8px; padding: 8px 12px; margin-bottom: 14px; font-size: 13px; cursor: pointer; font: inherit;
       }
-      .dash-arrears-nudge:hover { opacity: 0.85; }
+      .dash-arrears-nudge svg { color: var(--warn); flex-shrink: 0; }
+      .dash-arrears-nudge:hover { border-color: var(--navy); }
       .dash-stat-card {
         background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center;
         cursor: pointer; font: inherit; width: 100%;
