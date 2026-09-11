@@ -1280,13 +1280,21 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
     if (db === null) return -1;
     return da - db;
   };
-  const hpdDue = data.violations.filter(v => v.agency === "HPD" && violationDue(v)).sort(byCureDeadline);
-  const sameAgency = (a, b) => (a || "").trim().toUpperCase() === b;
-  const dobDue = data.violations.filter(v => v.agency === "Other" && sameAgency(v.otherAgency, "DOB") && violationDue(v)).sort(byCureDeadline);
-  const fdnyDue = data.violations.filter(v => v.agency === "Other" && sameAgency(v.otherAgency, "FDNY") && violationDue(v)).sort(byCureDeadline);
-  const otherViolationsDue = data.violations.filter(v =>
-    (v.agency === "DSNY" || (v.agency === "Other" && !sameAgency(v.otherAgency, "DOB") && !sameAgency(v.otherAgency, "FDNY"))) && violationDue(v)
-  ).sort(byCureDeadline);
+  // Every distinct agency actually in use gets its own group — HPD, DSNY,
+  // and whatever specific agency names ("Other" violations are filed
+  // under — DOB, FDNY, ECB, custom ones, whatever) show up on real
+  // violations. No agency is hardcoded as more important than another;
+  // this mirrors the Violations page's own dynamic tabs exactly, so what
+  // you see here always matches what's over there.
+  const violationAgencyName = (v) => v.agency === "Other" ? (v.otherAgency || "Other") : v.agency;
+  const openViolationsByAgency = {};
+  data.violations.filter(violationDue).forEach(v => {
+    const name = violationAgencyName(v);
+    (openViolationsByAgency[name] = openViolationsByAgency[name] || []).push(v);
+  });
+  const violationAgencyGroups = Object.keys(openViolationsByAgency)
+    .sort((a, b) => a.localeCompare(b))
+    .map(name => ({ name, items: openViolationsByAgency[name].sort(byCureDeadline) }));
   const dateDue = (d) => { const days = daysUntil(d); return days === null || days <= 7; };
   const dateDueStrict = (d) => { const days = daysUntil(d); return days !== null && days <= 7; };
   // A stipulation case's normal resting state is having NO next court date —
@@ -1315,7 +1323,8 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id));
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
-  const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + hpdDue.length + dobDue.length + fdnyDue.length + otherViolationsDue.length + bossReminderItems.length;
+  const totalViolationsDue = violationAgencyGroups.reduce((sum, g) => sum + g.items.length, 0);
+  const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + totalViolationsDue + bossReminderItems.length;
 
   // Top stat row + follow-up roster
   const allDated = allDatedItems(data, tenantName, buildingName);
@@ -1613,61 +1622,22 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
             </div>
           )}
 
-          <AttentionPanel
-            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>HPD violations — all open <span className="dash-panel-sub">(sorted by cure deadline)</span></>} items={hpdDue} tab="violations" setTab={setTab}
-            itemKey={v => v.id}
-            renderItem={v => (
-              <>
-                <Flag date={v.cureDeadline} />
-                <div className="followup-item-main">
-                  <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
-                </div>
-              </>
-            )}
-          />
-
-          <AttentionPanel
-            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>DOB violations — all open <span className="dash-panel-sub">(sorted by cure deadline)</span></>} items={dobDue} tab="violations" setTab={setTab}
-            itemKey={v => v.id}
-            renderItem={v => (
-              <>
-                <Flag date={v.cureDeadline} />
-                <div className="followup-item-main">
-                  <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
-                </div>
-              </>
-            )}
-          />
-
-          <AttentionPanel
-            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>FDNY violations — all open <span className="dash-panel-sub">(sorted by cure deadline)</span></>} items={fdnyDue} tab="violations" setTab={setTab}
-            itemKey={v => v.id}
-            renderItem={v => (
-              <>
-                <Flag date={v.cureDeadline} />
-                <div className="followup-item-main">
-                  <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
-                </div>
-              </>
-            )}
-          />
-
-          <AttentionPanel
-            icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>Other violations — all open (DSNY, ECB, DEP, etc.) <span className="dash-panel-sub">(sorted by cure deadline)</span></>} items={otherViolationsDue} tab="violations" setTab={setTab}
-            itemKey={v => v.id}
-            renderItem={v => (
-              <>
-                <Flag date={v.cureDeadline} />
-                <div className="followup-item-main">
-                  <div className="followup-item-name">#{v.violationNumber} · {v.agency === "Other" ? v.otherAgency : v.agency} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
-                </div>
-              </>
-            )}
-          />
+          {violationAgencyGroups.map(g => (
+            <AttentionPanel
+              key={g.name}
+              icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
+              label={<>{g.name} violations — all open <span className="dash-panel-sub">(sorted by cure deadline)</span></>} items={g.items} tab="violations" setTab={setTab}
+              itemKey={v => v.id}
+              renderItem={v => (
+                <>
+                  <Flag date={v.cureDeadline} />
+                  <div className="followup-item-main">
+                    <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
+                  </div>
+                </>
+              )}
+            />
+          ))}
 
           <AttentionPanel
             icon={<Gavel size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
@@ -3030,7 +3000,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
 /* ============================== violations ============================== */
 
 function ViolationsTab({ data, add, update, remove, buildingName, vendorName, setData }) {
-  const [agency, setAgency] = useState("HPD");
+  const [agency, setAgency] = useState("All");
   const [form, setForm] = useState(null);
   const [view, setView] = useState("active");
   const [dueFilter, setDueFilter] = useState("all");
@@ -3122,7 +3092,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   // a generic "Other" bucket — "Other" stays as the catch-all for anything
   // without a specific agency set.
   const dynamicOtherAgencies = [...new Set(data.violations.filter(v => v.agency === "Other" && v.otherAgency).map(v => v.otherAgency))].sort();
-  const agencyTabs = ["All", "HPD", "DSNY", ...dynamicOtherAgencies, "Other"];
+  const agencyTabs = ["All", "HPD", "DSNY", ...dynamicOtherAgencies];
 
   const matchesAgency = (v, a) => {
     if (a === "HPD") return v.agency === "HPD";
@@ -3278,19 +3248,18 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           </Field>
           <Field label="Violation #"><input value={form.violationNumber} onChange={e => setForm({ ...form, violationNumber: e.target.value })} /></Field>
           <Field label="Agency">
-            <select value={form.agency} onChange={e => {
-              const newAgency = e.target.value;
-              setForm({
-                ...form,
-                agency: newAgency,
-                otherAgency: newAgency === "Other" ? (form.otherAgency || otherAgencyOptions[0] || "") : "",
-                status: statusesFor(newAgency)[0],
-              });
-            }}>
-              <option value="HPD">HPD</option>
-              <option value="DSNY">DSNY</option>
-              <option value="Other">Other</option>
-            </select>
+            <TypeSelectWithAdd
+              value={form.agency === "Other" ? form.otherAgency : form.agency}
+              options={["HPD", "DSNY", ...otherAgencyOptions]}
+              onChange={v => {
+                if (v === "HPD" || v === "DSNY") {
+                  setForm({ ...form, agency: v, otherAgency: "", status: statusesFor(v)[0] });
+                } else {
+                  setForm({ ...form, agency: "Other", otherAgency: v, status: statusesFor("Other")[0] });
+                }
+              }}
+              onAddType={addCustomOtherAgency}
+            />
           </Field>
 
           {form.agency === "HPD" && (
@@ -3316,9 +3285,6 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
 
           {form.agency === "Other" && (
             <>
-              <Field label="Violation agency">
-                <TypeSelectWithAdd value={form.otherAgency} options={otherAgencyOptions} onChange={v => setForm({ ...form, otherAgency: v })} onAddType={addCustomOtherAgency} />
-              </Field>
               <Field label="Violation company handling"><input value={form.company} onChange={e => setForm({ ...form, company: e.target.value })} /></Field>
               <Field label="Description"><textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></Field>
               <Field label="Date issued"><input type="date" value={form.dateIssued} onChange={e => setForm({ ...form, dateIssued: e.target.value })} /></Field>
