@@ -9,7 +9,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs
 // Fill in firebaseConfig below with the values from your Firebase project settings.
 import { initializeApp } from "firebase/app";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
-import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
+import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 
 const firebaseConfig = {
@@ -27,7 +27,7 @@ const db = getFirestore(firebaseApp);
 const storage = getStorage(firebaseApp);
 import {
   Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat, Home, Phone,
-  CalendarClock, ScrollText, MessageSquare, Archive as ArchiveIcon,
+  CalendarClock, ScrollText, MessageSquare, Archive as ArchiveIcon, DollarSign,
   Plus, X, Camera, Download, LayoutDashboard, ChevronDown, ChevronRight, ChevronLeft,
   Trash2, Pencil, Upload, Menu, Printer, CheckCircle2
 } from "lucide-react";
@@ -46,16 +46,27 @@ const todayISO = () => toLocalISO(new Date());
 
 // "B4" must sort before "B39", not after it — plain string sort gets this wrong
 // because it compares character by character. Split into a letter prefix and a
-// numeric suffix and compare those separately.
+// numeric suffix and compare those separately. Two different real-world
+// conventions exist though: letter-then-number (A1, B39) AND number-then-
+// letter (1H, 4A, 4B) — the old version only recognized the first, which
+// silently dropped the trailing letter on the second, so "1G" and "1H" (or
+// "4A" and "4B") all collapsed to the same sort key and ended up in
+// whatever arbitrary order they happened to already be in.
 function unitSortKey(u) {
-  const m = String(u || "").match(/^([A-Za-z]*)(\d*)/);
-  return [m[1] || "", parseInt(m[2] || "0", 10) || 0];
+  const s = String(u || "");
+  let m = s.match(/^([A-Za-z]+)(\d+)/);
+  if (m) return [m[1], parseInt(m[2], 10), ""];
+  m = s.match(/^(\d+)([A-Za-z]*)/);
+  if (m) return ["", parseInt(m[1], 10), m[2] || ""];
+  m = s.match(/^([A-Za-z]*)/);
+  return [m[1] || s, 0, ""];
 }
 function compareUnits(a, b) {
-  const [al, an] = unitSortKey(a);
-  const [bl, bn] = unitSortKey(b);
+  const [al, an, as] = unitSortKey(a);
+  const [bl, bn, bs] = unitSortKey(b);
   if (al !== bl) return al.localeCompare(bl);
-  return an - bn;
+  if (an !== bn) return an - bn;
+  return as.localeCompare(bs);
 }
 
 // Used anywhere a unit picker needs to show who lives there, not just the bare
@@ -295,6 +306,34 @@ function money(n) {
   return "$" + Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// CSV column headers are never guaranteed to match a specific case or
+// spacing — "Address", "ADDRESS", "address ", and "address" are all the
+// same column to a human, but a plain row.address lookup only catches one
+// of them, silently treating the rest as blank. This checks every actual
+// column name in the row (trimmed, lowercased) against each candidate name
+// given, so the exact capitalization/whitespace the CSV happens to use
+// never matters.
+function csvField(row, ...names) {
+  const normalized = {};
+  Object.keys(row).forEach(k => { normalized[k.trim().toLowerCase()] = row[k]; });
+  for (const name of names) {
+    const v = normalized[name.toLowerCase()];
+    if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+  }
+  return "";
+}
+
+// Balances can be a plain number ("1200"), empty, or — from arrears imports
+// done before a past fix — a display-formatted string like "$1,234.56".
+// Plain parseFloat chokes on the $ and returns NaN. This strips anything
+// that isn't a digit/decimal/minus first, so totals, sorting, and the
+// import-delta math are correct regardless of which format a given tenant's
+// balance happens to be in. Shared at module level since buildImportDiff
+// runs outside RentTab and needs the same safety.
+function parseBalance(b) {
+  return parseFloat(String(b || "0").replace(/[^0-9.-]/g, "")) || 0;
+}
+
 // Aged Arrears: "A1 AUDREY LYNN MELENDEZ UNKNO 1698.80 1698.80 3794.00 7191.60"
 function parseArrearsText(text) {
   const lineRe = new RegExp(`^(${APT_RE})(\\*)?\\s+(.+?)\\s+UNKNO\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s*$`);
@@ -305,10 +344,16 @@ function parseArrearsText(text) {
     const [, apt, moved, rawName, d1, d2, d3, total] = m;
     const name = rawName.replace(/^N-\d+\s+/, "").trim();
     const totalNum = parseFloat(total.replace(/,/g, ""));
+    const bucket1 = parseFloat(d1.replace(/,/g, ""));
+    const bucket2 = parseFloat(d2.replace(/,/g, ""));
     const bucket61 = parseFloat(d3.replace(/,/g, ""));
     let status = "Current";
     if (totalNum > 0) status = bucket61 > 0 ? "In Arrears" : "Late";
-    out.push({ apt, movedOut: !!moved, name, balance: money(totalNum), status });
+    // Store balance as a plain number string, same as every manually-typed
+    // balance in the sheet — NOT money()'s "$1,234.56" display format, which
+    // parseFloat can't read (returns NaN), silently breaking any total or
+    // sort built on top of it. money() is for display only, never storage.
+    out.push({ apt, movedOut: !!moved, name, balance: totalNum.toFixed(2), status, aging: { bucket1, bucket2, bucket61 } });
   }
   return out;
 }
@@ -611,7 +656,7 @@ function DocumentUploader({ documents, onAdd, onRemove, pathPrefix }) {
 
 const PIN_STORAGE_KEY = "pm-ops-device-pin";
 
-function LoginScreen({ onSignedIn }) {
+function LoginScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -699,25 +744,71 @@ export default function PropertyOpsApp() {
   const [pinUnlocked, setPinUnlocked] = useState(() => !localStorage.getItem(PIN_STORAGE_KEY));
   const [showPinSetup, setShowPinSetup] = useState(false);
   const [saveError, setSaveError] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const saveTimer = useRef(null);
+  // Saves are debounced 400ms so typing doesn't hammer Firestore on every
+  // keystroke — but that also means a change sits unsaved for up to 400ms
+  // (plus however long the actual write takes). Closing the tab or hitting
+  // back in that window would lose it silently with zero warning. This
+  // tracks whether a save is still owed and, if so, asks the browser to
+  // confirm before actually leaving.
+  const hasPendingSave = useRef(false);
 
   useEffect(() => onAuthStateChanged(auth, u => setUser(u || null)), []);
 
   useEffect(() => {
     if (!user) return;
     setLoaded(false);
-    (async () => {
-      try {
-        const snap = await getDoc(doc(db, "users", user.uid, "appData", "main"));
-        if (snap.exists()) setData({ ...emptyData(), ...snap.data() });
-        else setData(emptyData());
-      } catch (e) { console.error("load failed", e); }
-      setLoaded(true);
-    })();
+    setLoadError(false);
+    // A live listener instead of a one-time fetch — using this on both a
+    // phone and a laptop in the same sitting means each device needs to see
+    // the other's changes, not just whatever was saved the last time this
+    // device happened to load the page.
+    const unsub = onSnapshot(
+      doc(db, "users", user.uid, "appData", "main"),
+      (snap) => {
+        // This fires again the moment OUR OWN save lands too (Firestore
+        // echoes every write back through the listener) — hasPendingWrites
+        // is true for that echo, since it reflects our own write before the
+        // server has fully confirmed it. Our local state is already ahead
+        // of that echo, so there's nothing new to apply — skip it.
+        if (snap.metadata.hasPendingWrites) { setLoaded(true); return; }
+        // If this device has a local edit queued but not saved yet, don't
+        // let an update arriving from the other device stomp on it —
+        // that's the one case where applying a remote update immediately
+        // would actively discard something the user just typed here.
+        if (hasPendingSave.current) { setLoaded(true); return; }
+        if (snap.exists()) {
+          // A plain {...emptyData(), ...snap.data()} spread would let an
+          // explicit null in any field (a stray manual edit in the Firestore
+          // console, or some future bug) silently override the safe []
+          // default — and the very next .map()/.filter() anywhere on that
+          // field would crash the entire app with a blank screen, not just
+          // one feature. Keep the empty-array default for any field that's
+          // null or undefined instead of trusting whatever's in the doc.
+          const loaded = snap.data();
+          const merged = { ...emptyData() };
+          Object.keys(merged).forEach(k => {
+            if (loaded[k] !== null && loaded[k] !== undefined) merged[k] = loaded[k];
+          });
+          setData(merged);
+        } else {
+          setData(emptyData());
+        }
+        setLoaded(true);
+      },
+      (e) => {
+        console.error("load failed", e);
+        setLoadError(true);
+        setLoaded(true);
+      }
+    );
+    return () => unsub();
   }, [user]);
 
   useEffect(() => {
     if (!loaded || !user) return;
+    hasPendingSave.current = true;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
@@ -728,6 +819,11 @@ export default function PropertyOpsApp() {
         const safe = JSON.parse(JSON.stringify(data));
         await setDoc(doc(db, "users", user.uid, "appData", "main"), safe);
         setSaveError(false);
+        // Only a confirmed success means there's nothing left owed — a
+        // failed save leaves the data genuinely unsaved, so the flag (and
+        // the leave-page warning it drives) needs to keep reflecting that
+        // instead of clearing just because the attempt is over.
+        hasPendingSave.current = false;
       } catch (e) {
         console.error("save failed", e);
         setSaveError(true);
@@ -735,6 +831,17 @@ export default function PropertyOpsApp() {
     }, 400);
     return () => clearTimeout(saveTimer.current);
   }, [data, loaded, user]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (hasPendingSave.current) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, []);
 
   // generic collection ops
   const add = (col, item) => setData(d => ({ ...d, [col]: [...d[col], { id: uid(), ...item }] }));
@@ -768,6 +875,7 @@ export default function PropertyOpsApp() {
       violations: data.violations.filter(v => (v.violationNumber || "").toLowerCase().includes(q) || (v.description || "").toLowerCase().includes(q) || buildingName(v.buildingId).toLowerCase().includes(q)),
       courtCases: data.courtCases.filter(c => (c.caseNumber || "").toLowerCase().includes(q) || tenantName(c.tenantId).toLowerCase().includes(q)),
       buildings: data.buildings.filter(b => (b.address || "").toLowerCase().includes(q)),
+      appointments: data.appointments.filter(a => (a.type || "").toLowerCase().includes(q) || (a.notes || "").toLowerCase().includes(q) || buildingName(a.buildingId).toLowerCase().includes(q)),
     };
   }, [query, data]);
 
@@ -800,7 +908,7 @@ export default function PropertyOpsApp() {
           <Search size={16} className="search-icon" />
           <input
             className="search-input"
-            placeholder="Search tenants, violations, cases, addresses…"
+            placeholder="Search tenants, violations, cases, appointments, addresses…"
             value={query}
             onChange={e => setQuery(e.target.value)}
           />
@@ -816,6 +924,12 @@ export default function PropertyOpsApp() {
         </div>
       </header>
 
+      {loadError && (
+        <div className="save-error-banner no-print">
+          <AlertTriangle size={16} /> Couldn't load your data — check your internet connection, or a Firestore permissions issue. What's showing below may be empty or incomplete until this is fixed and you refresh.
+        </div>
+      )}
+
       {saveError && (
         <div className="save-error-banner no-print">
           <AlertTriangle size={16} /> Couldn't save your last change — check your internet connection. Your edits are still here on screen, but won't be there if you close the tab until this clears.
@@ -827,7 +941,7 @@ export default function PropertyOpsApp() {
       )}
 
       {searchResults ? (
-        <SearchResults results={searchResults} buildingName={buildingName} onClose={() => setQuery("")} />
+        <SearchResults results={searchResults} buildingName={buildingName} onClose={() => setQuery("")} setTab={setTab} />
       ) : (
         <div className="layout">
           {navOpen && <div className="nav-scrim no-print" onClick={() => setNavOpen(false)} />}
@@ -841,7 +955,7 @@ export default function PropertyOpsApp() {
           <main className="content">
             {tab === "dashboard" && <Dashboard data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} setData={setData} />}
             {tab === "buildings" && <BuildingsTab data={data} add={add} update={update} remove={remove} setData={setData} buildingName={buildingName} />}
-            {tab === "rent" && <RentTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} unitLabel={unitLabel} setData={setData} />}
+            {tab === "rent" && <RentTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} />}
             {tab === "workorders" && <WorkOrdersTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} />}
             {tab === "violations" && <ViolationsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} setData={setData} />}
             {tab === "vendors" && <VendorsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
@@ -849,7 +963,7 @@ export default function PropertyOpsApp() {
             {tab === "inspections" && <AppointmentsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} />}
             {tab === "laws" && <LocalLawsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
             {tab === "reminders" && <RemindersTab data={data} add={add} update={update} remove={remove} />}
-            {tab === "quicknotes" && <QuickNotesTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setTab={setTab} />}
+            {tab === "quicknotes" && <QuickNotesTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
           </main>
         </div>
       )}
@@ -860,8 +974,9 @@ export default function PropertyOpsApp() {
 
 /* ============================== search ============================== */
 
-function SearchResults({ results, buildingName, onClose }) {
-  const total = results.tenants.length + results.violations.length + results.courtCases.length + results.buildings.length;
+function SearchResults({ results, buildingName, onClose, setTab }) {
+  const total = results.tenants.length + results.violations.length + results.courtCases.length + results.buildings.length + results.appointments.length;
+  const goTo = (t) => { setTab(t); onClose(); };
   return (
     <div className="content" style={{ maxWidth: 900, margin: "0 auto" }}>
       <div className="search-results-head">
@@ -870,33 +985,42 @@ function SearchResults({ results, buildingName, onClose }) {
       </div>
       {results.buildings.length > 0 && (
         <Section icon={<Building2 size={16} />} title="Buildings" count={results.buildings.length}>
-          {results.buildings.map(b => <div className="row" key={b.id}>{shortAddress(b.address)}</div>)}
+          {results.buildings.map(b => <button className="row search-result-row" key={b.id} onClick={() => goTo("buildings")}>{shortAddress(b.address)}</button>)}
         </Section>
       )}
       {results.tenants.length > 0 && (
         <Section icon={<Users size={16} />} title="Tenants" count={results.tenants.length}>
           {results.tenants.map(t => (
-            <div className="row" key={t.id}>
+            <button className="row search-result-row" key={t.id} onClick={() => goTo("rent")}>
               <strong>{t.name}</strong> — {buildingName(t.buildingId)} · {t.status}
-            </div>
+            </button>
           ))}
         </Section>
       )}
       {results.violations.length > 0 && (
         <Section icon={<AlertTriangle size={16} />} title="Violations" count={results.violations.length}>
           {results.violations.map(v => (
-            <div className="row" key={v.id}>
+            <button className="row search-result-row" key={v.id} onClick={() => goTo("violations")}>
               <strong>{v.agency}</strong> #{v.violationNumber} — {buildingName(v.buildingId)} · {v.status}
-            </div>
+            </button>
           ))}
         </Section>
       )}
       {results.courtCases.length > 0 && (
         <Section icon={<Gavel size={16} />} title="Court Cases" count={results.courtCases.length}>
           {results.courtCases.map(c => (
-            <div className="row" key={c.id}>
+            <button className="row search-result-row" key={c.id} onClick={() => goTo("court")}>
               #{c.caseNumber || "—"} — {c.result}
-            </div>
+            </button>
+          ))}
+        </Section>
+      )}
+      {results.appointments.length > 0 && (
+        <Section icon={<CalendarClock size={16} />} title="Appointments" count={results.appointments.length}>
+          {results.appointments.map(a => (
+            <button className="row search-result-row" key={a.id} onClick={() => goTo("inspections")}>
+              <strong>{a.type}</strong> — {buildingName(a.buildingId)}{a.date ? ` · ${fmtDate(a.date)}` : ""}{a.completed ? " · Completed" : ""}
+            </button>
           ))}
         </Section>
       )}
@@ -941,10 +1065,10 @@ function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, 
   );
 }
 
-// Pulls together everything due on one specific date, across every part of the
-// app, so the dashboard calendar can show a single day view of it all.
-// Pulls together every dated item across the whole app — no single-date filter,
-// so nothing (overdue included) can silently fall outside a visible window.
+// Pulls together every dated item across the whole app — violations,
+// court dates, payments due, appointments, tenant follow-ups, and reminders
+// — with no single-date filter, so nothing (overdue included) can silently
+// fall outside a visible window.
 function allDatedItems(data, tenantName, buildingName) {
   const items = [];
   data.violations.forEach(v => {
@@ -999,8 +1123,11 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
   const shift = (n) => {
     if (viewMode === "day") setRefDate(d => addDays(d, n));
     else if (viewMode === "week") setRefDate(d => addDays(d, n * 7));
-    else if (viewMode === "month") setRefDate(d => addMonths(d, n));
-    else setRefDate(d => addMonths(d, n * 12));
+    // Normalized to the 1st before adding — landing on, say, the 31st and
+    // stepping forward a month would otherwise roll past a shorter month
+    // entirely (Jan 31 + 1 month lands on Mar 3, silently skipping February).
+    else if (viewMode === "month") setRefDate(d => addMonths(d.slice(0, 8) + "01", n));
+    else setRefDate(d => addMonths(d.slice(0, 8) + "01", n * 12));
   };
   const pickDate = (d) => setRefDate(d);
 
@@ -1038,7 +1165,7 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
 
       <div className="filter-row dash-cal-modes">
         {["day", "week", "month", "year"].map(m => (
-          <button key={m} className={`chip ${viewMode === m ? "chip-active" : ""}`} onClick={() => { setViewMode(m); setShowingOverdue(false); }}>{m[0].toUpperCase() + m.slice(1)}</button>
+          <button key={m} className={`chip ${viewMode === m ? "chip-active" : ""}`} onClick={() => setViewMode(m)}>{m[0].toUpperCase() + m.slice(1)}</button>
         ))}
         {refDate !== today && <button className="btn-ghost" onClick={() => pickDate(today)}>Today</button>}
       </div>
@@ -1095,6 +1222,23 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const [confirmingCleanup, setConfirmingCleanup] = useState(false);
   const [expandedBuilding, setExpandedBuilding] = useState(null);
   const [statOpen, setStatOpen] = useState(null);
+  const [quickNoteText, setQuickNoteText] = useState("");
+  const submitQuickNote = () => {
+    if (!quickNoteText.trim()) return;
+    setData(d => ({ ...d, quickNotes: [...(d.quickNotes || []), { id: uid(), text: quickNoteText.trim(), date: todayISO(), done: false, reminderDate: "", buildingId: "" }] }));
+    setQuickNoteText("");
+  };
+
+  // Nudges to re-upload Aged Arrears once it's been a week — driven by
+  // when the last import actually happened, not a fixed calendar day, so it
+  // never nags right after you've just done it and never goes quiet if
+  // you're actually behind.
+  const arrearsImports = (data.importHistory || []).filter(h => h.type === "arrears");
+  const lastArrearsImport = arrearsImports.length
+    ? arrearsImports.reduce((latest, h) => h.date > latest.date ? h : latest)
+    : null;
+  const daysSinceArrearsImport = lastArrearsImport ? daysUntil(lastArrearsImport.date) !== null ? -daysUntil(lastArrearsImport.date) : null : null;
+  const showArrearsNudge = data.tenants.length > 0 && (!lastArrearsImport || (daysSinceArrearsImport !== null && daysSinceArrearsImport >= 7));
 
   const cleanupAllEmptyUnits = () => {
     setData(d => ({
@@ -1176,6 +1320,8 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
       Phone: t.phone || "",
       Email: t.email || "",
       Balance: t.balance || "",
+      "Monthly Rent": t.rentAmount || "",
+      "Months Behind": (parseBalance(t.rentAmount) > 0 && parseBalance(t.balance) > 0) ? (parseBalance(t.balance) / parseBalance(t.rentAmount)).toFixed(1) : "",
       Status: t.status || "",
       "Latest Note": Array.isArray(t.notes) && t.notes.length ? t.notes[t.notes.length - 1].text : "",
       "Next Follow-up": (() => { const d = earliestFollowUpDate(t); return d ? fmtDate(d) : ""; })(),
@@ -1270,6 +1416,26 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
           <PrintButton label="Dashboard" />
         </div>
       </div>
+
+      <div className="dash-quick-note">
+        <Pencil size={14} className="dash-quick-note-icon" />
+        <input
+          autoFocus
+          placeholder="Quick note — type and hit Enter…"
+          value={quickNoteText}
+          onChange={e => setQuickNoteText(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") submitQuickNote(); }}
+        />
+      </div>
+
+      {showArrearsNudge && (
+        <button className="dash-arrears-nudge" onClick={() => setTab("rent")}>
+          <DollarSign size={14} />
+          {lastArrearsImport
+            ? `It's been ${daysSinceArrearsImport} days since your last Aged Arrears upload — probably time for a new one.`
+            : "No Aged Arrears report uploaded yet — head to Rent Collection to bring balances up to date."}
+        </button>
+      )}
 
       <div className="dash-stats-row">
         <button className="dash-stat-card" onClick={() => setStatOpen(s => s === "overdue" ? null : "overdue")}>
@@ -1672,6 +1838,13 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
       buildings: d.buildings.filter(b => b.id !== buildingId),
       units: d.units.filter(u => u.buildingId !== buildingId),
       tenants: d.tenants.filter(t => t.buildingId !== buildingId),
+      violations: d.violations.filter(v => v.buildingId !== buildingId),
+      workOrders: d.workOrders.filter(w => w.buildingId !== buildingId),
+      appointments: d.appointments.filter(a => a.buildingId !== buildingId),
+      localLaws: d.localLaws.filter(l => l.buildingId !== buildingId),
+      // Court cases intentionally stay — same as deleting a tenant, a case is
+      // a legal record that shouldn't silently disappear, it just loses its
+      // building link.
     }));
     setPendingDelete(null);
   };
@@ -1681,16 +1854,29 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
       ...d,
       units: d.units.filter(u => u.id !== unitId),
       tenants: d.tenants.filter(t => t.unitId !== unitId),
+      // Anything still pointing at this specific apartment (a violation, work
+      // order, appointment) drops back to "whole building" instead of being
+      // left pointing at a unit that no longer exists — keeps the record,
+      // just loses the apartment-specific tag.
+      violations: d.violations.map(v => v.unitId === unitId ? { ...v, unitId: "" } : v),
+      workOrders: d.workOrders.map(w => w.unitId === unitId ? { ...w, unitId: "" } : w),
+      appointments: d.appointments.map(a => a.unitId === unitId ? { ...a, unitId: "" } : a),
     }));
     setPendingDeleteUnit(null);
     setExpandedUnit(null);
   };
   const [pendingCleanup, setPendingCleanup] = useState(null);
   const cleanupEmptyUnits = (buildingId) => {
-    setData(d => ({
-      ...d,
-      units: d.units.filter(u => u.buildingId !== buildingId || d.tenants.some(t => t.unitId === u.id)),
-    }));
+    setData(d => {
+      const removedIds = new Set(d.units.filter(u => u.buildingId === buildingId && !d.tenants.some(t => t.unitId === u.id)).map(u => u.id));
+      return {
+        ...d,
+        units: d.units.filter(u => !removedIds.has(u.id)),
+        violations: d.violations.map(v => removedIds.has(v.unitId) ? { ...v, unitId: "" } : v),
+        workOrders: d.workOrders.map(w => removedIds.has(w.unitId) ? { ...w, unitId: "" } : w),
+        appointments: d.appointments.map(a => removedIds.has(a.unitId) ? { ...a, unitId: "" } : a),
+      };
+    });
     setPendingCleanup(null);
   };
 
@@ -1710,14 +1896,14 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
         setData(d => {
           const next = { ...d, buildings: [...d.buildings], units: [...d.units], tenants: [...d.tenants] };
           results.data.forEach(row => {
-            const address = row.address || row.Address || row.building || row.Building;
+            const address = csvField(row, "address", "building");
             if (!address) return;
             let building = next.buildings.find(b => b.address.toLowerCase() === address.toLowerCase());
             if (!building) {
               building = { id: uid(), address, notes: "" };
               next.buildings.push(building);
             }
-            const unitNumber = row.unit || row.Unit || row.unitNumber;
+            const unitNumber = csvField(row, "unit", "unitNumber");
             let unit = null;
             if (unitNumber) {
               unit = next.units.find(u => u.buildingId === building.id && u.unitNumber === unitNumber);
@@ -1726,14 +1912,14 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                 next.units.push(unit);
               }
             }
-            const tenantName = row.tenant || row.Tenant || row.tenantName;
+            const tenantName = csvField(row, "tenant", "tenantName");
             if (tenantName && unit) {
               const exists = next.tenants.find(t => t.unitId === unit.id && t.name === tenantName);
               if (!exists) {
                 next.tenants.push({
                   id: uid(), buildingId: building.id, unitId: unit.id, name: tenantName,
-                  phone: row.phone || "", email: row.email || "",
-                  balance: row.balance || "", status: row.status || "Current",
+                  phone: csvField(row, "phone"), email: csvField(row, "email"),
+                  balance: csvField(row, "balance"), status: csvField(row, "status") || "Current",
                   notes: "", messageLog: [],
                 });
               }
@@ -1810,8 +1996,18 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                   <span className="row-muted" style={{ fontSize: 12, color: data.tenants.some(t => t.buildingId === b.id && (data.courtCases || []).some(c => c.tenantId === t.id && !c.archived)) ? "var(--danger)" : undefined }}>
                     Delete building + {allUnits.length} units + {data.tenants.filter(t => t.buildingId === b.id).length} tenants
                     {(() => {
+                      const vN = data.violations.filter(v => v.buildingId === b.id).length;
+                      const wN = data.workOrders.filter(w => w.buildingId === b.id).length;
+                      const aN = data.appointments.filter(a => a.buildingId === b.id).length;
+                      const parts = [];
+                      if (vN) parts.push(`${vN} violation${vN === 1 ? "" : "s"}`);
+                      if (wN) parts.push(`${wN} work order${wN === 1 ? "" : "s"}`);
+                      if (aN) parts.push(`${aN} appointment${aN === 1 ? "" : "s"}`);
+                      return parts.length ? ` + ${parts.join(" + ")}` : "";
+                    })()}
+                    {(() => {
                       const n = data.tenants.filter(t => t.buildingId === b.id && (data.courtCases || []).some(c => c.tenantId === t.id && !c.archived)).length;
-                      return n > 0 ? ` — ${n} of them ${n === 1 ? "has" : "have"} an OPEN COURT CASE` : "";
+                      return n > 0 ? ` — ${n} of them ${n === 1 ? "has" : "have"} an OPEN COURT CASE (kept, just unlinked)` : "";
                     })()}?
                   </span>
                   <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); deleteBuilding(b.id); }} style={{ color: "var(--danger)" }}>Yes, delete</button>
@@ -1916,14 +2112,19 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
 
 /* ============================== rent collection ============================== */
 
-function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }) {
+function RentTab({ data, add, update, remove, buildingName, setData }) {
   const [noteFor, setNoteFor] = useState(null);
   const [noteText, setNoteText] = useState("");
   const [followFor, setFollowFor] = useState(null);
   const [newFollowDate, setNewFollowDate] = useState("");
   const [newFollowNote, setNewFollowNote] = useState("");
+  const [payFor, setPayFor] = useState(null);
+  const [newPayAmount, setNewPayAmount] = useState("");
+  const [newPayNote, setNewPayNote] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
-  const [buildingFilter, setBuildingFilter] = useState("All");
+  const [agingFilter, setAgingFilter] = useState(false);
+  const [sortMode, setSortMode] = useState("building"); // building | balance | oldest
+  const [expandedBuildings, setExpandedBuildings] = useState(new Set());
   const [section, setSection] = useState("sheet");
 
   const inCourt = (tenantId) => (data.courtCases || []).some(c => c.tenantId === tenantId && !c.archived);
@@ -1931,13 +2132,69 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
   const [newTenant, setNewTenant] = useState(null);
 
   const openNewTenant = () => setNewTenant({
-    buildingId: data.buildings[0]?.id || "", unitId: "", name: "", phone: "", balance: "", status: "Current",
+    buildingId: data.buildings[0]?.id || "", unitId: "", name: "", phone: "", balance: "", rentAmount: "", status: "Current",
   });
   const saveNewTenant = () => {
     if (!newTenant.buildingId || !newTenant.unitId) return;
-    add("tenants", { ...newTenant, email: "", notes: [], followUps: [] });
+    add("tenants", { ...newTenant, email: "", notes: [], followUps: [], payments: [] });
     setNewTenant(null);
   };
+
+  // 3 = money sitting in the oldest (61+) bucket, 2 = middle bucket, 1 = only
+  // the newest bucket, 0 = nothing owed. Tenants without an aging breakdown
+  // (added manually, not from an Aged Arrears import) fall back to their
+  // status instead of defaulting to 0, so a manually-flagged "In Arrears"
+  // tenant doesn't rank the same as someone who owes nothing.
+  const agingSeverity = (t) => {
+    if (t.aging) {
+      if (t.aging.bucket61 > 0) return 3;
+      if (t.aging.bucket2 > 0) return 2;
+      if (t.aging.bucket1 > 0) return 1;
+      return 0;
+    }
+    if (t.status === "In Arrears") return 3;
+    if (t.status === "Late") return 2;
+    return 0;
+  };
+
+  const unitOf = t => data.units.find(u => u.id === t.unitId)?.unitNumber || "";
+
+  const passesFilters = (t) => {
+    if (statusFilter === "Follow-ups") { if (tenantFollowUps(t).length === 0) return false; }
+    else if (statusFilter !== "All" && t.status !== statusFilter) return false;
+    if (agingFilter && agingSeverity(t) < 3) return false;
+    return true;
+  };
+
+  const sortTenants = (list) => {
+    if (sortMode === "balance") return [...list].sort((a, b) => parseBalance(b.balance) - parseBalance(a.balance));
+    if (sortMode === "oldest") return [...list].sort((a, b) => agingSeverity(b) - agingSeverity(a) || parseBalance(b.balance) - parseBalance(a.balance));
+    return [...list].sort((a, b) => compareUnits(unitOf(a), unitOf(b)));
+  };
+
+  // One group per building that actually has at least one tenant, so the
+  // list of buildings shown doesn't jump around as filters change — a
+  // filter can empty a building's visible tenant list, but the building
+  // itself stays put with an empty-state message inside.
+  const buildingGroups = data.buildings
+    .filter(b => data.tenants.some(t => t.buildingId === b.id))
+    .map(b => {
+      const allTenantsHere = data.tenants.filter(t => t.buildingId === b.id);
+      const tenantsHere = sortTenants(allTenantsHere.filter(passesFilters));
+      const totalOwed = tenantsHere.reduce((sum, t) => sum + parseBalance(t.balance), 0);
+      const oldTenants = tenantsHere.filter(t => agingSeverity(t) === 3);
+      const oldTotal = oldTenants.reduce((sum, t) => sum + parseBalance(t.balance), 0);
+      return { building: b, tenants: tenantsHere, totalCount: allTenantsHere.length, totalOwed, oldCount: oldTenants.length, oldTotal };
+    });
+
+  const totalOwedAll = buildingGroups.reduce((sum, g) => sum + g.totalOwed, 0);
+  const visibleTenants = buildingGroups.flatMap(g => g.tenants);
+
+  const toggleBuildingExpanded = (id) => setExpandedBuildings(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
 
   const exportCSV = () => {
     const rows = visibleTenants.map(t => ({
@@ -1946,6 +2203,8 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
       Tenant: t.name,
       Phone: t.phone,
       Balance: t.balance,
+      "Monthly Rent": t.rentAmount || "",
+      "Months Behind": (parseBalance(t.rentAmount) > 0 && parseBalance(t.balance) > 0) ? (parseBalance(t.balance) / parseBalance(t.rentAmount)).toFixed(1) : "",
       Status: t.status,
       "Latest Note": notesArr(t).length ? notesArr(t)[notesArr(t).length - 1].text : "",
       "Follow-ups": tenantFollowUps(t).map(f => f.date).join("; "),
@@ -1967,34 +2226,222 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
     const m = Array.isArray(t.messageLog) ? t.messageLog : [];
     return [...n, ...m].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
   };
+  const paymentsArr = (t) => Array.isArray(t.payments) ? t.payments : [];
 
+  // A ref, not state — state updates are batched/async, so a second click
+  // firing before React re-renders would still see the old (empty) guard
+  // and slip through. A ref updates immediately, so it actually blocks a
+  // fast double-click on the same button from logging the same note,
+  // follow-up, or payment twice.
+  const noteSubmitting = useRef(false);
   const addNote = (tenantId) => {
-    if (!noteText.trim()) return;
+    if (!noteText.trim() || noteSubmitting.current) return;
+    noteSubmitting.current = true;
     const t = data.tenants.find(x => x.id === tenantId);
     const existingNotes = Array.isArray(t.notes) ? t.notes : (t.notes ? [{ date: todayISO(), text: t.notes }] : []);
     update("tenants", tenantId, { notes: [...existingNotes, { date: todayISO(), text: noteText }] });
     setNoteText(""); setNoteFor(null);
+    setTimeout(() => { noteSubmitting.current = false; }, 400);
   };
 
+  const followSubmitting = useRef(false);
   const addFollowUp = (tenantId) => {
-    if (!newFollowDate) return;
+    if (!newFollowDate || followSubmitting.current) return;
+    followSubmitting.current = true;
     const t = data.tenants.find(x => x.id === tenantId);
     update("tenants", tenantId, { followUps: [...tenantFollowUps(t), { id: uid(), date: newFollowDate, note: newFollowNote }] });
     setNewFollowDate(""); setNewFollowNote("");
+    setTimeout(() => { followSubmitting.current = false; }, 400);
   };
   const removeFollowUp = (tenantId, followUpId) => {
     const t = data.tenants.find(x => x.id === tenantId);
     update("tenants", tenantId, { followUps: tenantFollowUps(t).filter(f => f.id !== followUpId) });
   };
 
-  const byBuilding = t => buildingFilter === "All" || t.buildingId === buildingFilter;
-  const unitOf = t => data.units.find(u => u.id === t.unitId)?.unitNumber || "";
-  const visibleTenants = (statusFilter === "Follow-ups"
-    ? data.tenants.filter(t => tenantFollowUps(t).length > 0).slice().sort((a, b) => (earliestFollowUpDate(a) || "").localeCompare(earliestFollowUpDate(b) || ""))
-    : data.tenants.filter(t => statusFilter === "All" || t.status === statusFilter)
-        .slice()
-        .sort((a, b) => buildingName(a.buildingId).localeCompare(buildingName(b.buildingId)) || compareUnits(unitOf(a), unitOf(b)))
-  ).filter(byBuilding);
+  // Logging a payment both records it (so there's a dated trail of what came
+  // in and when) and moves the balance — no more overtyping one number with
+  // nothing to show why it changed. Removing a logged payment puts the money
+  // back on the balance, so undoing a mistaken entry doesn't leave the
+  // balance wrong.
+  const paySubmitting = useRef(false);
+  const addPayment = (tenantId) => {
+    const amt = parseBalance(newPayAmount);
+    if (!amt || paySubmitting.current) return;
+    paySubmitting.current = true;
+    const t = data.tenants.find(x => x.id === tenantId);
+    const newBalance = (parseBalance(t.balance) - amt).toFixed(2);
+    update("tenants", tenantId, {
+      balance: newBalance,
+      payments: [...paymentsArr(t), { id: uid(), date: todayISO(), amount: amt.toFixed(2), note: newPayNote }],
+    });
+    setNewPayAmount(""); setNewPayNote("");
+    setTimeout(() => { paySubmitting.current = false; }, 400);
+  };
+  const removePayment = (tenantId, paymentId) => {
+    const t = data.tenants.find(x => x.id === tenantId);
+    const p = paymentsArr(t).find(x => x.id === paymentId);
+    if (!p) return;
+    const newBalance = (parseBalance(t.balance) + parseBalance(p.amount)).toFixed(2);
+    update("tenants", tenantId, { balance: newBalance, payments: paymentsArr(t).filter(x => x.id !== paymentId) });
+  };
+
+  const renderTenantTable = (tenants) => (
+    <div className="sheet-wrap">
+      <table className="sheet">
+        <thead>
+          <tr>
+            <th>Unit</th><th>Tenant</th><th>Phone</th>
+            <th className="sheet-col-balance">Balance</th><th>Status</th>
+            <th className="sheet-col-notes">Notes</th><th>Follow-up</th><th>Payments</th><th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {tenants.length === 0 && (
+            <tr><td colSpan={9}><div className="hint" style={{ padding: "10px 4px" }}>No tenants match this filter.</div></td></tr>
+          )}
+          {tenants.map(t => (
+            <React.Fragment key={t.id}>
+              <tr className={t.status !== "Current" ? "sheet-row-flag" : ""}>
+                <td className="sheet-readonly">{unitOf(t) || "—"}</td>
+                <td>
+                  <div className="sheet-name-cell">
+                    <input className="sheet-input" value={t.name} onChange={e => update("tenants", t.id, { name: e.target.value })} />
+                    {inCourt(t.id) && <span className="pill pill-danger sheet-court-pill" title="Active court case — no need to independently follow up">In Court</span>}
+                  </div>
+                </td>
+                <td><input className="sheet-input" value={t.phone} onChange={e => update("tenants", t.id, { phone: e.target.value })} /></td>
+                <td className="sheet-col-balance">
+                  <div className="balance-input-wrap">
+                    <span className="balance-dollar">$</span>
+                    <input className="sheet-input balance-input" value={t.balance} onChange={e => update("tenants", t.id, { balance: e.target.value })} />
+                  </div>
+                </td>
+                <td>
+                  <select className={`sheet-input sheet-status-${t.status === "Current" ? "ok" : t.status === "Late" ? "warn" : "danger"}`} value={t.status} onChange={e => update("tenants", t.id, { status: e.target.value })}>
+                    {RENT_STATUSES.map(s => <option key={s}>{s}</option>)}
+                  </select>
+                </td>
+                <td className="sheet-col-notes">
+                  <button className="sheet-note-preview" onClick={() => setNoteFor(noteFor === t.id ? null : t.id)} title="Click to view/add notes">
+                    {notesArr(t).length === 0 ? <span className="row-muted">— add note —</span> : (
+                      notesArr(t).slice(-2).reverse().map((n, i) => (
+                        <span key={i} className="sheet-note-line">
+                          <span className="sheet-note-date">{fmtDate(n.date)}</span>
+                          <span className="sheet-note-text">{n.text}</span>
+                        </span>
+                      ))
+                    )}
+                  </button>
+                </td>
+                <td>
+                  <button className="sheet-follow-btn" onClick={() => setFollowFor(followFor === t.id ? null : t.id)} title="Follow-ups">
+                    <CalendarClock size={14} />
+                    {tenantFollowUps(t).length > 0 && (
+                      <span className="sheet-follow-date">
+                        {fmtDate(earliestFollowUpDate(t))}{tenantFollowUps(t).length > 1 ? ` +${tenantFollowUps(t).length - 1}` : ""}
+                      </span>
+                    )}
+                  </button>
+                </td>
+                <td>
+                  <button className="sheet-follow-btn" onClick={() => setPayFor(payFor === t.id ? null : t.id)} title="Payment history">
+                    <DollarSign size={14} />
+                    {paymentsArr(t).length > 0 && <span className="sheet-follow-date">{paymentsArr(t).length}</span>}
+                  </button>
+                </td>
+                <td className="sheet-actions">
+                  <IconBtn title="Notes" onClick={() => setNoteFor(noteFor === t.id ? null : t.id)}><Pencil size={14} /></IconBtn>
+                  <IconBtn title="Delete" danger onClick={() => {
+                    if (inCourt(t.id) && !window.confirm(`${t.name || "This tenant"} has an open court case. Delete anyway? The case will stay but lose its link to this tenant.`)) return;
+                    remove("tenants", t.id);
+                  }}><Trash2 size={14} /></IconBtn>
+                </td>
+              </tr>
+              {followFor === t.id && (
+                <tr className="sheet-expand-row">
+                  <td colSpan={9}>
+                    <strong>Follow-ups</strong>
+                    <div className="inline-form">
+                      <input type="date" value={newFollowDate} onChange={e => setNewFollowDate(e.target.value)} />
+                      <input placeholder="What's this follow-up about?" value={newFollowNote} onChange={e => setNewFollowNote(e.target.value)} style={{ flex: 1 }} />
+                      <button className="btn-primary" onClick={() => addFollowUp(t.id)}>Add follow-up</button>
+                    </div>
+                    {tenantFollowUps(t).length === 0 && <div className="hint">No follow-ups yet.</div>}
+                    {tenantFollowUps(t).slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map((f) => (
+                      <div key={f.id} className="row row-muted" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span>{fmtDate(f.date)}{f.note ? ` — ${f.note}` : ""}</span>
+                        <button className="checklist-remove" onClick={() => removeFollowUp(t.id, f.id)} title="Remove"><X size={12} /></button>
+                      </div>
+                    ))}
+                  </td>
+                </tr>
+              )}
+              {noteFor === t.id && (
+                <tr className="sheet-expand-row">
+                  <td colSpan={9}>
+                    <strong>Notes</strong>
+                    <div className="inline-form">
+                      <input placeholder="Payment plans, disputes, calls, texts, anything…" value={noteText} onChange={e => setNoteText(e.target.value)} onKeyDown={e => e.key === "Enter" && addNote(t.id)} />
+                      <button className="btn-primary" onClick={() => addNote(t.id)}>Add note</button>
+                    </div>
+                    {notesArr(t).length === 0 && <div className="hint">No notes yet.</div>}
+                    {notesArr(t).slice().reverse().map((n, i) => (
+                      <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
+                    ))}
+                  </td>
+                </tr>
+              )}
+              {payFor === t.id && (
+                <tr className="sheet-expand-row">
+                  <td colSpan={9}>
+                    <strong>Payments</strong>
+                    <div className="row" style={{ display: "flex", alignItems: "center", gap: 8, margin: "6px 0" }}>
+                      <span style={{ fontSize: 13 }}>Monthly rent:</span>
+                      <div className="balance-input-wrap" style={{ maxWidth: 110 }}>
+                        <span className="balance-dollar">$</span>
+                        <input className="balance-input" placeholder="—" value={t.rentAmount || ""} onChange={e => update("tenants", t.id, { rentAmount: e.target.value })} />
+                      </div>
+                      {parseBalance(t.rentAmount) > 0 && parseBalance(t.balance) > 0 && (
+                        <span className="row-muted" style={{ fontSize: 12 }}>
+                          ≈ {(parseBalance(t.balance) / parseBalance(t.rentAmount)).toFixed(1)} months behind
+                        </span>
+                      )}
+                    </div>
+                    {t.aging && (
+                      <div className="hint" style={{ marginTop: 4 }}>
+                        Aging breakdown from last import: ${t.aging.bucket1.toFixed(2)} current · ${t.aging.bucket2.toFixed(2)} 31–60 days · ${t.aging.bucket61.toFixed(2)} 61+ days
+                      </div>
+                    )}
+                    <div className="inline-form">
+                      <div className="balance-input-wrap" style={{ maxWidth: 120 }}>
+                        <span className="balance-dollar">$</span>
+                        <input className="balance-input" placeholder="Amount" value={newPayAmount} onChange={e => setNewPayAmount(e.target.value)} />
+                      </div>
+                      <input placeholder="Note (optional)" value={newPayNote} onChange={e => setNewPayNote(e.target.value)} style={{ flex: 1 }} onKeyDown={e => e.key === "Enter" && addPayment(t.id)} />
+                      <button className="btn-primary" onClick={() => addPayment(t.id)}>Log payment</button>
+                    </div>
+                    <p className="hint" style={{ margin: "4px 0" }}>Logging a payment subtracts it from the balance above and keeps a dated record here. A weekly Aged Arrears re-import logs entries here automatically too — a lower balance than last time shows as a payment, a higher one as a charge.</p>
+                    {paymentsArr(t).length === 0 && <div className="hint">No payments logged yet.</div>}
+                    {paymentsArr(t).slice().reverse().map((p) => {
+                      const amt = parseBalance(p.amount);
+                      const isCharge = amt < 0;
+                      return (
+                        <div key={p.id} className="row row-muted" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span className={`pill ${isCharge ? "pill-warn" : "pill-ok"}`}>{isCharge ? "Charge" : "Payment"}: ${Math.abs(amt).toFixed(2)}</span>
+                          <span>{fmtDate(p.date)}{p.auto ? " · from import" : ""}{p.note ? ` — ${p.note}` : ""}</span>
+                          <button className="checklist-remove" onClick={() => removePayment(t.id, p.id)} title="Remove (reverses its effect on the balance)"><X size={12} /></button>
+                        </div>
+                      );
+                    })}
+                  </td>
+                </tr>
+              )}
+            </React.Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 
   return (
     <div>
@@ -2038,6 +2485,12 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
               <input className="balance-input" value={newTenant.balance} onChange={e => setNewTenant({ ...newTenant, balance: e.target.value })} />
             </div>
           </Field>
+          <Field label="Monthly rent (optional)">
+            <div className="balance-input-wrap">
+              <span className="balance-dollar">$</span>
+              <input className="balance-input" value={newTenant.rentAmount} onChange={e => setNewTenant({ ...newTenant, rentAmount: e.target.value })} />
+            </div>
+          </Field>
           <Field label="Status">
             <select value={newTenant.status} onChange={e => setNewTenant({ ...newTenant, status: e.target.value })}>
               {RENT_STATUSES.map(s => <option key={s}>{s}</option>)}
@@ -2050,127 +2503,54 @@ function RentTab({ data, add, update, remove, buildingName, unitLabel, setData }
           </div>
         </div>
       )}
-      <div className="filter-row">
-        {["All", ...RENT_STATUSES].map(s => (
-          <button key={s} className={`chip ${statusFilter === s ? "chip-active" : ""}`} onClick={() => setStatusFilter(s)}>{s}</button>
-        ))}
-        <button className={`chip ${statusFilter === "Follow-ups" ? "chip-active" : ""}`} onClick={() => setStatusFilter("Follow-ups")}>Follow-ups</button>
-      </div>
-      <div className="filter-row">
-        <button className={`chip ${buildingFilter === "All" ? "chip-active" : ""}`} onClick={() => setBuildingFilter("All")}>All buildings</button>
-        {data.buildings.map(b => (
-          <button key={b.id} className={`chip ${buildingFilter === b.id ? "chip-active" : ""}`} onClick={() => setBuildingFilter(b.id)}>{shortAddress(b.address)}</button>
-        ))}
-      </div>
 
       {data.tenants.length === 0 ? (
         <EmptyState text="No tenants yet — import RIS data or add a tenant." />
       ) : (
-        <div className="sheet-wrap">
-          <table className="sheet">
-            <thead>
-              <tr>
-                <th>Building</th><th>Unit</th><th>Tenant</th><th>Phone</th>
-                <th className="sheet-col-balance">Balance</th><th>Status</th>
-                <th className="sheet-col-notes">Notes</th><th>Follow-up</th><th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleTenants.length === 0 && (
-                <tr><td colSpan={9}><div className="hint" style={{ padding: "10px 4px" }}>{statusFilter === "Follow-ups" ? "No tenants with a follow-up set." : "No tenants with this status."}</div></td></tr>
-              )}
-              {visibleTenants.map(t => (
-                <React.Fragment key={t.id}>
-                  <tr className={t.status !== "Current" ? "sheet-row-flag" : ""}>
-                    <td className="sheet-readonly">{buildingName(t.buildingId)}</td>
-                    <td className="sheet-readonly">{unitOf(t) || "—"}</td>
-                    <td>
-                      <div className="sheet-name-cell">
-                        <input className="sheet-input" value={t.name} onChange={e => update("tenants", t.id, { name: e.target.value })} />
-                        {inCourt(t.id) && <span className="pill pill-danger sheet-court-pill" title="Active court case — no need to independently follow up">In Court</span>}
-                      </div>
-                    </td>
-                    <td><input className="sheet-input" value={t.phone} onChange={e => update("tenants", t.id, { phone: e.target.value })} /></td>
-                    <td className="sheet-col-balance">
-                      <div className="balance-input-wrap">
-                        <span className="balance-dollar">$</span>
-                        <input className="sheet-input balance-input" value={t.balance} onChange={e => update("tenants", t.id, { balance: e.target.value })} />
-                      </div>
-                    </td>
-                    <td>
-                      <select className={`sheet-input sheet-status-${t.status === "Current" ? "ok" : t.status === "Late" ? "warn" : "danger"}`} value={t.status} onChange={e => update("tenants", t.id, { status: e.target.value })}>
-                        {RENT_STATUSES.map(s => <option key={s}>{s}</option>)}
-                      </select>
-                    </td>
-                    <td className="sheet-col-notes">
-                      <button className="sheet-note-preview" onClick={() => setNoteFor(noteFor === t.id ? null : t.id)} title="Click to view/add notes">
-                        {notesArr(t).length === 0 ? <span className="row-muted">— add note —</span> : (
-                          notesArr(t).slice(-2).reverse().map((n, i) => (
-                            <span key={i} className="sheet-note-line">
-                              <span className="sheet-note-date">{fmtDate(n.date)}</span>
-                              <span className="sheet-note-text">{n.text}</span>
-                            </span>
-                          ))
-                        )}
-                      </button>
-                    </td>
-                    <td>
-                      <button className="sheet-follow-btn" onClick={() => setFollowFor(followFor === t.id ? null : t.id)} title="Follow-ups">
-                        <CalendarClock size={14} />
-                        {tenantFollowUps(t).length > 0 && (
-                          <span className="sheet-follow-date">
-                            {fmtDate(earliestFollowUpDate(t))}{tenantFollowUps(t).length > 1 ? ` +${tenantFollowUps(t).length - 1}` : ""}
-                          </span>
-                        )}
-                      </button>
-                    </td>
-                    <td className="sheet-actions">
-                      <IconBtn title="Notes" onClick={() => setNoteFor(noteFor === t.id ? null : t.id)}><Pencil size={14} /></IconBtn>
-                      <IconBtn title="Delete" danger onClick={() => {
-                        if (inCourt(t.id) && !window.confirm(`${t.name || "This tenant"} has an open court case. Delete anyway? The case will stay but lose its link to this tenant.`)) return;
-                        remove("tenants", t.id);
-                      }}><Trash2 size={14} /></IconBtn>
-                    </td>
-                  </tr>
-                  {followFor === t.id && (
-                    <tr className="sheet-expand-row">
-                      <td colSpan={9}>
-                        <strong>Follow-ups</strong>
-                        <div className="inline-form">
-                          <input type="date" value={newFollowDate} onChange={e => setNewFollowDate(e.target.value)} />
-                          <input placeholder="What's this follow-up about?" value={newFollowNote} onChange={e => setNewFollowNote(e.target.value)} style={{ flex: 1 }} />
-                          <button className="btn-primary" onClick={() => addFollowUp(t.id)}>Add follow-up</button>
-                        </div>
-                        {tenantFollowUps(t).length === 0 && <div className="hint">No follow-ups yet.</div>}
-                        {tenantFollowUps(t).slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map((f) => (
-                          <div key={f.id} className="row row-muted" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span>{fmtDate(f.date)}{f.note ? ` — ${f.note}` : ""}</span>
-                            <button className="checklist-remove" onClick={() => removeFollowUp(t.id, f.id)} title="Remove"><X size={12} /></button>
-                          </div>
-                        ))}
-                      </td>
-                    </tr>
+        <>
+          <div className="rent-total-banner">
+            <div className="rent-total-num">${totalOwedAll.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+            <div className="rent-total-label">total owed across {visibleTenants.length} tenant{visibleTenants.length === 1 ? "" : "s"}{statusFilter !== "All" || agingFilter ? " (matching current filters)" : ""}</div>
+          </div>
+
+          <div className="filter-row">
+            {["All", ...RENT_STATUSES].map(s => (
+              <button key={s} className={`chip ${statusFilter === s ? "chip-active" : ""}`} onClick={() => setStatusFilter(s)}>{s}</button>
+            ))}
+            <button className={`chip ${statusFilter === "Follow-ups" ? "chip-active" : ""}`} onClick={() => setStatusFilter("Follow-ups")}>Follow-ups</button>
+            <button className={`chip ${agingFilter ? "chip-active" : ""}`} onClick={() => setAgingFilter(a => !a)}>61+ days only</button>
+          </div>
+          <div className="filter-row">
+            <span className="row-muted" style={{ fontSize: 12, marginRight: 2 }}>Sort:</span>
+            <button className={`chip ${sortMode === "building" ? "chip-active" : ""}`} onClick={() => setSortMode("building")}>By unit</button>
+            <button className={`chip ${sortMode === "balance" ? "chip-active" : ""}`} onClick={() => setSortMode("balance")}>Highest balance</button>
+            <button className={`chip ${sortMode === "oldest" ? "chip-active" : ""}`} onClick={() => setSortMode("oldest")}>Oldest debt</button>
+          </div>
+
+          {buildingGroups.map(g => {
+            const isOpen = expandedBuildings.has(g.building.id);
+            return (
+              <div className="list-card" key={g.building.id}>
+                <div className="list-card-head" onClick={() => toggleBuildingExpanded(g.building.id)} style={{ cursor: "pointer" }}>
+                  {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                  <div className="list-card-title">{shortAddress(g.building.address)}</div>
+                  <span className="pill pill-muted">{g.tenants.length} tenant{g.tenants.length === 1 ? "" : "s"}</span>
+                  <span className={`pill ${g.totalOwed > 0 ? "pill-warn" : "pill-ok"}`}>${g.totalOwed.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} owed</span>
+                  {g.oldCount > 0 && (
+                    <span className="pill pill-danger">
+                      {g.oldCount} tenant{g.oldCount === 1 ? "" : "s"} 61+ days overdue for ${g.oldTotal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
                   )}
-                  {noteFor === t.id && (
-                    <tr className="sheet-expand-row">
-                      <td colSpan={9}>
-                        <strong>Notes</strong>
-                        <div className="inline-form">
-                          <input placeholder="Payment plans, disputes, calls, texts, anything…" value={noteText} onChange={e => setNoteText(e.target.value)} onKeyDown={e => e.key === "Enter" && addNote(t.id)} />
-                          <button className="btn-primary" onClick={() => addNote(t.id)}>Add note</button>
-                        </div>
-                        {notesArr(t).length === 0 && <div className="hint">No notes yet.</div>}
-                        {notesArr(t).slice().reverse().map((n, i) => (
-                          <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
-                        ))}
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                </div>
+                {isOpen && (
+                  <div className="list-card-body" style={{ padding: "10px 14px 14px" }}>
+                    {renderTenantTable(g.tenants)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </>
       )}
       </>
       )}
@@ -2192,7 +2572,7 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
   const changes = [];
 
   parsedEntries.forEach(entry => {
-    const unit = unitsForBuilding.find(u => (u.unitNumber || "").toUpperCase() === entry.apt.toUpperCase());
+    const unit = unitsForBuilding.find(u => (u.unitNumber || "").trim().toUpperCase() === (entry.apt || "").trim().toUpperCase());
     let fields = {};
     if (type === "arrears") fields = { balance: entry.balance, status: entry.status, name: entry.name };
     if (type === "directory") fields = { name: entry.name };
@@ -2200,6 +2580,11 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
       if (entry.phone) fields.phone = entry.phone;
       if (entry.email) fields.email = entry.email;
     }
+    // aging (the 30/60/90+ bucket breakdown) rides along separately from
+    // `fields` — fields feeds the diff/approval preview, which renders each
+    // value with String(v), so an object there would show as "[object
+    // Object]". aging gets applied straight through on confirm instead.
+    const aging = type === "arrears" ? entry.aging : undefined;
     if (unit) {
       const tenant = tenantByUnit(unit.id);
       if (tenant) {
@@ -2211,27 +2596,36 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
           // approve. Tenants currently "Current" (or brand-new changes) apply automatically.
           const priorStatus = tenant.status || "Current";
           const needsApproval = type === "arrears" && priorStatus !== "Current";
+          // If the balance changed, work out whether that's a payment (balance went
+          // down) or a new charge (balance went up), so it can be logged as a dated
+          // ledger entry on confirm instead of just silently becoming a new number.
+          let balanceDelta = 0;
+          if (type === "arrears" && "balance" in diffFields) {
+            balanceDelta = parseBalance(tenant.balance) - parseBalance(diffFields.balance);
+          }
+          const existingFollowUps = tenantFollowUps(tenant);
           changes.push({
             apt: entry.apt, unitId: unit.id, tenantId: tenant.id, isNew: false,
             fields: diffFields, before: Object.fromEntries(Object.keys(diffFields).map(k => [k, tenant[k] || "—"])),
             name: tenant.name || entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview,
-            priorStatus, needsApproval, approved: !needsApproval,
+            priorStatus, needsApproval, approved: !needsApproval, aging, balanceDelta,
+            existingFollowUps, clearFollowUps: false,
             inCourt: hasActiveCourtCase(tenant.id),
           });
         }
       } else {
-        changes.push({ apt: entry.apt, unitId: unit.id, tenantId: null, isNew: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false });
+        changes.push({ apt: entry.apt, unitId: unit.id, tenantId: null, isNew: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false, aging });
       }
     } else {
-      changes.push({ apt: entry.apt, unitId: null, tenantId: null, isNew: true, newUnit: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false });
+      changes.push({ apt: entry.apt, unitId: null, tenantId: null, isNew: true, newUnit: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false, aging });
     }
   });
 
   let missing = [];
   if (type === "arrears") {
-    const parsedApts = new Set(parsedEntries.map(e => e.apt.toUpperCase()));
+    const parsedApts = new Set(parsedEntries.map(e => (e.apt || "").trim().toUpperCase()));
     missing = unitsForBuilding
-      .filter(u => !parsedApts.has((u.unitNumber || "").toUpperCase()))
+      .filter(u => !parsedApts.has((u.unitNumber || "").trim().toUpperCase()))
       .map(u => ({ apt: u.unitNumber, name: tenantByUnit(u.id)?.name || "(no tenant on file)" }));
   }
   return { changes, missing };
@@ -2286,6 +2680,12 @@ function ImportBlock({ type, data, setData, buildingName }) {
       changes: p.changes.map((c, i) => i === idx ? { ...c, approved: !c.approved } : c),
     }));
   };
+  const toggleClearFollowUps = (idx) => {
+    setPreview(p => ({
+      ...p,
+      changes: p.changes.map((c, i) => i === idx ? { ...c, clearFollowUps: !c.clearFollowUps } : c),
+    }));
+  };
 
   const confirm = () => {
     if (!preview) return;
@@ -2315,10 +2715,30 @@ function ImportBlock({ type, data, setData, buildingName }) {
             id: uid(), buildingId, unitId, name: ch.fields.name || ch.name || "",
             phone: ch.fields.phone || "", email: ch.fields.email || "",
             balance: ch.fields.balance || "", status: ch.fields.status || "Current",
-            notes: [], messageLog: [],
+            notes: [], messageLog: [], payments: [],
+            ...(ch.aging ? { aging: ch.aging } : {}),
           });
         } else {
-          next.tenants = next.tenants.map(t => t.id === ch.tenantId ? { ...t, ...ch.fields } : t);
+          next.tenants = next.tenants.map(t => {
+            if (t.id !== ch.tenantId) return t;
+            let updated = { ...t, ...ch.fields, ...(ch.aging ? { aging: ch.aging } : {}) };
+            // A balance that dropped since last import is a payment; one that
+            // rose is a new charge. Either way it becomes a dated, signed
+            // ledger entry instead of the balance just silently changing —
+            // same array as manually-logged payments (positive = payment
+            // received, negative = charge added), so "undo" works the same
+            // way for both without needing separate logic.
+            if (ch.balanceDelta) {
+              updated.payments = [
+                ...(Array.isArray(t.payments) ? t.payments : []),
+                { id: uid(), date: todayISO(), amount: ch.balanceDelta.toFixed(2), note: "From RIS import", auto: true },
+              ];
+            }
+            // Only clear follow-ups if the person running the import explicitly
+            // opted into it for this tenant in the preview — never silent.
+            if (ch.clearFollowUps) updated.followUps = [];
+            return updated;
+          });
         }
       });
       next.importHistory = [
@@ -2328,7 +2748,7 @@ function ImportBlock({ type, data, setData, buildingName }) {
           added: applied.filter(c => c.isNew).length,
           missing: preview.missing.length,
           skipped: preview.changes.length - applied.length,
-          details: applied.map(c => ({ apt: c.apt, name: c.name, isNew: c.isNew, fields: c.fields })),
+          details: applied.map(c => ({ apt: c.apt, name: c.name, isNew: c.isNew, fields: c.fields, before: c.before })),
           missingDetails: preview.missing,
         },
         ...next.importHistory,
@@ -2393,10 +2813,21 @@ function ImportBlock({ type, data, setData, buildingName }) {
                   <span key={k} className="import-field">{k}: {c.before?.[k] ? `${c.before[k]} → ` : ""}{String(v)}</span>
                 ))}
               </div>
+              {!!c.balanceDelta && (
+                <span className={`pill ${c.balanceDelta > 0 ? "pill-ok" : "pill-warn"}`}>
+                  {c.balanceDelta > 0 ? `Payment detected: $${c.balanceDelta.toFixed(2)}` : `Charge added: $${Math.abs(c.balanceDelta).toFixed(2)}`}
+                </span>
+              )}
               {c.needsApproval && (
                 <label className="import-approve">
                   <input type="checkbox" checked={c.approved} onChange={() => toggleApprove(i)} />
                   Already marked "{c.priorStatus}" — update to this?
+                </label>
+              )}
+              {c.balanceDelta > 0 && c.existingFollowUps && c.existingFollowUps.length > 0 && (c.fields.status === "Current" || parseBalance(c.fields.balance) <= 0) && (
+                <label className="import-approve">
+                  <input type="checkbox" checked={!!c.clearFollowUps} onChange={() => toggleClearFollowUps(i)} />
+                  Paid off and back to Current — clear their active follow-up ({c.existingFollowUps.map(f => fmtDate(f.date)).join(", ")})?
                 </label>
               )}
             </div>
@@ -2451,7 +2882,7 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
             <div className="list-card-body">
               {(h.details || []).map((d, i) => (
                 <div key={i} className="row">
-                  {d.apt} — {d.name} {d.isNew && "(new)"} {Object.entries(d.fields || {}).map(([k, v]) => `${k}: ${v}`).join(", ")}
+                  {d.apt} — {d.name} {d.isNew && "(new)"} {Object.entries(d.fields || {}).map(([k, v]) => `${k}: ${d.before?.[k] ? `${d.before[k]} → ` : ""}${v}`).join(", ")}
                 </div>
               ))}
               {(h.missingDetails || []).map((m, i) => (
@@ -2478,7 +2909,10 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
     setForm(null);
   };
 
-  const list = data.workOrders.filter(w => filter === "All" || w.status === filter);
+  const list = data.workOrders
+    .filter(w => filter === "All" || w.status === filter)
+    .slice()
+    .sort((a, b) => (b.dateOpened || "").localeCompare(a.dateOpened || ""));
 
   return (
     <div>
@@ -2576,17 +3010,31 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
     }
   };
 
-  const blankForm = (a) => ({
-    buildingId: data.buildings[0]?.id || "", unitId: "", violationNumber: "",
-    class: "", description: "", dateIssued: todayISO(), cureDeadline: "",
-    fineAmount: "", company: "", otherAgency: otherAgencyOptions[0] || "",
-    status: statusesFor(a)[0], vendorId: "",
-  });
+  // A tab can be "HPD", "DSNY", the generic "Other" catch-all, or a dynamic
+  // agency like "DOB"/"FDNY" — this resolves any of those down to the real
+  // stored shape: agency is always HPD/DSNY/Other, otherAgency carries the
+  // specific one when it applies. Used for both new violations (so the form
+  // opens pre-set to whatever tab you were on) and CSV import.
+  const agencyFieldsFor = (a) => {
+    if (a === "HPD" || a === "DSNY") return { agency: a, otherAgency: "" };
+    if (a === "Other" || a === "All" || !a) return { agency: "Other", otherAgency: "" };
+    return { agency: "Other", otherAgency: a };
+  };
+
+  const blankForm = (a) => {
+    const { agency: ag, otherAgency: oa } = agencyFieldsFor(a);
+    return {
+      agency: ag, buildingId: data.buildings[0]?.id || "", unitId: "", violationNumber: "",
+      class: "", description: "", dateIssued: todayISO(), cureDeadline: "",
+      fineAmount: "", company: "", otherAgency: oa || otherAgencyOptions[0] || "",
+      status: statusesFor(ag)[0], vendorId: "",
+    };
+  };
 
   const submit = () => {
     if (!form.violationNumber) return;
     if (form.id) update("violations", form.id, form);
-    else add("violations", { ...form, agency, photos: [], notes: [] });
+    else add("violations", { ...form, photos: [], notes: [] });
     setForm(null);
   };
 
@@ -2605,20 +3053,22 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
         setData(d => {
           const next = { ...d, violations: [...d.violations] };
           results.data.forEach(row => {
-            const address = row.address || row.building || row.Building;
-            const building = d.buildings.find(b => (b.address || "").toLowerCase() === (address || "").toLowerCase());
-            const a = row.agency || agency;
+            const address = csvField(row, "address", "building");
+            const building = d.buildings.find(b => (b.address || "").toLowerCase() === address.toLowerCase());
+            const rawAgency = csvField(row, "agency");
+            const resolved = agencyFieldsFor(rawAgency || agency);
+            const finalOtherAgency = csvField(row, "otherAgency", "agencyDetail") || resolved.otherAgency;
             next.violations.push({
-              id: uid(), agency: a,
-              violationNumber: row.violationNumber || row.number || row.id || "",
+              id: uid(), agency: resolved.agency, otherAgency: finalOtherAgency,
+              violationNumber: csvField(row, "violationNumber", "number", "id"),
               buildingId: building ? building.id : "",
-              class: row.class || "",
-              description: row.description || "",
-              dateIssued: row.dateIssued || "",
-              cureDeadline: row.cureDeadline || row.deadline || "",
-              fineAmount: row.fineAmount || row.fine || "",
-              company: row.company || "",
-              status: row.status || statusesFor(a)[0],
+              class: csvField(row, "class"),
+              description: csvField(row, "description"),
+              dateIssued: csvField(row, "dateIssued"),
+              cureDeadline: csvField(row, "cureDeadline", "deadline"),
+              fineAmount: csvField(row, "fineAmount", "fine"),
+              company: csvField(row, "company"),
+              status: csvField(row, "status") || statusesFor(resolved.agency)[0],
               vendorId: "", photos: [], notes: [],
             });
           });
@@ -2656,6 +3106,11 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
         if (db === null) return -1;
         return da - db;
       });
+    } else {
+      // Closed/paid — no longer has a meaningful future date, so newest
+      // (most recently issued) first instead, like everything else that's
+      // a log of what happened rather than a schedule of what's coming.
+      l = [...l].sort((a2, b2) => (b2.dateIssued || "").localeCompare(a2.dateIssued || ""));
     }
     return l;
   };
@@ -2676,7 +3131,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           <span className="pill pill-muted">{buildingName(v.buildingId)}</span>
           {rowAgency === "HPD" && v.vendorId && <span className="pill pill-muted">{vendorName(v.vendorId)}</span>}
           {rowAgency === "DSNY" && v.fineAmount && <span className="pill pill-muted">{v.fineAmount}</span>}
-          {rowAgency !== "HPD" && rowAgency !== "DSNY" && v.otherAgency && <span className="pill pill-muted">{v.otherAgency}</span>}
+          {rowAgency === "Other" && v.otherAgency && <span className="pill pill-muted">{v.otherAgency}</span>}
           {rowAgency !== "HPD" && rowAgency !== "DSNY" && v.company && <span className="pill pill-muted">{v.company}</span>}
           {rowAgency !== "DSNY" && view === "active" && <Flag date={v.cureDeadline} />}
           <div className="spacer" />
@@ -2750,11 +3205,11 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           </button>
         </div>
       </div>
-      <p className="hint">CSV columns recognized: agency, violationNumber, address, class, description, dateIssued, cureDeadline, fineAmount, company, status.</p>
+      <p className="hint">CSV columns recognized: agency, otherAgency, violationNumber, address, class, description, dateIssued, cureDeadline, fineAmount, company, status.</p>
 
       <div className="filter-row">
         {agencyTabs.map(a => (
-          <button key={a} className={`chip ${agency === a ? "chip-active" : ""}`} onClick={() => setAgency(a)}>{a}</button>
+          <button key={a} className={`chip ${agency === a ? "chip-active" : ""}`} onClick={() => { setAgency(a); setForm(null); }}>{a}</button>
         ))}
         <div className="spacer" />
         <button className={`chip ${view === "active" ? "chip-active" : ""}`} onClick={() => setView("active")}>Active / Due</button>
@@ -2785,7 +3240,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           </Field>
           <Field label="Violation #"><input value={form.violationNumber} onChange={e => setForm({ ...form, violationNumber: e.target.value })} /></Field>
 
-          {agency === "HPD" && (
+          {form.agency === "HPD" && (
             <>
               <Field label="Class"><input value={form.class} onChange={e => setForm({ ...form, class: e.target.value })} placeholder="A / B / C" /></Field>
               <Field label="Description"><textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></Field>
@@ -2799,14 +3254,14 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
             </>
           )}
 
-          {agency === "DSNY" && (
+          {form.agency === "DSNY" && (
             <>
               <Field label="Fine amount"><input value={form.fineAmount} onChange={e => setForm({ ...form, fineAmount: e.target.value })} placeholder="$" /></Field>
               <Field label="Date issued"><input type="date" value={form.dateIssued} onChange={e => setForm({ ...form, dateIssued: e.target.value })} /></Field>
             </>
           )}
 
-          {agency === "Other" && (
+          {form.agency === "Other" && (
             <>
               <Field label="Violation agency">
                 <TypeSelectWithAdd value={form.otherAgency} options={otherAgencyOptions} onChange={v => setForm({ ...form, otherAgency: v })} onAddType={addCustomOtherAgency} />
@@ -2820,7 +3275,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
 
           <Field label="Status">
             <select value={form.status} onChange={e => setForm({ ...form, status: e.target.value })}>
-              {statusesFor(agency).map(s => <option key={s}>{s}</option>)}
+              {statusesFor(form.agency).map(s => <option key={s}>{s}</option>)}
             </select>
           </Field>
           <div className="form-actions">
@@ -2856,6 +3311,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
 function VendorsTab({ data, add, update, remove, buildingName }) {
   const [form, setForm] = useState(null);
   const [selected, setSelected] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState(null);
 
   const submit = () => {
     if (!form.name) return;
@@ -2900,8 +3356,20 @@ function VendorsTab({ data, add, update, remove, buildingName }) {
             <span className="pill pill-muted">{openWO(v.id).length} open work orders</span>
             <span className="pill pill-muted">{openViol(v.id).length} open violations</span>
             <div className="spacer" />
-            <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(v); }}><Pencil size={14} /></IconBtn>
-            <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("vendors", v.id); }}><Trash2 size={14} /></IconBtn>
+            {pendingDelete === v.id ? (
+              <>
+                <span className="row-muted" style={{ fontSize: 12, color: (openWO(v.id).length + openViol(v.id).length) > 0 ? "var(--danger)" : undefined }}>
+                  Delete {v.name}?{(openWO(v.id).length + openViol(v.id).length) > 0 ? ` Still has ${openWO(v.id).length + openViol(v.id).length} open item${(openWO(v.id).length + openViol(v.id).length) === 1 ? "" : "s"} assigned.` : ""}
+                </span>
+                <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); remove("vendors", v.id); setPendingDelete(null); }} style={{ color: "var(--danger)" }}>Yes, delete</button>
+                <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); setPendingDelete(null); }}>Cancel</button>
+              </>
+            ) : (
+              <>
+                <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(v); }}><Pencil size={14} /></IconBtn>
+                <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); setPendingDelete(v.id); }}><Trash2 size={14} /></IconBtn>
+              </>
+            )}
           </div>
           {selected === v.id && (
             <div className="list-card-body">
@@ -2951,7 +3419,10 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
   // file so editing an old case still starts from the right apt.
   const openEdit = (c) => setForm({ ...c, unitId: c.unitId || data.tenants.find(t => t.id === c.tenantId)?.unitId || "" });
 
-  const list = data.courtCases.filter(c => view === "closed" ? c.archived : !c.archived);
+  const list = data.courtCases
+    .filter(c => view === "closed" ? c.archived : !c.archived)
+    .slice()
+    .sort((a, b) => (a.nextCourtDate || "9999-99-99").localeCompare(b.nextCourtDate || "9999-99-99"));
 
   const toggleChecklistItem = (c, itemId) => {
     update("courtCases", c.id, {
@@ -3131,7 +3602,13 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
   // instead of midnight — still fully editable to anything earlier or later.
   const blank = () => ({ buildingId: data.buildings[0]?.id || "", unitId: "", type: allTypes[0] || "Other", date: "", timeFrom: "09:00", timeTo: "11:00", notes: "", recurring: false, completed: false });
 
-  const list = data.appointments.filter(a => view === "upcoming" ? !a.completed : a.completed);
+  const list = data.appointments
+    .filter(a => view === "upcoming" ? !a.completed : a.completed)
+    .slice()
+    .sort((a, b) => {
+      const cmp = (a.date || "").localeCompare(b.date || "") || (a.timeFrom || "").localeCompare(b.timeFrom || "");
+      return view === "upcoming" ? cmp : -cmp;
+    });
 
   return (
     <div>
@@ -3320,7 +3797,7 @@ function RemindersTab({ data, add, update, remove }) {
         <button className="btn-primary" onClick={submit}>Add</button>
       </div>
       {data.bossReminders.length === 0 && <EmptyState text="Nothing on the list right now." />}
-      {data.bossReminders.map(r => (
+      {data.bossReminders.slice().sort((a, b) => (b.dateRaised || "").localeCompare(a.dateRaised || "")).map(r => (
         <div className="list-card" key={r.id}>
           <div className="list-card-head">
             <input type="checkbox" checked={r.status === "Done"} onChange={e => update("bossReminders", r.id, { status: e.target.checked ? "Done" : "Open" })} />
@@ -3471,6 +3948,7 @@ function Styles() {
         min-height: 100%;
         border-radius: 12px;
         overflow: hidden;
+        overflow-wrap: break-word;
       }
       .loading { padding: 40px; text-align: center; color: var(--ink-soft); }
       .topbar {
@@ -3576,6 +4054,8 @@ function Styles() {
       }
       .count-badge { background: var(--accent); color: #fff; font-size: 11px; padding: 1px 7px; border-radius: 10px; }
       .row { padding: 5px 0; font-size: 13px; }
+      .search-result-row { display: block; width: 100%; text-align: left; background: none; border: none; font: inherit; color: inherit; cursor: pointer; border-radius: 4px; }
+      .search-result-row:hover { background: var(--panel); padding-left: 4px; }
       .row-muted { color: var(--ink-soft); }
       .strike { text-decoration: line-through; color: var(--ink-soft); }
       .inline-form { display: flex; gap: 8px; margin: 8px 0; }
@@ -3666,6 +4146,18 @@ function Styles() {
         border-radius: 8px; padding: 16px; font-size: 13px; margin-bottom: 24px;
       }
       .dash-stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+      .dash-quick-note {
+        display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--border);
+        border-radius: 8px; padding: 6px 12px; margin-bottom: 14px;
+      }
+      .dash-quick-note-icon { color: var(--ink-soft); flex-shrink: 0; }
+      .dash-quick-note input { border: none; background: none; outline: none; font-size: 13px; width: 100%; padding: 4px 0; }
+      .dash-arrears-nudge {
+        display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+        background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn);
+        border-radius: 8px; padding: 8px 12px; margin-bottom: 14px; font-size: 13px; cursor: pointer; font: inherit;
+      }
+      .dash-arrears-nudge:hover { opacity: 0.85; }
       .dash-stat-card {
         background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center;
         cursor: pointer; font: inherit; width: 100%;
@@ -3704,6 +4196,12 @@ function Styles() {
       .dash-building-clear { font-size: 12px; color: var(--ok); }
 
       .sheet-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+      .rent-total-banner {
+        background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--navy);
+        border-radius: 8px; padding: 12px 16px; margin-bottom: 14px;
+      }
+      .rent-total-num { font-size: 26px; font-weight: 700; color: var(--navy); line-height: 1.2; }
+      .rent-total-label { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
       .sheet { border-collapse: collapse; width: 100%; font-size: 13px; }
       .sheet th {
         text-align: left; font-weight: 600; font-size: 11px; color: var(--ink-soft);
@@ -3819,6 +4317,18 @@ function Styles() {
         .page-actions, .form-actions { gap: 8px; }
         .stat-value { font-size: 24px; }
         .sheet-input, select.sheet-input { padding: 10px 8px; }
+        /* .spacer uses flex:1 to push trailing buttons (Mark paid, edit,
+           delete, view toggles, etc.) to the right — fine on desktop, but
+           combined with flex-wrap on a narrow screen it fragments whatever
+           comes after it onto its own oddly-indented line instead of
+           grouping together. Forcing every .spacer to break onto its own
+           full-width, zero-height line means everything after it wraps
+           together as one clean group on the next line instead of
+           scattering — applies everywhere .spacer is used (list rows,
+           filter/tab rows, etc.), not just one page.
+        */
+        .spacer { flex: 1 1 100%; height: 0; }
+        .list-card-head, .filter-row { row-gap: 6px; }
       }
       .save-error-banner {
         display: flex; align-items: center; gap: 8px; background: var(--danger-bg); color: var(--danger);
