@@ -990,22 +990,19 @@ function monthGridDays(refDate) {
 function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
   const [viewMode, setViewMode] = useState("day"); // day | week | month | year
   const [refDate, setRefDate] = useState(todayISO());
-  const [showingOverdue, setShowingOverdue] = useState(false);
   const today = todayISO();
 
   const all = allDatedItems(data, tenantName, buildingName);
   const itemsByDate = {};
   all.forEach(i => { (itemsByDate[i.date] = itemsByDate[i.date] || []).push(i); });
-  const overdueItems = all.filter(i => i.date < today).sort((a, b) => a.date.localeCompare(b.date));
 
   const shift = (n) => {
-    setShowingOverdue(false);
     if (viewMode === "day") setRefDate(d => addDays(d, n));
     else if (viewMode === "week") setRefDate(d => addDays(d, n * 7));
     else if (viewMode === "month") setRefDate(d => addMonths(d, n));
     else setRefDate(d => addMonths(d, n * 12));
   };
-  const pickDate = (d) => { setRefDate(d); setShowingOverdue(false); };
+  const pickDate = (d) => setRefDate(d);
 
   const weekDays = Array.from({ length: 7 }, (_, i) => addDays(addDays(refDate, -new Date(refDate + "T00:00:00").getDay()), i));
   const monthDays = monthGridDays(refDate);
@@ -1016,10 +1013,8 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
     return all.filter(i => i.date.startsWith(prefix)).length;
   });
 
-  const selectedItems = showingOverdue ? overdueItems : (itemsByDate[refDate] || []);
-  const selectedLabel = showingOverdue
-    ? `Overdue (${overdueItems.length})`
-    : (refDate === today ? "Today" : new Date(refDate + "T00:00:00").toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" }));
+  const selectedItems = itemsByDate[refDate] || [];
+  const selectedLabel = refDate === today ? "Today" : new Date(refDate + "T00:00:00").toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
 
   const Row = (item) => (
     <button key={item.key} className="dash-detail-item" onClick={() => setTab(item.tab)}>
@@ -1039,12 +1034,6 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
           {viewMode === "month" ? monthLabel : viewMode === "year" ? yearNum : viewMode === "week" ? `Week of ${fmtDate(weekDays[0])}` : new Date(refDate + "T00:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
         </span>
         <button className="icon-btn" onClick={() => shift(1)}><ChevronRight size={15} /></button>
-        <div className="spacer" />
-        {overdueItems.length > 0 && (
-          <button className={`chip dash-cal-overdue-chip ${showingOverdue ? "chip-active" : ""}`} onClick={() => setShowingOverdue(s => !s)}>
-            {overdueItems.length} overdue
-          </button>
-        )}
       </div>
 
       <div className="filter-row dash-cal-modes">
@@ -1093,7 +1082,7 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
       )}
 
       <div className="dash-cal-section">
-        <div className={`dash-cal-section-title ${showingOverdue ? "dash-cal-overdue" : ""}`}>{selectedLabel}</div>
+        <div className="dash-cal-section-title">{selectedLabel}</div>
         {selectedItems.length === 0 ? <div className="hint">Nothing here.</div> : selectedItems.map(Row)}
       </div>
     </div>
@@ -3712,7 +3701,6 @@ function Styles() {
       .dash-calendar-compact { max-width: 480px; }
       .dash-calendar-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; color: var(--navy); }
       .dash-calendar-title { font-weight: 700; font-size: 13px; }
-      .dash-cal-overdue-chip { border-color: var(--danger); color: var(--danger); }
       .dash-cal-modes { margin-bottom: 8px; gap: 4px; }
       .dash-cal-modes .chip { font-size: 11px; padding: 3px 9px; }
       .dash-cal-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-bottom: 8px; }
@@ -3741,7 +3729,6 @@ function Styles() {
       .dash-cal-month-cell:hover { border-color: var(--navy); }
       .dash-cal-section { margin-top: 4px; }
       .dash-cal-section-title { font-size: 11px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 6px; }
-      .dash-cal-overdue { color: var(--danger); }
       .followup-panel { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--warn); border-radius: 8px; margin-bottom: 24px; overflow: hidden; }
       .followup-panel-head {
         display: flex; align-items: center; gap: 12px; width: 100%; background: none; border: none;
