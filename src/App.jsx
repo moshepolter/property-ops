@@ -1154,7 +1154,7 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
   );
 
   return (
-    <div className="dash-calendar dash-calendar-compact">
+    <div className="dash-calendar">
       <div className="dash-calendar-head">
         <button className="icon-btn" onClick={() => shift(-1)}><ChevronLeft size={15} /></button>
         <span className="dash-calendar-title">
@@ -1172,13 +1172,20 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
 
       {viewMode === "week" && (
         <div className="dash-cal-week">
-          {weekDays.map(d => (
-            <button key={d} className={`dash-cal-cell ${d === refDate ? "dash-cal-cell-selected" : ""} ${d === today ? "dash-cal-cell-today" : ""}`} onClick={() => pickDate(d)}>
-              <div className="dash-cal-cell-label">{new Date(d + "T00:00:00").toLocaleDateString("en-US", { weekday: "short" })}</div>
-              <div className="dash-cal-cell-num">{new Date(d + "T00:00:00").getDate()}</div>
-              {(itemsByDate[d] || []).length > 0 && <span className="dash-cal-dot" />}
-            </button>
-          ))}
+          {weekDays.map(d => {
+            const dayItems = itemsByDate[d] || [];
+            return (
+              <button key={d} className={`dash-cal-cell dash-cal-cell-week ${d === refDate ? "dash-cal-cell-selected" : ""} ${d === today ? "dash-cal-cell-today" : ""}`} onClick={() => pickDate(d)}>
+                <div className="dash-cal-cell-label">{new Date(d + "T00:00:00").toLocaleDateString("en-US", { weekday: "short" })}</div>
+                <div className="dash-cal-cell-num">{new Date(d + "T00:00:00").getDate()}</div>
+                {dayItems.length > 0 && <span className="dash-cal-count">{dayItems.length}</span>}
+                <div className="dash-cal-cell-items">
+                  {dayItems.slice(0, 3).map(item => <div key={item.key} className="dash-cal-cell-item">{item.label}</div>)}
+                  {dayItems.length > 3 && <div className="dash-cal-cell-item row-muted">+{dayItems.length - 3} more</div>}
+                </div>
+              </button>
+            );
+          })}
         </div>
       )}
 
@@ -1187,10 +1194,11 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
           {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => <div key={i} className="dash-cal-month-dow">{d}</div>)}
           {monthDays.map(d => {
             const inMonth = d.slice(0, 7) === refDate.slice(0, 7);
+            const count = (itemsByDate[d] || []).length;
             return (
               <button key={d} className={`dash-cal-cell dash-cal-cell-sm ${d === refDate ? "dash-cal-cell-selected" : ""} ${d === today ? "dash-cal-cell-today" : ""} ${!inMonth ? "dash-cal-cell-dim" : ""}`} onClick={() => pickDate(d)}>
                 <div className="dash-cal-cell-num">{new Date(d + "T00:00:00").getDate()}</div>
-                {(itemsByDate[d] || []).length > 0 && <span className="dash-cal-dot" />}
+                {count > 0 && <span className="dash-cal-count">{count}</span>}
               </button>
             );
           })}
@@ -1254,14 +1262,31 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const today = todayISO();
   // Each open violation goes into exactly ONE of these buckets, by agency, so it
   // never shows up twice on the dashboard. Window covers overdue + due within 10 days.
-  const violationDue = (v) => { if (isViolationClosed(v)) return false; const d = daysUntil(v.cureDeadline); return d === null || d <= 10; };
-  const hpdDue = data.violations.filter(v => v.agency === "HPD" && violationDue(v));
+  // Every OPEN violation shows here now, not just ones due soon — this used
+  // to only include violations due within 10 days, which matched the
+  // building card's "open violations" count except when a violation had a
+  // cure date further out, creating a confusing "it's open, why isn't it
+  // here" gap. Showing everything open means this always matches that
+  // count exactly, and the panel is still sorted soonest-due-first so
+  // urgency isn't lost.
+  const violationDue = (v) => !isViolationClosed(v);
+  // Soonest cure deadline first; missing deadlines sort to the end — same
+  // convention the Violations page itself already uses, so the order here
+  // matches what you'd see over there too.
+  const byCureDeadline = (a, b) => {
+    const da = daysUntil(a.cureDeadline), db = daysUntil(b.cureDeadline);
+    if (da === null && db === null) return 0;
+    if (da === null) return 1;
+    if (db === null) return -1;
+    return da - db;
+  };
+  const hpdDue = data.violations.filter(v => v.agency === "HPD" && violationDue(v)).sort(byCureDeadline);
   const sameAgency = (a, b) => (a || "").trim().toUpperCase() === b;
-  const dobDue = data.violations.filter(v => v.agency === "Other" && sameAgency(v.otherAgency, "DOB") && violationDue(v));
-  const fdnyDue = data.violations.filter(v => v.agency === "Other" && sameAgency(v.otherAgency, "FDNY") && violationDue(v));
+  const dobDue = data.violations.filter(v => v.agency === "Other" && sameAgency(v.otherAgency, "DOB") && violationDue(v)).sort(byCureDeadline);
+  const fdnyDue = data.violations.filter(v => v.agency === "Other" && sameAgency(v.otherAgency, "FDNY") && violationDue(v)).sort(byCureDeadline);
   const otherViolationsDue = data.violations.filter(v =>
     (v.agency === "DSNY" || (v.agency === "Other" && !sameAgency(v.otherAgency, "DOB") && !sameAgency(v.otherAgency, "FDNY"))) && violationDue(v)
-  );
+  ).sort(byCureDeadline);
   const dateDue = (d) => { const days = daysUntil(d); return days === null || days <= 7; };
   const dateDueStrict = (d) => { const days = daysUntil(d); return days !== null && days <= 7; };
   // A stipulation case's normal resting state is having NO next court date —
@@ -1523,14 +1548,14 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
         </div>
       )}
 
-      <div className="dash-two-col">
-        <div className="dash-col-side">
-          <DashboardCalendar data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} />
-        </div>
-        <div className="dash-col-main">
-          {rosterEntries.length > 0 && (
-            <div className="dash-roster">
-              <div className="dash-roster-title">Follow up with ({followUpEntries.length})</div>
+      <div className="dash-calendar-hero">
+        <DashboardCalendar data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} />
+      </div>
+
+      <div className="dash-col-main">
+        {rosterEntries.length > 0 && (
+          <div className="dash-roster">
+            <div className="dash-roster-title">Follow up with ({followUpEntries.length})</div>
               {rosterEntries.map(({ tenant: t, followUp: f }) => (
                 <div className="dash-roster-row" key={f.id}>
                   <div className="dash-roster-info">
@@ -1590,7 +1615,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>HPD violations due or overdue <span className="dash-panel-sub">(within 10 days, or no cure deadline set)</span></>} items={hpdDue} tab="violations" setTab={setTab}
+            label={<>HPD violations — all open <span className="dash-panel-sub">(sorted by cure deadline)</span></>} items={hpdDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1604,7 +1629,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>DOB violations due or overdue <span className="dash-panel-sub">(within 10 days, or no cure deadline set)</span></>} items={dobDue} tab="violations" setTab={setTab}
+            label={<>DOB violations — all open <span className="dash-panel-sub">(sorted by cure deadline)</span></>} items={dobDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1618,7 +1643,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>FDNY violations due or overdue <span className="dash-panel-sub">(within 10 days, or no cure deadline set)</span></>} items={fdnyDue} tab="violations" setTab={setTab}
+            label={<>FDNY violations — all open <span className="dash-panel-sub">(sorted by cure deadline)</span></>} items={fdnyDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1632,7 +1657,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
           <AttentionPanel
             icon={<AlertTriangle size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>Other violations due or overdue (DSNY, ECB, DEP, etc.) <span className="dash-panel-sub">(within 10 days, or no cure deadline set)</span></>} items={otherViolationsDue} tab="violations" setTab={setTab}
+            label={<>Other violations — all open (DSNY, ECB, DEP, etc.) <span className="dash-panel-sub">(sorted by cure deadline)</span></>} items={otherViolationsDue} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
               <>
@@ -1755,7 +1780,6 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
         </>
       )}
         </div>
-      </div>
 
       <h2 className="section-heading">By building</h2>
       {data.buildings.length === 0 ? (
@@ -4200,8 +4224,7 @@ function Styles() {
       .dash-stat-num { font-size: 22px; font-weight: 700; color: var(--navy); line-height: 1.2; }
       .dash-stat-label { font-size: 11px; color: var(--ink-soft); margin-top: 2px; }
       .dash-stat-sub { font-size: 10px; color: var(--ink-soft); margin-top: 1px; }
-      .dash-two-col { display: grid; grid-template-columns: 260px 1fr; gap: 16px; align-items: start; }
-      .dash-col-side .dash-calendar-compact { max-width: none; }
+      .dash-col-main { max-width: none; }
       .dash-roster { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; }
       .dash-roster-title { font-size: 12px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 8px; }
       .dash-roster-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
@@ -4275,35 +4298,50 @@ function Styles() {
       .followup-scroll { max-height: 520px; overflow-y: auto; padding-right: 4px; }
       .dash-calendar {
         background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-        padding: 12px 14px; margin-bottom: 18px;
+        padding: 16px 18px; margin-bottom: 18px;
       }
-      .dash-calendar-compact { max-width: 480px; }
-      .dash-calendar-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; color: var(--navy); }
-      .dash-calendar-title { font-weight: 700; font-size: 13px; }
-      .dash-cal-modes { margin-bottom: 8px; gap: 4px; }
-      .dash-cal-modes .chip { font-size: 11px; padding: 3px 9px; }
-      .dash-cal-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-bottom: 8px; }
-      .dash-cal-month { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; margin-bottom: 8px; }
-      .dash-cal-month-dow { text-align: center; font-size: 9px; color: var(--ink-soft); font-weight: 700; padding-bottom: 2px; }
+      .dash-calendar-hero { margin-bottom: 4px; }
+      .dash-calendar-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: var(--navy); }
+      .dash-calendar-title { font-weight: 700; font-size: 16px; }
+      .dash-cal-modes { margin-bottom: 10px; gap: 6px; }
+      .dash-cal-modes .chip { font-size: 12px; padding: 4px 12px; }
+      .dash-cal-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 10px; }
+      .dash-cal-month { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-bottom: 10px; }
+      .dash-cal-month-dow { text-align: center; font-size: 11px; color: var(--ink-soft); font-weight: 700; padding-bottom: 3px; }
       .dash-cal-cell {
-        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
-        background: #fff; border: 1px solid var(--border); border-radius: 5px;
-        padding: 5px 2px; cursor: pointer; position: relative; font: inherit;
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+        background: #fff; border: 1px solid var(--border); border-radius: 6px;
+        padding: 8px 4px; cursor: pointer; position: relative; font: inherit;
       }
-      .dash-cal-cell-sm { padding: 3px 2px; aspect-ratio: 1; }
+      .dash-cal-cell-sm { padding: 4px 3px; aspect-ratio: 1; }
+      .dash-cal-cell-week { align-items: stretch; justify-content: flex-start; min-height: 90px; padding: 8px 6px; gap: 3px; }
+      .dash-cal-cell-week .dash-cal-cell-label, .dash-cal-cell-week .dash-cal-cell-num { align-self: center; }
       .dash-cal-cell:hover { border-color: var(--navy); }
       .dash-cal-cell-today { border-color: var(--navy); border-width: 2px; }
       .dash-cal-cell-selected { background: var(--navy); }
       .dash-cal-cell-selected .dash-cal-cell-label, .dash-cal-cell-selected .dash-cal-cell-num { color: #fff; }
       .dash-cal-cell-dim { opacity: 0.35; }
-      .dash-cal-cell-label { font-size: 9px; text-transform: uppercase; color: var(--ink-soft); letter-spacing: 0.02em; }
-      .dash-cal-cell-num { font-size: 13px; font-weight: 700; }
-      .dash-cal-dot { width: 5px; height: 5px; border-radius: 999px; background: var(--danger); }
-      .dash-cal-year { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 8px; }
+      .dash-cal-cell-label { font-size: 10px; text-transform: uppercase; color: var(--ink-soft); letter-spacing: 0.02em; }
+      .dash-cal-cell-num { font-size: 15px; font-weight: 700; }
+      .dash-cal-cell-items { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; width: 100%; }
+      .dash-cal-cell-item {
+        font-size: 10px; line-height: 1.25; text-align: left; color: var(--ink);
+        background: var(--warn-bg); border-radius: 3px; padding: 2px 4px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .dash-cal-cell-selected .dash-cal-cell-item { background: rgba(255,255,255,0.15); color: #fff; }
+      .dash-cal-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--danger); }
+      .dash-cal-count {
+        position: absolute; top: 2px; right: 2px; min-width: 14px; height: 14px; padding: 0 3px;
+        border-radius: 999px; background: var(--danger); color: #fff; font-size: 9px; font-weight: 700;
+        display: flex; align-items: center; justify-content: center; line-height: 1;
+      }
+      .dash-cal-cell-selected .dash-cal-count { background: #fff; color: var(--navy); }
+      .dash-cal-year { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px; }
       .dash-cal-month-cell {
         display: flex; flex-direction: column; align-items: center; gap: 3px;
         background: #fff; border: 1px solid var(--border); border-radius: 6px;
-        padding: 10px 4px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+        padding: 14px 4px; cursor: pointer; font: inherit; font-size: 13px; font-weight: 600;
       }
       .dash-cal-month-cell:hover { border-color: var(--navy); }
       .dash-cal-section { margin-top: 4px; }
@@ -4326,7 +4364,8 @@ function Styles() {
       .followup-item-note { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
 
       @media (max-width: 720px) {
-        .dash-two-col { grid-template-columns: 1fr; }
+        .dash-cal-cell-week .dash-cal-cell-items { display: none; }
+        .dash-cal-cell-week { min-height: 52px; }
         .dash-stats-row { grid-template-columns: repeat(2, 1fr); }
         .form-panel { grid-template-columns: 1fr; }
         .law-row { grid-template-columns: 1fr; }
