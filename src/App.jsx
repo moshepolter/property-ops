@@ -2763,11 +2763,26 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
                   Mark Certified
                 </button>
               )}
+              {agency === "DSNY" && view === "active" && (
+                <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); update("violations", v.id, { status: "Paid" }); }}>
+                  Mark paid
+                </button>
+              )}
               <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(v); }}><Pencil size={14} /></IconBtn>
               <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("violations", v.id); }}><Trash2 size={14} /></IconBtn>
             </div>
             {isOpen && (
               <div className="list-card-body">
+                {agency === "DSNY" && view === "active" && (
+                  <div className="row" style={{ display: "flex", gap: 8, marginBottom: 4 }}>
+                    <button className={`chip ${v.status === "Disputing online" ? "chip-active" : ""}`} onClick={() => update("violations", v.id, { status: "Disputing online" })}>
+                      Fighting it
+                    </button>
+                    <button className={`chip ${v.status === "Paid" ? "chip-active" : ""}`} onClick={() => update("violations", v.id, { status: "Paid" })}>
+                      Paying it
+                    </button>
+                  </div>
+                )}
                 {v.class && <div className="row"><strong>Class:</strong> {v.class}</div>}
                 {v.description && <div className="row">{v.description}</div>}
                 <PhotoUploader
