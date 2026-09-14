@@ -2259,7 +2259,6 @@ function RentTab({ data, add, update, remove, buildingName, setData }) {
   const [newPayAmount, setNewPayAmount] = useState("");
   const [newPayNote, setNewPayNote] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
-  const [agingFilter, setAgingFilter] = useState(false);
   const [sortMode, setSortMode] = useState("building"); // building | balance | oldest
   const [expandedBuildings, setExpandedBuildings] = useState(new Set());
   const [section, setSection] = useState("sheet");
@@ -2298,8 +2297,8 @@ function RentTab({ data, add, update, remove, buildingName, setData }) {
 
   const passesFilters = (t) => {
     if (statusFilter === "Follow-ups") { if (tenantFollowUps(t).length === 0) return false; }
+    else if (statusFilter === "61+") { if (agingSeverity(t) < 3) return false; }
     else if (statusFilter !== "All" && t.status !== statusFilter) return false;
-    if (agingFilter && agingSeverity(t) < 3) return false;
     return true;
   };
 
@@ -2647,7 +2646,7 @@ function RentTab({ data, add, update, remove, buildingName, setData }) {
         <>
           <div className="rent-total-banner">
             <div className="rent-total-num">${totalOwedAll.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-            <div className="rent-total-label">total owed across {visibleTenants.length} tenant{visibleTenants.length === 1 ? "" : "s"}{statusFilter !== "All" || agingFilter ? " (matching current filters)" : ""}</div>
+            <div className="rent-total-label">total owed across {visibleTenants.length} tenant{visibleTenants.length === 1 ? "" : "s"}{statusFilter !== "All" ? " (matching current filters)" : ""}</div>
           </div>
 
           <div className="filter-row">
@@ -2655,7 +2654,7 @@ function RentTab({ data, add, update, remove, buildingName, setData }) {
               <button key={s} className={`chip ${statusFilter === s ? "chip-active" : ""}`} onClick={() => setStatusFilter(s)}>{s}</button>
             ))}
             <button className={`chip ${statusFilter === "Follow-ups" ? "chip-active" : ""}`} onClick={() => setStatusFilter("Follow-ups")}>Follow-ups</button>
-            <button className={`chip ${agingFilter ? "chip-active" : ""}`} onClick={() => setAgingFilter(a => !a)}>61+ days only</button>
+            <button className={`chip ${statusFilter === "61+" ? "chip-active" : ""}`} onClick={() => setStatusFilter("61+")}>61+ days only</button>
           </div>
           <div className="filter-row">
             <span className="row-muted" style={{ fontSize: 12, marginRight: 2 }}>Sort:</span>
