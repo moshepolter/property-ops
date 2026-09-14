@@ -508,7 +508,21 @@ function parseContactsText(text) {
   // like that from a bare number (a phone extension, an apartment number
   // munged into the wrong spot) that isn't a name at all.
   const SINGLE_LETTER_NAME_RE = `(?:(?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?|\\d[\\d\\s]*[A-Za-z][A-Za-z0-9.,'\\-\\s]*?)`;
-  const NEXT_HEADER = `(?:${APT_RE}|\\d{3,4}|${ALT_APT_RE}|${LETTER_APT_RE}|${COMBO_APT_RE}|${FLOOR_APT_RE}|${SINGLE_LETTER_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
+  // A single bare letter only counts as a unit header where the previous
+  // entry plausibly just ended: right after a full phone number
+  // ("917-686-3777"), right after an email domain (".COM ", ".ORG "),
+  // optionally followed by one capitalized word (a contact person's first
+  // name sometimes appears between the previous entry's phone/email and the
+  // next unit) — or at the very start of the document. Anywhere else, a
+  // lone capital letter reads as an ordinary word inside a name ("Clean N
+  // Green Corp.") far more often than as an actual unit code. The phone
+  // pattern specifically requires the full dashed shape — a bare 3-4 digit
+  // number right before doesn't count, since that's exactly what a unit
+  // number itself looks like ("1417 Clean N Green Corp." — 1417 is the
+  // unit, not a phone number that already ended).
+  const PHONE_TAIL = "\\d{3}[-.\\s]\\d{3}[-.\\s]\\d{4}";
+  const SINGLE_LETTER_CONTEXT = `(?<=^|${PHONE_TAIL}\\s|\\.[A-Za-z]{2,4}\\s|${PHONE_TAIL}\\s[A-Z][A-Za-z]*\\s|\\.[A-Za-z]{2,4}\\s[A-Z][A-Za-z]*\\s)`;
+  const NEXT_HEADER = `(?:${APT_RE}|\\d{3,4}|${ALT_APT_RE}|${LETTER_APT_RE}|${COMBO_APT_RE}|${FLOOR_APT_RE}|${SINGLE_LETTER_CONTEXT}${SINGLE_LETTER_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
   const headerRe = new RegExp(
     `(?:^|\\s)(?:` +
       `(${APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
@@ -523,7 +537,7 @@ function parseContactsText(text) {
       `|` +
       `(${FLOOR_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
       `|` +
-      `(${SINGLE_LETTER_APT_RE})\\s+(?!${LABELS}\\b)(${SINGLE_LETTER_NAME_RE})` +
+      `${SINGLE_LETTER_CONTEXT}(${SINGLE_LETTER_APT_RE})\\s+(?!${LABELS}\\b)(${SINGLE_LETTER_NAME_RE})` +
     `)(?=\\s+${LABELS}\\b|\\s+${NEXT_HEADER}|$)`,
     "g"
   );
