@@ -280,7 +280,11 @@ const TIME_OPTIONS = (() => {
 /* ============================== RIS report parsing ============================== */
 
 const APT_RE = "[A-Z]{1,3}\\d{1,4}";
-const SKIP_LINE_RE = /^\d{2}\/\d{2}\/\d{4}|FISCAL PERIOD|^Page:|PROP #|TELEPHONE\/EMAIL LIST|BUILDING DIRECTORY|AGED ARREARS|^LEGAL:|^\*\s*-\s*MOVED OUT|^TOTALS:|^TENANT NAME:/i;
+// Global so every embedded header fragment gets stripped, not just the
+// first — a flattened single-line paste (no real line breaks preserved by
+// whatever copied it) can have several of these mashed together with the
+// actual tenant data all on one line, with nothing to separate them.
+const SKIP_LINE_RE = /^\d{2}\/\d{2}\/\d{4}|FISCAL PERIOD[^A-Z]*TO\s+\d{2}\/\d{2}\/\d{4}|Page:\s*\d+|PROP #\s*\S+:[^-]*-[^,]*,\s*[A-Z]{2}\s*\d{5}|TELEPHONE\/EMAIL LIST|BUILDING DIRECTORY|AGED ARREARS|LEGAL:|\*\s*-\s*MOVED OUT|TOTALS:|TENANT NAME:/ig;
 
 function cleanLines(text) {
   return text.split("\n").map(l => l.trim()).map(l => {
@@ -289,7 +293,8 @@ function cleanLines(text) {
     // row — keep the code, drop just the label, so that apartment isn't lost.
     const m = l.match(/^APT:\s*(.+)$/i);
     return m ? m[1].trim() : l;
-  }).filter(l => l && !SKIP_LINE_RE.test(l) && !/^APT:?$/i.test(l));
+  }).map(l => l.replace(SKIP_LINE_RE, " ").replace(/\s+/g, " ").trim())
+    .filter(l => l && !/^APT:?$/i.test(l));
 }
 
 // Every RIS report repeats a header like:
@@ -486,7 +491,24 @@ function parseContactsText(text) {
   // if each were its own unit).
   const ALT_APT_RE = "\\d{1,2}[A-Z]{1,2}";
   const LETTER_APT_RE = "[A-Z]{2}";
-  const NEXT_HEADER = `(?:${APT_RE}|\\d{3,4}|${ALT_APT_RE}|${LETTER_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
+  // A commercial/mixed-use building can also have: two units combined under
+  // one listing ("A_&_B"), a floor identified by number instead of a unit
+  // code ("6_FL"), or a single bare letter ("C", "D", "E" — as opposed to
+  // the 2-letter garden-unit codes above). X is excluded from the
+  // single-letter form specifically because "WORK - 555-1234 X 119" (a
+  // phone extension) is a far more common way to see a lone "X" in these
+  // reports than an actual unit named X.
+  const COMBO_APT_RE = "[A-Z]_&_[A-Z]";
+  const FLOOR_APT_RE = "\\d{1,2}_FL";
+  const SINGLE_LETTER_APT_RE = "[A-WYZ]";
+  // A name normally starts with a capital letter (or Mr./Mrs./Ms.) — but a
+  // business can be named starting with digits ("718 Bistro Inc."), so a
+  // digit-led name is accepted too, as long as a real letter shows up
+  // somewhere in it. That second clause is what separates a genuine name
+  // like that from a bare number (a phone extension, an apartment number
+  // munged into the wrong spot) that isn't a name at all.
+  const SINGLE_LETTER_NAME_RE = `(?:(?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?|\\d[\\d\\s]*[A-Za-z][A-Za-z0-9.,'\\-\\s]*?)`;
+  const NEXT_HEADER = `(?:${APT_RE}|\\d{3,4}|${ALT_APT_RE}|${LETTER_APT_RE}|${COMBO_APT_RE}|${FLOOR_APT_RE}|${SINGLE_LETTER_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
   const headerRe = new RegExp(
     `(?:^|\\s)(?:` +
       `(${APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
@@ -496,13 +518,23 @@ function parseContactsText(text) {
       `(${ALT_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
       `|` +
       `(${LETTER_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
+      `|` +
+      `(${COMBO_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
+      `|` +
+      `(${FLOOR_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
+      `|` +
+      `(${SINGLE_LETTER_APT_RE})\\s+(?!${LABELS}\\b)(${SINGLE_LETTER_NAME_RE})` +
     `)(?=\\s+${LABELS}\\b|\\s+${NEXT_HEADER}|$)`,
     "g"
   );
   const headers = [];
   let m;
   while ((m = headerRe.exec(cleaned))) {
-    headers.push({ apt: m[1] || m[3] || m[5] || m[7], name: (m[2] || m[4] || m[6] || m[8] || "").trim(), start: m.index, end: m.index + m[0].length });
+    headers.push({
+      apt: m[1] || m[3] || m[5] || m[7] || m[9] || m[11] || m[13],
+      name: (m[2] || m[4] || m[6] || m[8] || m[10] || m[12] || m[14] || "").trim(),
+      start: m.index, end: m.index + m[0].length,
+    });
   }
 
   const phoneRe = /\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}/;
