@@ -337,7 +337,7 @@ function parseBalance(b) {
 }
 
 // Aged Arrears: "A1 AUDREY LYNN MELENDEZ UNKNO 1698.80 1698.80 3794.00 7191.60"
-function parseArrearsText(text) {
+function parseArrearsTextLineFormat(text) {
   const lineRe = new RegExp(`^(${APT_RE})(\\*)?\\s+(.+?)\\s+UNKNO\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s*$`);
   const out = [];
   for (const line of cleanLines(text)) {
@@ -358,6 +358,79 @@ function parseArrearsText(text) {
     out.push({ apt, movedOut: !!moved, name, balance: totalNum.toFixed(2), status, aging: { bucket1, bucket2, bucket61 } });
   }
   return out;
+}
+
+// A second RIS layout prints the report in columns instead of one line per
+// tenant: a block of every unit number, then a block of every tenant name,
+// then a block of codes, then four blocks of dollar amounts (one row per
+// aging bucket) — each block internally space/newline-separated rather than
+// aligned per tenant. It's split by page (each starting with "PROP #"), since
+// a trailing number in each dollar row is a page subtotal, not a per-unit
+// value, and has to be dropped using that page's own unit count.
+//
+// Names in this layout can't be reliably split back apart — two short names
+// often land on the same extracted line with no delimiter between them, and
+// there's no way to know where one ends and the next begins. Rather than
+// guess and risk assigning someone else's name to a unit, entries from a
+// page where the name-line count doesn't match the unit count get an empty
+// name (which — since a blank value never overwrites an existing tenant's
+// name — just leaves whatever's already on file untouched) and are flagged
+// needsReview so the person importing knows to double-check that page.
+function parseArrearsTextColumnar(text) {
+  const APT_TOKEN_RE = /\b[A-Za-z]{1,4}\d{0,4}\*?/g;
+  const NUM_RE = /[\d,]*\d\.\d{2}/g;
+  const pages = text.split(/(?=PROP #)/).filter(p => p.trim());
+  const out = [];
+
+  pages.forEach(page => {
+    const aptBlockMatch = page.match(/APT:\s*LEGAL:([\s\S]*?)TENANT NAME:/);
+    const nameBlockMatch = page.match(/TENANT NAME:([\s\S]*?)CODE:/);
+    if (!aptBlockMatch) return;
+    const cleanedAptBlock = aptBlockMatch[1].replace(/\bN-\d+\b/g, " ");
+    const apts = (cleanedAptBlock.match(APT_TOKEN_RE) || []);
+    const n = apts.length;
+    if (n === 0) return;
+
+    const bucket = (startLabel, endLabel) => {
+      const re = new RegExp(startLabel + "([\\s\\S]*?)" + endLabel);
+      const m = page.match(re);
+      if (!m) return [];
+      // Only the first n values are per-unit — anything after that on a
+      // page is a page subtotal, never a tenant's own balance.
+      return (m[1].match(NUM_RE) || []).slice(0, n).map(s => parseFloat(s.replace(/,/g, "")));
+    };
+    const b1 = bucket("0-30 DAYS:", "31-60 DAYS:");
+    const b2 = bucket("31-60 DAYS:", "61\\+ DAYS:");
+    const b3 = bucket("61\\+ DAYS:", "TOTAL DUE:");
+    const b4 = bucket("TOTAL DUE:", "AGED ARREARS");
+
+    const nameLines = nameBlockMatch ? nameBlockMatch[1].split("\n").map(l => l.trim()).filter(Boolean) : [];
+    const namesReliable = nameLines.length === n;
+
+    for (let i = 0; i < n; i++) {
+      const rawApt = apts[i];
+      const movedOut = rawApt.endsWith("*");
+      const apt = rawApt.replace("*", "").toUpperCase();
+      const totalNum = b4[i] !== undefined ? b4[i] : 0;
+      const bucket61 = b3[i] || 0;
+      let status = "Current";
+      if (totalNum > 0) status = bucket61 > 0 ? "In Arrears" : "Late";
+      out.push({
+        apt, movedOut,
+        name: namesReliable ? nameLines[i] : "",
+        needsReview: !namesReliable,
+        balance: totalNum.toFixed(2), status,
+        aging: { bucket1: b1[i] || 0, bucket2: b2[i] || 0, bucket61 },
+      });
+    }
+  });
+  return out;
+}
+
+function parseArrearsText(text) {
+  const lineFormat = parseArrearsTextLineFormat(text);
+  if (lineFormat.length > 0) return lineFormat;
+  return parseArrearsTextColumnar(text);
 }
 
 // Telephone/Email list: header line "A1 AUDREY LYNN MELENDEZ" then indented "CELL - ...", "EMAIL ADDRESS - ..."
