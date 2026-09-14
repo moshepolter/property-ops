@@ -346,11 +346,12 @@ function parseArrearsTextLineFormat(text) {
   // Locally scoped, not the shared APT_RE — some buildings number units
   // letter-first (A1, B62), others digit-first with a letter suffix (1A,
   // 4D, 6K), others a bare 2-letter code with no digit at all ("GA", "GB"
-  // for a garden-level unit), and others a bare number alone for a
-  // commercial unit ("8101") — recognize all four without changing APT_RE's
-  // behavior for the contacts parser, which intentionally stays
-  // letter-first-only there.
-  const LINE_APT_RE = `(?:${APT_RE}|\\d{1,4}[A-Z]{1,4}|[A-Z]{2}|\\d{1,4})`;
+  // for a garden-level unit), others a bare number alone for a commercial
+  // unit ("8101"), and others a range covering several combined units
+  // ("211-15" for units 211 through 215) — recognize all five without
+  // changing APT_RE's behavior for the contacts parser, which intentionally
+  // stays letter-first-only there.
+  const LINE_APT_RE = `(?:${APT_RE}|\\d{1,4}-\\d{1,4}|\\d{1,4}[A-Z]{1,4}|[A-Z]{2}|\\d{1,4})`;
   // Joined into one continuous string rather than matched line-by-line —
   // some paste sources flatten the whole report onto a single line with no
   // real breaks at all, and a ^...$-anchored per-line match would only ever
