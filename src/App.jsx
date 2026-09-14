@@ -376,35 +376,60 @@ function parseArrearsTextLineFormat(text) {
 // name (which — since a blank value never overwrites an existing tenant's
 // name — just leaves whatever's already on file untouched) and are flagged
 // needsReview so the person importing knows to double-check that page.
+// Every section label this report style can use — a section's content is
+// found between its label and whichever of these comes next in the text,
+// rather than assuming a fixed order. Different buildings' exports print
+// TOTAL DUE either first (right after the header) or last (after the aging
+// buckets), so a fixed start-label/end-label pairing breaks on whichever
+// order it didn't expect.
+const ARREARS_SECTION_MARKERS = ["TOTAL DUE:", "APT:\\s*LEGAL:", "TENANT NAME:", "CODE:", "0-30 DAYS:", "31-60 DAYS:", "61\\+ DAYS:", "AGED ARREARS FOR"];
+function extractArrearsSection(page, labelPattern) {
+  const startMatch = page.match(new RegExp(labelPattern));
+  if (!startMatch) return null;
+  const startIdx = startMatch.index + startMatch[0].length;
+  let endIdx = page.length;
+  for (const marker of ARREARS_SECTION_MARKERS) {
+    const re = new RegExp(marker, "g");
+    re.lastIndex = startIdx;
+    const nextMatch = re.exec(page);
+    if (nextMatch && nextMatch.index < endIdx) endIdx = nextMatch.index;
+  }
+  return page.slice(startIdx, endIdx);
+}
+
 function parseArrearsTextColumnar(text) {
-  const APT_TOKEN_RE = /\b[A-Za-z]{1,4}\d{0,4}\*?/g;
+  // Matches BOTH apartment-numbering conventions — letter-first (A1, B62)
+  // and number-first (0B, 1H, 2BB) — since which one a building uses varies,
+  // and a pattern that only recognized one left the other's units silently
+  // unmatched (nothing to do with a broken report — just a different
+  // building's normal numbering style).
+  const APT_TOKEN_RE = /\b(?:[A-Za-z]{1,4}\d{1,4}|\d{1,4}[A-Za-z]{1,4}|[A-Za-z]{1,4})\*?/g;
   const NUM_RE = /[\d,]*\d\.\d{2}/g;
   const pages = text.split(/(?=PROP #)/).filter(p => p.trim());
   const out = [];
 
   pages.forEach(page => {
-    const aptBlockMatch = page.match(/APT:\s*LEGAL:([\s\S]*?)TENANT NAME:/);
-    const nameBlockMatch = page.match(/TENANT NAME:([\s\S]*?)CODE:/);
-    if (!aptBlockMatch) return;
-    const cleanedAptBlock = aptBlockMatch[1].replace(/\bN-\d+\b/g, " ");
-    const apts = (cleanedAptBlock.match(APT_TOKEN_RE) || []);
+    const aptSection = extractArrearsSection(page, "APT:\\s*LEGAL:");
+    if (!aptSection) return;
+    const cleanedAptSection = aptSection.replace(/\bN-\d+\b/g, " ");
+    const apts = (cleanedAptSection.match(APT_TOKEN_RE) || []);
     const n = apts.length;
     if (n === 0) return;
 
-    const bucket = (startLabel, endLabel) => {
-      const re = new RegExp(startLabel + "([\\s\\S]*?)" + endLabel);
-      const m = page.match(re);
-      if (!m) return [];
+    const bucket = (label) => {
+      const section = extractArrearsSection(page, label);
+      if (!section) return [];
       // Only the first n values are per-unit — anything after that on a
       // page is a page subtotal, never a tenant's own balance.
-      return (m[1].match(NUM_RE) || []).slice(0, n).map(s => parseFloat(s.replace(/,/g, "")));
+      return (section.match(NUM_RE) || []).slice(0, n).map(s => parseFloat(s.replace(/,/g, "")));
     };
-    const b1 = bucket("0-30 DAYS:", "31-60 DAYS:");
-    const b2 = bucket("31-60 DAYS:", "61\\+ DAYS:");
-    const b3 = bucket("61\\+ DAYS:", "TOTAL DUE:");
-    const b4 = bucket("TOTAL DUE:", "AGED ARREARS");
+    const b1 = bucket("0-30 DAYS:");
+    const b2 = bucket("31-60 DAYS:");
+    const b3 = bucket("61\\+ DAYS:");
+    const b4 = bucket("TOTAL DUE:");
 
-    const nameLines = nameBlockMatch ? nameBlockMatch[1].split("\n").map(l => l.trim()).filter(Boolean) : [];
+    const nameSection = extractArrearsSection(page, "TENANT NAME:");
+    const nameLines = nameSection ? nameSection.split("\n").map(l => l.trim()).filter(Boolean) : [];
     const namesReliable = nameLines.length === n;
 
     for (let i = 0; i < n; i++) {
