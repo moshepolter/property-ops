@@ -3110,7 +3110,18 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   const matchesAgency = (v, a) => {
     if (a === "HPD") return v.agency === "HPD";
     if (a === "DSNY") return v.agency === "DSNY";
-    if (a === "Other") return v.agency === "Other" && !v.otherAgency;
+    if (a === "Other") {
+      // A true catch-all: anything not HPD, not DSNY, and not matching a
+      // known dynamic agency lands here — no matter what garbage value its
+      // own agency/otherAgency fields actually hold. A violation with a
+      // corrupted agency (e.g. literally "All" from an old bug) used to
+      // match nothing at all here, making it invisible on this whole page
+      // while still being counted everywhere else that doesn't require a
+      // bucket match, like the Dashboard.
+      if (v.agency === "HPD" || v.agency === "DSNY") return false;
+      if (v.agency === "Other" && dynamicOtherAgencies.includes(v.otherAgency)) return false;
+      return true;
+    }
     return v.agency === "Other" && v.otherAgency === a;
   };
   const filterAndSort = (a) => {
