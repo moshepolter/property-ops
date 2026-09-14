@@ -478,6 +478,11 @@ function parseContactsText(text) {
   // found anywhere between that header and the next one, wherever it landed.
   const cleaned = cleanLines(seqStripped).join(" ");
   const LABELS = "(?:CELL|EMAIL ADDRESS|HOME|WORK|OTHER|FAX)";
+  // & included so a business literally named with one ("Nixon & Son Meat
+  // Market Corp.") doesn't break the match partway through — anywhere else
+  // in these reports an ampersand only shows up inside a name, never as
+  // meaningful punctuation of its own.
+  const NAME_CHARS = "A-Za-z.,'&\\-\\s";
   // Some buildings also have commercial/storefront units identified by a bare
   // number (no letter prefix — anywhere from a single digit like "1" or "3"
   // up to a longer code like "9516 JH ORGANIC INC." or "319"), others use
@@ -492,6 +497,10 @@ function parseContactsText(text) {
   // were its own unit).
   const ALT_APT_RE = "\\d{1,2}[A-Z]{1,2}";
   const LETTER_APT_RE = "[A-Z]{2}";
+  // A longer bare number can have its own single-letter sub-unit suffix too
+  // ("2106A" — a sub-division of unit 2106) — same idea as ALT_APT_RE but
+  // for numbers longer than the 2-digit cap that one allows.
+  const LONG_ALT_APT_RE = "\\d{3,4}[A-Z]";
   // A commercial/mixed-use building can also have: two units combined under
   // one listing ("A_&_B"), a floor identified by number instead of a unit
   // code ("6_FL"), or a single bare letter ("C", "D", "E" — as opposed to
@@ -508,7 +517,7 @@ function parseContactsText(text) {
   // somewhere in it. That second clause is what separates a genuine name
   // like that from a bare number (a phone extension, an apartment number
   // munged into the wrong spot) that isn't a name at all.
-  const SINGLE_LETTER_NAME_RE = `(?:(?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?|\\d[\\d\\s]*[A-Za-z][A-Za-z0-9.,'\\-\\s]*?)`;
+  const SINGLE_LETTER_NAME_RE = `(?:(?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?|\\d[\\d\\s]*[A-Za-z][A-Za-z0-9${NAME_CHARS.replace("A-Za-z", "")}]*?)`;
   // A single bare letter only counts as a unit header where the previous
   // entry plausibly just ended: right after a full phone number
   // ("917-686-3777"), right after an email domain (".COM ", ".ORG "),
@@ -523,20 +532,22 @@ function parseContactsText(text) {
   // unit, not a phone number that already ended).
   const PHONE_TAIL = "\\d{3}[-.\\s]\\d{3}[-.\\s]\\d{4}";
   const SINGLE_LETTER_CONTEXT = `(?<=^|${PHONE_TAIL}\\s|\\.[A-Za-z]{2,4}\\s|${PHONE_TAIL}\\s[A-Z][A-Za-z]*\\s|\\.[A-Za-z]{2,4}\\s[A-Z][A-Za-z]*\\s)`;
-  const NEXT_HEADER = `(?:${APT_RE}|\\d{1,4}|${ALT_APT_RE}|${LETTER_APT_RE}|${COMBO_APT_RE}|${FLOOR_APT_RE}|${SINGLE_LETTER_CONTEXT}${SINGLE_LETTER_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
+  const NEXT_HEADER = `(?:${APT_RE}|\\d{1,4}|${ALT_APT_RE}|${LONG_ALT_APT_RE}|${LETTER_APT_RE}|${COMBO_APT_RE}|${FLOOR_APT_RE}|${SINGLE_LETTER_CONTEXT}${SINGLE_LETTER_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
   const headerRe = new RegExp(
     `(?:^|\\s)(?:` +
-      `(${APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
+      `(${APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
       `|` +
-      `(\\d{1,4})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]+?)` +
+      `(\\d{1,4})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]+?)` +
       `|` +
-      `(${ALT_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
+      `(${LONG_ALT_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
       `|` +
-      `(${LETTER_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
+      `(${ALT_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
       `|` +
-      `(${COMBO_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
+      `(${LETTER_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
       `|` +
-      `(${FLOOR_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
+      `(${COMBO_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
+      `|` +
+      `(${FLOOR_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
       `|` +
       `${SINGLE_LETTER_CONTEXT}(${SINGLE_LETTER_APT_RE})\\s+(?!${LABELS}\\b)(${SINGLE_LETTER_NAME_RE})` +
     `)(?=\\s+${LABELS}\\b|\\s+${NEXT_HEADER}|$)`,
@@ -546,8 +557,8 @@ function parseContactsText(text) {
   let m;
   while ((m = headerRe.exec(cleaned))) {
     headers.push({
-      apt: m[1] || m[3] || m[5] || m[7] || m[9] || m[11] || m[13],
-      name: (m[2] || m[4] || m[6] || m[8] || m[10] || m[12] || m[14] || "").trim(),
+      apt: m[1] || m[3] || m[5] || m[7] || m[9] || m[11] || m[13] || m[15],
+      name: (m[2] || m[4] || m[6] || m[8] || m[10] || m[12] || m[14] || m[16] || "").trim(),
       start: m.index, end: m.index + m[0].length,
     });
   }
