@@ -284,7 +284,7 @@ const APT_RE = "[A-Z]{1,3}\\d{1,4}";
 // first — a flattened single-line paste (no real line breaks preserved by
 // whatever copied it) can have several of these mashed together with the
 // actual tenant data all on one line, with nothing to separate them.
-const SKIP_LINE_RE = /^\d{2}\/\d{2}\/\d{4}|FISCAL PERIOD[^A-Z]*TO\s+\d{2}\/\d{2}\/\d{4}|Page:\s*\d+|PROP #\s*\S+:[^-]*-[^,]*,\s*[A-Z]{2}\s*\d{5}|TELEPHONE\/EMAIL LIST|BUILDING DIRECTORY|AGED ARREARS FOR [A-Za-z]+\s*,\s*\d{4}|LEGAL:|\*\s*-\s*MOVED OUT|TOTALS:|TENANT NAME:/ig;
+const SKIP_LINE_RE = /^\d{2}\/\d{2}\/\d{4}|FISCAL PERIOD[^A-Z]*TO\s+\d{2}\/\d{2}\/\d{4}|Page:\s*\d+|PROP #\s*\S+:[^-]*-[^,]*,\s*[A-Z]{2}\s*\d{5}|TELEPHONE\/EMAIL LIST|BUILDING DIRECTORY|AGED ARREARS FOR [A-Za-z]+\s*,\s*\d{4}|CODE:\s*0-30 DAYS:\s*31-60 DAYS:\s*61\+ DAYS:\s*TOTAL DUE:|LEGAL:|\*\s*-\s*MOVED OUT|TOTALS:|TENANT NAME:/ig;
 
 function cleanLines(text) {
   return text.split("\n").map(l => l.trim()).map(l => {
@@ -347,11 +347,18 @@ function parseArrearsTextLineFormat(text) {
   // letter-first (A1, B62), others digit-first with a letter suffix (1A,
   // 4D, 6K), others a bare 2-letter code with no digit at all ("GA", "GB"
   // for a garden-level unit), others a bare number alone for a commercial
-  // unit ("8101"), and others a range covering several combined units
-  // ("211-15" for units 211 through 215) — recognize all five without
-  // changing APT_RE's behavior for the contacts parser, which intentionally
-  // stays letter-first-only there.
-  const LINE_APT_RE = `(?:${APT_RE}|\\d{1,4}-\\d{1,4}|\\d{1,4}[A-Z]{1,4}|[A-Z]{2}|\\d{1,4})`;
+  // unit ("8101"), others a range covering several combined units
+  // ("211-15" for units 211 through 215), others two units combined under
+  // one listing ("A_&_B"), others a floor identified by number instead of a
+  // unit code — a single floor ("3_FL"), a merged pair of floors
+  // ("4&5_FL"), or a floor with a direction/section suffix ("6_FL_N") — and
+  // others a single bare letter ("C", "D", "E"). Recognize all of these
+  // without changing APT_RE's behavior for the contacts parser, which
+  // intentionally stays letter-first-only there.
+  const COMBO_APT_RE = "[A-Z]_&_[A-Z]";
+  const FLOOR_APT_RE = "\\d{1,2}(?:&\\d{1,2})?_FL(?:_[A-Z])?";
+  const SINGLE_LETTER_APT_RE = "[A-WYZ]";
+  const LINE_APT_RE = `(?:${APT_RE}|\\d{1,4}-\\d{1,4}|\\d{1,4}[A-Z]{1,4}|${COMBO_APT_RE}|${FLOOR_APT_RE}|[A-Z]{2}|\\d{1,4})`;
   // Joined into one continuous string rather than matched line-by-line —
   // some paste sources flatten the whole report onto a single line with no
   // real breaks at all, and a ^...$-anchored per-line match would only ever
@@ -359,6 +366,13 @@ function parseArrearsTextLineFormat(text) {
   // the text. Matching repeatedly through the whole text instead finds
   // every one regardless of whether real line breaks survived the paste.
   const cleaned = cleanLines(text).join(" ");
+  // A single bare letter unit only counts where the previous entry
+  // plausibly just ended — right after its TOTAL DUE dollar amount, or at
+  // the very start of the document. Nothing ever sits between one entry's
+  // numbers and the next unit code in this report style (unlike the
+  // contacts report, which can have a contact person's name in between), so
+  // this context check can stay simpler than the contacts version needed.
+  const SINGLE_LETTER_CONTEXT = `(?<=^|\\d\\.\\d{2}\\s)`;
   // UNKNO is normally a fixed marker between the name and the dollar
   // amounts, but a source report can occasionally drop it for one entry (a
   // data-quality glitch in the report itself, not something predictable) —
@@ -366,13 +380,16 @@ function parseArrearsTextLineFormat(text) {
   // to run past the end of that entry and swallow the next tenant's data
   // too. The four decimal dollar amounts are the real anchor either way.
   const lineRe = new RegExp(
-    `(?:^|\\s)(${LINE_APT_RE})(\\*)?\\s+(.+?)\\s+(?:UNKNO\\s+)?([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})(?=\\s|$)`,
+    `(?:^|\\s)(?:(${LINE_APT_RE})|${SINGLE_LETTER_CONTEXT}(${SINGLE_LETTER_APT_RE}))(\\*)?\\s+(.+?)\\s+(?:UNKNO\\s+)?([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})(?=\\s|$)`,
     "g"
   );
   const out = [];
   let m;
   while ((m = lineRe.exec(cleaned))) {
-    const [, apt, moved, rawName, d1, d2, d3, total] = m;
+    const apt = m[1] || m[2];
+    const moved = m[3];
+    const rawName = m[4];
+    const [d1, d2, d3, total] = [m[5], m[6], m[7], m[8]];
     const name = rawName.replace(/^N-\d+\s+/, "").trim();
     const totalNum = parseFloat(total.replace(/,/g, ""));
     const bucket1 = parseFloat(d1.replace(/,/g, ""));
