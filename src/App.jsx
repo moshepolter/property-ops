@@ -343,7 +343,12 @@ function parseBalance(b) {
 
 // Aged Arrears: "A1 AUDREY LYNN MELENDEZ UNKNO 1698.80 1698.80 3794.00 7191.60"
 function parseArrearsTextLineFormat(text) {
-  const lineRe = new RegExp(`^(${APT_RE})(\\*)?\\s+(.+?)\\s+UNKNO\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s*$`);
+  // Locally scoped, not the shared APT_RE — some buildings number units
+  // letter-first (A1, B62), others digit-first (1A, 4D, 6K), and this needs
+  // to recognize either without changing APT_RE's behavior for the contacts
+  // parser, which intentionally stays letter-first-only there.
+  const LINE_APT_RE = `(?:${APT_RE}|\\d{1,4}[A-Z]{1,4})`;
+  const lineRe = new RegExp(`^(${LINE_APT_RE})(\\*)?\\s+(.+?)\\s+UNKNO\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s*$`);
   const out = [];
   for (const line of cleanLines(text)) {
     const m = line.match(lineRe);
