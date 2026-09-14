@@ -284,7 +284,7 @@ const APT_RE = "[A-Z]{1,3}\\d{1,4}";
 // first — a flattened single-line paste (no real line breaks preserved by
 // whatever copied it) can have several of these mashed together with the
 // actual tenant data all on one line, with nothing to separate them.
-const SKIP_LINE_RE = /^\d{2}\/\d{2}\/\d{4}|FISCAL PERIOD[^A-Z]*TO\s+\d{2}\/\d{2}\/\d{4}|Page:\s*\d+|PROP #\s*\S+:[^-]*-[^,]*,\s*[A-Z]{2}\s*\d{5}|TELEPHONE\/EMAIL LIST|BUILDING DIRECTORY|AGED ARREARS|LEGAL:|\*\s*-\s*MOVED OUT|TOTALS:|TENANT NAME:/ig;
+const SKIP_LINE_RE = /^\d{2}\/\d{2}\/\d{4}|FISCAL PERIOD[^A-Z]*TO\s+\d{2}\/\d{2}\/\d{4}|Page:\s*\d+|PROP #\s*\S+:[^-]*-[^,]*,\s*[A-Z]{2}\s*\d{5}|TELEPHONE\/EMAIL LIST|BUILDING DIRECTORY|AGED ARREARS FOR [A-Za-z]+\s*,\s*\d{4}|LEGAL:|\*\s*-\s*MOVED OUT|TOTALS:|TENANT NAME:/ig;
 
 function cleanLines(text) {
   return text.split("\n").map(l => l.trim()).map(l => {
@@ -344,15 +344,31 @@ function parseBalance(b) {
 // Aged Arrears: "A1 AUDREY LYNN MELENDEZ UNKNO 1698.80 1698.80 3794.00 7191.60"
 function parseArrearsTextLineFormat(text) {
   // Locally scoped, not the shared APT_RE — some buildings number units
-  // letter-first (A1, B62), others digit-first (1A, 4D, 6K), and this needs
-  // to recognize either without changing APT_RE's behavior for the contacts
-  // parser, which intentionally stays letter-first-only there.
-  const LINE_APT_RE = `(?:${APT_RE}|\\d{1,4}[A-Z]{1,4})`;
-  const lineRe = new RegExp(`^(${LINE_APT_RE})(\\*)?\\s+(.+?)\\s+UNKNO\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s*$`);
+  // letter-first (A1, B62), others digit-first with a letter suffix (1A,
+  // 4D, 6K), and others use a bare number alone for a commercial unit
+  // ("8101") — recognize all three without changing APT_RE's behavior for
+  // the contacts parser, which intentionally stays letter-first-only there.
+  const LINE_APT_RE = `(?:${APT_RE}|\\d{1,4}[A-Z]{1,4}|\\d{1,4})`;
+  // Joined into one continuous string rather than matched line-by-line —
+  // some paste sources flatten the whole report onto a single line with no
+  // real breaks at all, and a ^...$-anchored per-line match would only ever
+  // find one record in that case no matter how many tenants are actually in
+  // the text. Matching repeatedly through the whole text instead finds
+  // every one regardless of whether real line breaks survived the paste.
+  const cleaned = cleanLines(text).join(" ");
+  // UNKNO is normally a fixed marker between the name and the dollar
+  // amounts, but a source report can occasionally drop it for one entry (a
+  // data-quality glitch in the report itself, not something predictable) —
+  // made optional here so a missing UNKNO doesn't cause the name-matching
+  // to run past the end of that entry and swallow the next tenant's data
+  // too. The four decimal dollar amounts are the real anchor either way.
+  const lineRe = new RegExp(
+    `(?:^|\\s)(${LINE_APT_RE})(\\*)?\\s+(.+?)\\s+(?:UNKNO\\s+)?([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})(?=\\s|$)`,
+    "g"
+  );
   const out = [];
-  for (const line of cleanLines(text)) {
-    const m = line.match(lineRe);
-    if (!m) continue;
+  let m;
+  while ((m = lineRe.exec(cleaned))) {
     const [, apt, moved, rawName, d1, d2, d3, total] = m;
     const name = rawName.replace(/^N-\d+\s+/, "").trim();
     const totalNum = parseFloat(total.replace(/,/g, ""));
