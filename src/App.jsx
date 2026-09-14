@@ -479,16 +479,17 @@ function parseContactsText(text) {
   const cleaned = cleanLines(seqStripped).join(" ");
   const LABELS = "(?:CELL|EMAIL ADDRESS|HOME|WORK|OTHER|FAX)";
   // Some buildings also have commercial/storefront units identified by a bare
-  // number (no letter prefix, e.g. "9516 JH ORGANIC INC." or a 3-digit code
-  // like "319"), others use digit-then-letter codes ("1B", "2BB"), and others
-  // a bare letter code with no digit at all ("GA", "GB" for a garden-level
-  // unit). Support all four, but require the numeric/digit-first forms to
-  // have a real name after them — otherwise a phone number written with
-  // spaces instead of dashes ("718 833 3607 FAX") can look just like a unit
-  // code — and keep the letter-only form to exactly 2 letters, or it starts
-  // matching ordinary all-caps words inside a long name (e.g. catching
-  // "NAGI" and "SALA" out of "BASSAM NAGI AZAFARI SALA MOHAMED ALBADANI" as
-  // if each were its own unit).
+  // number (no letter prefix — anywhere from a single digit like "1" or "3"
+  // up to a longer code like "9516 JH ORGANIC INC." or "319"), others use
+  // digit-then-letter codes ("1B", "2BB"), and others a bare letter code
+  // with no digit at all ("GA", "GB" for a garden-level unit). Support all
+  // four, but require the numeric/digit-first forms to have a real name
+  // after them — otherwise a phone number written with spaces instead of
+  // dashes ("718 833 3607 FAX") can look just like a unit code — and keep
+  // the letter-only form to exactly 2 letters, or it starts matching
+  // ordinary all-caps words inside a long name (e.g. catching "NAGI" and
+  // "SALA" out of "BASSAM NAGI AZAFARI SALA MOHAMED ALBADANI" as if each
+  // were its own unit).
   const ALT_APT_RE = "\\d{1,2}[A-Z]{1,2}";
   const LETTER_APT_RE = "[A-Z]{2}";
   // A commercial/mixed-use building can also have: two units combined under
@@ -522,12 +523,12 @@ function parseContactsText(text) {
   // unit, not a phone number that already ended).
   const PHONE_TAIL = "\\d{3}[-.\\s]\\d{3}[-.\\s]\\d{4}";
   const SINGLE_LETTER_CONTEXT = `(?<=^|${PHONE_TAIL}\\s|\\.[A-Za-z]{2,4}\\s|${PHONE_TAIL}\\s[A-Z][A-Za-z]*\\s|\\.[A-Za-z]{2,4}\\s[A-Z][A-Za-z]*\\s)`;
-  const NEXT_HEADER = `(?:${APT_RE}|\\d{3,4}|${ALT_APT_RE}|${LETTER_APT_RE}|${COMBO_APT_RE}|${FLOOR_APT_RE}|${SINGLE_LETTER_CONTEXT}${SINGLE_LETTER_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
+  const NEXT_HEADER = `(?:${APT_RE}|\\d{1,4}|${ALT_APT_RE}|${LETTER_APT_RE}|${COMBO_APT_RE}|${FLOOR_APT_RE}|${SINGLE_LETTER_CONTEXT}${SINGLE_LETTER_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
   const headerRe = new RegExp(
     `(?:^|\\s)(?:` +
       `(${APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
       `|` +
-      `(\\d{3,4})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]+?)` +
+      `(\\d{1,4})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]+?)` +
       `|` +
       `(${ALT_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
       `|` +
