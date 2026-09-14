@@ -460,36 +460,49 @@ function parseArrearsText(text) {
 
 // Telephone/Email list: header line "A1 AUDREY LYNN MELENDEZ" then indented "CELL - ...", "EMAIL ADDRESS - ..."
 function parseContactsText(text) {
+  // Some reports number each entry ("183. GA", "1. 1A") — strip that leading
+  // sequence number first, or it reads as a bare numeric unit code with what
+  // looks like the start of a name right after it (the real unit code),
+  // misidentifying the sequence number as the unit instead.
+  const seqStripped = text.replace(/(?:^|\n)\s*\d{1,4}\.\s+/g, "\n");
   // Different PDF viewers copy multi-line contact cells in unpredictable order —
   // sometimes labels and values stay paired, sometimes all labels get grouped
   // together with all their values afterward. Rather than trying to track which
   // line goes with which, treat the whole report as one continuous block: find
   // every apartment header, then pull the first phone number and first email
   // found anywhere between that header and the next one, wherever it landed.
-  const cleaned = cleanLines(text).join(" ");
+  const cleaned = cleanLines(seqStripped).join(" ");
   const LABELS = "(?:CELL|EMAIL ADDRESS|HOME|WORK|OTHER|FAX)";
   // Some buildings also have commercial/storefront units identified by a bare
-  // number (no letter prefix, e.g. "9516 JH ORGANIC INC."), and others use
-  // digit-then-letter codes ("1B", "2BB") instead of letter-then-digit. Support
-  // all three, but require the numeric/digit-first forms to have a real name
-  // after them — otherwise a phone number written with spaces instead of dashes
-  // ("718 833 3607 FAX") can look just like a unit code.
+  // number (no letter prefix, e.g. "9516 JH ORGANIC INC." or a 3-digit code
+  // like "319"), others use digit-then-letter codes ("1B", "2BB"), and others
+  // a bare letter code with no digit at all ("GA", "GB" for a garden-level
+  // unit). Support all four, but require the numeric/digit-first forms to
+  // have a real name after them — otherwise a phone number written with
+  // spaces instead of dashes ("718 833 3607 FAX") can look just like a unit
+  // code — and keep the letter-only form to exactly 2 letters, or it starts
+  // matching ordinary all-caps words inside a long name (e.g. catching
+  // "NAGI" and "SALA" out of "BASSAM NAGI AZAFARI SALA MOHAMED ALBADANI" as
+  // if each were its own unit).
   const ALT_APT_RE = "\\d{1,2}[A-Z]{1,2}";
-  const NEXT_HEADER = `(?:${APT_RE}|\\d{4}|${ALT_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
+  const LETTER_APT_RE = "[A-Z]{2}";
+  const NEXT_HEADER = `(?:${APT_RE}|\\d{3,4}|${ALT_APT_RE}|${LETTER_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
   const headerRe = new RegExp(
     `(?:^|\\s)(?:` +
       `(${APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
       `|` +
-      `(\\d{4})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]+?)` +
+      `(\\d{3,4})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]+?)` +
       `|` +
       `(${ALT_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
+      `|` +
+      `(${LETTER_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[A-Za-z.,'\\-\\s]*?)` +
     `)(?=\\s+${LABELS}\\b|\\s+${NEXT_HEADER}|$)`,
     "g"
   );
   const headers = [];
   let m;
   while ((m = headerRe.exec(cleaned))) {
-    headers.push({ apt: m[1] || m[3] || m[5], name: (m[2] || m[4] || m[6] || "").trim(), start: m.index, end: m.index + m[0].length });
+    headers.push({ apt: m[1] || m[3] || m[5] || m[7], name: (m[2] || m[4] || m[6] || m[8] || "").trim(), start: m.index, end: m.index + m[0].length });
   }
 
   const phoneRe = /\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}/;
