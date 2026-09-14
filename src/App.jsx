@@ -11,6 +11,7 @@ import { initializeApp } from "firebase/app";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
+import { getFunctions, httpsCallable } from "firebase/functions";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA5Op33F-BQSfKVbe3zx3jlbfZdsCSWT2c",
@@ -25,8 +26,9 @@ const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
 const storage = getStorage(firebaseApp);
+const functions = getFunctions(firebaseApp);
 import {
-  Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat, Home, Phone,
+  Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat, Home, Phone, Mail,
   CalendarClock, ScrollText, MessageSquare, Archive as ArchiveIcon, DollarSign,
   Plus, X, Camera, Download, LayoutDashboard, ChevronDown, ChevronRight, ChevronLeft,
   Trash2, Pencil, Upload, Menu, Printer, CheckCircle2
@@ -1227,6 +1229,7 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
 function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   const [rentPanelOpen, setRentPanelOpen] = useState(false);
   const [violationsPanelOpen, setViolationsPanelOpen] = useState(false);
+  const [testEmailStatus, setTestEmailStatus] = useState(null); // null | "sending" | "sent" | "error"
   const [showAllOverdue, setShowAllOverdue] = useState(false);
   const [confirmingCleanup, setConfirmingCleanup] = useState(false);
   const [expandedBuilding, setExpandedBuilding] = useState(null);
@@ -1305,6 +1308,14 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   // A case still actively in litigation with no date set is a real gap
   // though, so that one still counts.
   const courtItems = data.courtCases.filter(c => !c.archived && (c.result === "Stipulation (payment plan)" ? dateDueStrict(c.nextCourtDate) : dateDue(c.nextCourtDate)));
+  const byHearingDate = (a, b) => {
+    const da = daysUntil(a.hearingDate), db = daysUntil(b.hearingDate);
+    if (da === null && db === null) return 0;
+    if (da === null) return 1;
+    if (db === null) return -1;
+    return da - db;
+  };
+  const hearingItems = data.violations.filter(v => v.hasHearing && !isViolationClosed(v) && dateDue(v.hearingDate)).sort(byHearingDate);
   const stipItems = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && dateDue(c.nextPaymentDue));
   const recurringItems = data.appointments.filter(a => !a.completed && a.recurring && dateDue(a.date));
   const appointmentItems = data.appointments.filter(a => !a.completed && !a.recurring && dateDue(a.date));
@@ -1325,7 +1336,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
   const totalViolationsDue = violationAgencyGroups.reduce((sum, g) => sum + g.items.length, 0);
-  const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + totalViolationsDue + bossReminderItems.length;
+  const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + totalViolationsDue + bossReminderItems.length + hearingItems.length;
 
   // Top stat row + follow-up roster
   const allDated = allDatedItems(data, tenantName, buildingName);
@@ -1451,11 +1462,28 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
     XLSX.writeFile(wb, `property-ops-backup-${today}.xlsx`);
   };
 
+  const sendTestEmail = async () => {
+    setTestEmailStatus("sending");
+    try {
+      const fn = httpsCallable(functions, "sendTestDigestEmail");
+      await fn();
+      setTestEmailStatus("sent");
+    } catch (e) {
+      console.error("Test email failed", e);
+      setTestEmailStatus("error");
+    }
+    setTimeout(() => setTestEmailStatus(null), 4000);
+  };
+
   return (
     <div>
       <div className="page-head">
         <h1 className="page-title">Dashboard</h1>
         <div className="page-actions">
+          <button className="btn-ghost" onClick={sendTestEmail} disabled={testEmailStatus === "sending"}>
+            <Mail size={14} />
+            {testEmailStatus === "sending" ? "Sending…" : testEmailStatus === "sent" ? "Sent!" : testEmailStatus === "error" ? "Failed — try again" : "Send test email"}
+          </button>
           <button className="btn-ghost" onClick={exportAllData}><Download size={14} /> Export backup</button>
           <PrintButton label="Dashboard" />
         </div>
@@ -1661,6 +1689,21 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
                 <Flag date={c.nextCourtDate} />
                 <div className="followup-item-main">
                   <div className="followup-item-name">{tenantName(c.tenantId)} {c.caseNumber && `· Docket #${c.caseNumber}`}</div>
+                </div>
+              </>
+            )}
+          />
+
+          <AttentionPanel
+            icon={<Gavel size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
+            label={<>Hearings due or overdue <span className="dash-panel-sub">(within 7 days, or no date set)</span></>} items={hearingItems} tab="violations" setTab={setTab}
+            itemKey={v => v.id}
+            renderItem={v => (
+              <>
+                <Flag date={v.hearingDate} />
+                <div className="followup-item-main">
+                  <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
+                  {v.hearingCompany && <div className="followup-item-note">{v.hearingCompany}</div>}
                 </div>
               </>
             )}
@@ -2818,8 +2861,10 @@ function ImportBlock({ type, data, setData, buildingName }) {
             {type === "arrears" && ` · ${preview.missing.length} not in this file`}
             {" "}({preview.parsedCount} rows read)
           </div>
-          {preview.changes.length === 0 && preview.missing.length === 0 && (
-            <div className="hint">No changes found — everything already matches.</div>
+          {preview.changes.length === 0 && (
+            <div className="hint">
+              Nothing to import — every unit in this file already matches what's on file exactly (same name, balance, and status). {preview.missing.length > 0 ? "The list below is unrelated: it's units on file that weren't found in this file at all." : ""}
+            </div>
           )}
           {preview.changes.map((c, i) => (
             <div className={`import-row ${c.needsApproval ? "import-row-approval" : ""}`} key={i}>
@@ -3164,6 +3209,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           {rowAgency === "HPD" && v.vendorId && <span className="pill pill-muted">{vendorName(v.vendorId)}</span>}
           {rowAgency === "DSNY" && v.fineAmount && <span className="pill pill-muted">{v.fineAmount}</span>}
           {rowAgency === "Other" && v.otherAgency && <span className="pill pill-muted">{v.otherAgency}</span>}
+          {v.hasHearing && <span className="pill pill-warn"><Gavel size={11} /> Hearing{v.hearingDate ? ` ${fmtDate(v.hearingDate)}` : ""}</span>}
           {rowAgency !== "HPD" && rowAgency !== "DSNY" && v.company && <span className="pill pill-muted">{v.company}</span>}
           {rowAgency !== "DSNY" && view === "active" && <Flag date={v.cureDeadline} />}
           <div className="spacer" />
@@ -3285,6 +3331,19 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
               onAddType={addCustomOtherAgency}
             />
           </Field>
+
+          <Field label="Hearing scheduled?">
+            <label className="hearing-checkbox-row">
+              <input type="checkbox" checked={!!form.hasHearing} onChange={e => setForm({ ...form, hasHearing: e.target.checked })} />
+              <span>This violation has a hearing</span>
+            </label>
+          </Field>
+          {form.hasHearing && (
+            <>
+              <Field label="Hearing date"><input type="date" value={form.hearingDate || ""} onChange={e => setForm({ ...form, hearingDate: e.target.value })} /></Field>
+              <Field label="Company handling hearing"><input value={form.hearingCompany || ""} onChange={e => setForm({ ...form, hearingCompany: e.target.value })} /></Field>
+            </>
+          )}
 
           {form.agency === "HPD" && (
             <>
@@ -4072,6 +4131,8 @@ function Styles() {
       .form-panel .field:has(textarea) { grid-column: 1 / -1; }
       .form-actions { grid-column: 1 / -1; display: flex; gap: 8px; }
       .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-soft); }
+      .hearing-checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); cursor: pointer; padding: 7px 0; }
+      .hearing-checkbox-row input { width: auto; }
       .field input, .field select, .field textarea {
         font-size: 13px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 5px;
         background: #fff; color: var(--ink); font-family: inherit; width: 100%; box-sizing: border-box;
