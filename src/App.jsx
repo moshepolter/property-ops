@@ -2392,150 +2392,6 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
 
 /* ============================== buildings ============================== */
 
-// ============================================================================
-// ONE-TIME RECOVERY RESTORE TOOL — added the night of the Sept 14 2026 data
-// loss incident, to be deleted (this whole component, plus its one render
-// call in BuildingsTab below) once Moshe confirms the restore is complete
-// and correct. Not meant to be a permanent feature.
-// ============================================================================
-function OneTimeJsonRestore({ data, setData }) {
-  const [jsonText, setJsonText] = useState("");
-  const [preview, setPreview] = useState(null);
-  const [error, setError] = useState("");
-  const [result, setResult] = useState(null);
-
-  const runPreview = () => {
-    setError("");
-    setResult(null);
-    let parsed;
-    try {
-      parsed = JSON.parse(jsonText);
-    } catch (e) {
-      setError("That doesn't look like valid JSON — make sure you copied the entire file content.");
-      return;
-    }
-    if (!parsed || typeof parsed !== "object" || !parsed.buildings || typeof parsed.buildings !== "object") {
-      setError("This doesn't look like the recovery backup file — no \"buildings\" section found in it.");
-      return;
-    }
-    const summary = Object.entries(parsed.buildings).map(([code, b]) => {
-      if (!b || !b.address) return { code, address: "(missing address)", skipped: true, reason: "no address in this entry", arrearsCount: 0, contactsCount: 0 };
-      const existingBuilding = data.buildings.find(bld => (bld.address || "").trim().toLowerCase() === b.address.trim().toLowerCase());
-      const alreadyHasData = existingBuilding && data.tenants.some(t => t.buildingId === existingBuilding.id);
-      return {
-        code, address: b.address,
-        skipped: !!alreadyHasData,
-        reason: alreadyHasData ? "this building already has tenants on file — will be left untouched" : "",
-        arrearsCount: b.arrears ? b.arrears.length : 0,
-        contactsCount: b.contacts ? b.contacts.length : 0,
-      };
-    });
-    setPreview({ raw: parsed, summary });
-  };
-
-  const runImport = () => {
-    if (!preview) return;
-    let resultSummary = [];
-    setData(d => {
-      const next = { ...d, buildings: [...d.buildings], units: [...d.units], tenants: [...d.tenants] };
-      for (const [code, b] of Object.entries(preview.raw.buildings)) {
-        if (!b || !b.address) continue;
-        const existingBuilding = next.buildings.find(bld => (bld.address || "").trim().toLowerCase() === b.address.trim().toLowerCase());
-        const alreadyHasData = existingBuilding && next.tenants.some(t => t.buildingId === existingBuilding.id);
-        if (alreadyHasData) {
-          resultSummary.push({ code, address: b.address, skipped: true, tenantsCreated: 0, unitsCreated: 0 });
-          continue;
-        }
-        let building = existingBuilding;
-        if (!building) {
-          building = { id: uid(), address: b.address, risPropCode: code, notes: "" };
-          next.buildings.push(building);
-        }
-        const contactsByApt = {};
-        (b.contacts || []).forEach(c => { contactsByApt[c.apt] = c; });
-        let unitsCreated = 0, tenantsCreated = 0;
-        const getOrCreateUnit = (aptNumber) => {
-          let unit = next.units.find(u => u.buildingId === building.id && u.unitNumber === aptNumber);
-          if (!unit) { unit = { id: uid(), buildingId: building.id, unitNumber: aptNumber }; next.units.push(unit); unitsCreated++; }
-          return unit;
-        };
-        (b.arrears || []).forEach(entry => {
-          const unit = getOrCreateUnit(entry.apt);
-          const contact = contactsByApt[entry.apt];
-          next.tenants.push({
-            id: uid(), buildingId: building.id, unitId: unit.id,
-            name: entry.name || (contact ? contact.name : "") || "",
-            phone: contact ? contact.phone || "" : "",
-            email: contact ? contact.email || "" : "",
-            balance: entry.balance || "0.00",
-            status: entry.status || "Current",
-            notes: [], messageLog: [], payments: [],
-            ...(entry.aging ? { aging: entry.aging } : {}),
-          });
-          tenantsCreated++;
-          delete contactsByApt[entry.apt];
-        });
-        // Contacts with no matching arrears entry — a unit with phone/email
-        // on file but no balance line in this particular report.
-        Object.values(contactsByApt).forEach(contact => {
-          const unit = getOrCreateUnit(contact.apt);
-          if (!next.tenants.some(t => t.unitId === unit.id)) {
-            next.tenants.push({
-              id: uid(), buildingId: building.id, unitId: unit.id,
-              name: contact.name || "", phone: contact.phone || "", email: contact.email || "",
-              balance: "0.00", status: "Current",
-              notes: [], messageLog: [], payments: [],
-            });
-            tenantsCreated++;
-          }
-        });
-        resultSummary.push({ code, address: b.address, skipped: false, tenantsCreated, unitsCreated });
-      }
-      return next;
-    });
-    setResult(resultSummary);
-    setPreview(null);
-    setJsonText("");
-  };
-
-  return (
-    <div className="form-panel" style={{ border: "2px solid var(--warn)", marginBottom: 16 }}>
-      <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠️ One-time recovery restore tool</div>
-      <p className="hint">Paste the full content of recovery-backup-2026-09-14.json below. This creates buildings, units, and tenants (name, phone, email, balance) from it — buildings that already have tenants on file are automatically left untouched, so this is safe to run more than once. Delete this tool once you've confirmed everything looks right.</p>
-      <textarea rows={8} value={jsonText} onChange={e => { setJsonText(e.target.value); setPreview(null); setResult(null); }} placeholder="Paste the entire JSON file content here…" />
-      {error && <div className="hint" style={{ color: "var(--danger)" }}>{error}</div>}
-      <div className="form-actions" style={{ marginTop: 8 }}>
-        <button className="btn-primary" onClick={runPreview} disabled={!jsonText.trim()}>Preview</button>
-      </div>
-      {preview && (
-        <div style={{ marginTop: 12 }}>
-          {preview.summary.map(s => (
-            <div key={s.code} className="hint" style={{ marginBottom: 4 }}>
-              <strong>{s.address}</strong> — {s.skipped
-                ? <span style={{ color: "var(--warn)" }}>skipped: {s.reason}</span>
-                : `will create ${s.arrearsCount} arrears entries + ${s.contactsCount} contacts, merged into one tenant per unit`}
-            </div>
-          ))}
-          <div className="form-actions" style={{ marginTop: 8 }}>
-            <button className="btn-primary" onClick={runImport}>Confirm import</button>
-            <button className="btn-ghost" onClick={() => setPreview(null)}>Cancel</button>
-          </div>
-        </div>
-      )}
-      {result && (
-        <div style={{ marginTop: 12 }}>
-          <div className="hint" style={{ fontWeight: 700, color: "var(--ok)" }}>Import complete.</div>
-          {result.map(r => (
-            <div key={r.code} className="hint">
-              {r.address} — {r.skipped ? "skipped (already had data)" : `${r.unitsCreated} units, ${r.tenantsCreated} tenants created`}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
   const [form, setForm] = useState(null);
   // Buildings default to collapsed — track which ones have been explicitly
@@ -2657,7 +2513,6 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
 
   return (
     <div>
-      <OneTimeJsonRestore data={data} setData={setData} />
       <div className="page-head">
         <h1 className="page-title">Buildings</h1>
         <div className="page-actions">
@@ -2905,6 +2760,7 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
 
   const sortTenants = (list) => {
     if (sortMode === "balance") return [...list].sort((a, b) => parseBalance(b.balance) - parseBalance(a.balance));
+    if (sortMode === "balanceLow") return [...list].sort((a, b) => parseBalance(a.balance) - parseBalance(b.balance));
     if (sortMode === "oldest") return [...list].sort((a, b) => agingSeverity(b) - agingSeverity(a) || parseBalance(b.balance) - parseBalance(a.balance));
     return [...list].sort((a, b) => compareUnits(unitOf(a), unitOf(b)));
   };
@@ -3283,7 +3139,13 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
           </div>
 
           <div className="filter-row">
-            {["All", ...RENT_STATUSES].map(s => (
+            {/* "In Arrears" intentionally left out here — that status is
+                defined as "the 61+ day bucket has money", the exact same
+                condition "61+ days only" below already filters on, so the
+                two chips always showed identical results. Still a valid
+                status value elsewhere (the dropdowns), just redundant as
+                its own filter chip. */}
+            {["All", ...RENT_STATUSES.filter(s => s !== "In Arrears")].map(s => (
               <button key={s} className={`chip ${statusFilter === s ? "chip-active" : ""}`} onClick={() => setStatusFilter(s)}>{s}</button>
             ))}
             <button className={`chip ${statusFilter === "Follow-ups" ? "chip-active" : ""}`} onClick={() => setStatusFilter("Follow-ups")}>Follow-ups</button>
@@ -3293,6 +3155,7 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
             <span className="row-muted" style={{ fontSize: 12, marginRight: 2 }}>Sort:</span>
             <button className={`chip ${sortMode === "building" ? "chip-active" : ""}`} onClick={() => setSortMode("building")}>By unit</button>
             <button className={`chip ${sortMode === "balance" ? "chip-active" : ""}`} onClick={() => setSortMode("balance")}>Highest balance</button>
+            <button className={`chip ${sortMode === "balanceLow" ? "chip-active" : ""}`} onClick={() => setSortMode("balanceLow")}>Lowest balance</button>
             <button className={`chip ${sortMode === "oldest" ? "chip-active" : ""}`} onClick={() => setSortMode("oldest")}>Oldest debt</button>
           </div>
 
