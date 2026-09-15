@@ -284,7 +284,7 @@ const APT_RE = "[A-Z]{1,3}\\d{1,4}";
 // first — a flattened single-line paste (no real line breaks preserved by
 // whatever copied it) can have several of these mashed together with the
 // actual tenant data all on one line, with nothing to separate them.
-const SKIP_LINE_RE = /^\d{2}\/\d{2}\/\d{4}|FISCAL PERIOD[^A-Z]*TO\s+\d{2}\/\d{2}\/\d{4}|Page:\s*\d+|PROP #\s*\S+:[^-]*-[^,]*,\s*[A-Z]{2}\s*\d{5}|TELEPHONE\/EMAIL LIST|BUILDING DIRECTORY|AGED ARREARS FOR [A-Za-z]+\s*,\s*\d{4}|CODE:\s*0-30 DAYS:\s*31-60 DAYS:\s*61\+ DAYS:\s*TOTAL DUE:|LEGAL:|\*\s*-\s*MOVED OUT|TOTALS:|TENANT NAME:/ig;
+const SKIP_LINE_RE = /^\d{2}\/\d{2}\/\d{4}.*Page:\s*\d+\s*$|^\d{2}\/\d{2}\/\d{4}|FISCAL PERIOD[^A-Z]*TO\s+\d{2}\/\d{2}\/\d{4}|Page:\s*\d+|PROP #\s*\S+:[^\n]*?\d{5}\b|TELEPHONE\/EMAIL LIST|BUILDING DIRECTORY|AGED ARREARS FOR [A-Za-z]+\s*,\s*\d{4}|CODE:\s*0-30 DAYS:\s*31-60 DAYS:\s*61\+ DAYS:\s*TOTAL DUE:|LEGAL:|\*\s*-\s*MOVED OUT|TOTALS:|TENANT NAME:/ig;
 
 function cleanLines(text) {
   return text.split("\n").map(l => l.trim()).map(l => {
@@ -1039,6 +1039,28 @@ export default function PropertyOpsApp() {
   // instant the in-flight one finishes.
   const saveInFlight = useRef(false);
   const saveQueued = useRef(false);
+  // When the current unsaved-changes streak started — used to tell a
+  // normal, brief in-flight save (a few hundred ms, completely routine)
+  // apart from one that's been stuck for a while (a real connection
+  // problem worth surfacing). null whenever nothing is currently owed.
+  const pendingSince = useRef(null);
+  // hasPendingSave is a ref on purpose (refs don't trigger re-renders,
+  // which is fine for beforeunload/sign-out since those only ever read it
+  // at the moment of leaving) — but the dashboard banner below needs
+  // something reactive to actually show and hide with. This mirrors the
+  // same "has it been stuck too long" signal in real React state instead.
+  const [saveStuck, setSaveStuck] = useState(false);
+  const SAVE_STUCK_THRESHOLD_MS = 8000;
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (hasPendingSave.current && pendingSince.current && Date.now() - pendingSince.current > SAVE_STUCK_THRESHOLD_MS) {
+        setSaveStuck(true);
+      } else if (!hasPendingSave.current) {
+        setSaveStuck(false);
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => onAuthStateChanged(auth, u => setUser(u || null)), []);
 
@@ -1053,6 +1075,9 @@ export default function PropertyOpsApp() {
     // account signs in next in the same browser session.
     setLoaded(false);
     setData(emptyData());
+    hasPendingSave.current = false;
+    pendingSince.current = null;
+    setSaveStuck(false);
     if (!user) return;
     setLoadError(false);
     hasLoadedRealDataOnce.current = false;
@@ -1140,7 +1165,7 @@ export default function PropertyOpsApp() {
       // truly nothing left owed — a failed save, or one where a newer
       // change already arrived while this one was running, needs to keep
       // the flag (and the leave-page warning it drives) reflecting that.
-      if (!saveQueued.current) hasPendingSave.current = false;
+      if (!saveQueued.current) { hasPendingSave.current = false; pendingSince.current = null; }
     } catch (e) {
       console.error("save failed", e);
       setSaveError(true);
@@ -1155,6 +1180,7 @@ export default function PropertyOpsApp() {
 
   useEffect(() => {
     if (!loaded || !user) return;
+    if (!hasPendingSave.current) pendingSince.current = Date.now();
     hasPendingSave.current = true;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(runSave, 400);
@@ -1306,7 +1332,7 @@ export default function PropertyOpsApp() {
             ))}
           </nav>
           <main className="content">
-            {tab === "dashboard" && <Dashboard data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} setData={setData} />}
+            {tab === "dashboard" && <Dashboard data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} setData={setData} saveStuck={saveStuck} />}
             {tab === "buildings" && <BuildingsTab data={data} add={add} update={update} remove={remove} setData={setData} buildingName={buildingName} />}
             {tab === "rent" && <RentTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} />}
             {tab === "workorders" && <WorkOrdersTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} />}
@@ -1577,7 +1603,7 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
   );
 }
 
-function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData }) {
+function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, saveStuck }) {
   const [rentPanelOpen, setRentPanelOpen] = useState(false);
   const [violationsPanelOpen, setViolationsPanelOpen] = useState(false);
   const [excludedSectionOpen, setExcludedSectionOpen] = useState(false);
@@ -1851,6 +1877,12 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData })
 
   return (
     <div className="dashboard-page">
+      {saveStuck && (
+        <div className="unsaved-alert-banner no-print">
+          <AlertTriangle size={16} />
+          Not saved — a change has been waiting to save for a while. Check your connection; your latest changes are still only on this device.
+        </div>
+      )}
       <div className="page-head">
         <h1 className="page-title">Dashboard</h1>
         <div className="page-actions">
@@ -2360,6 +2392,150 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData })
 
 /* ============================== buildings ============================== */
 
+// ============================================================================
+// ONE-TIME RECOVERY RESTORE TOOL — added the night of the Sept 14 2026 data
+// loss incident, to be deleted (this whole component, plus its one render
+// call in BuildingsTab below) once Moshe confirms the restore is complete
+// and correct. Not meant to be a permanent feature.
+// ============================================================================
+function OneTimeJsonRestore({ data, setData }) {
+  const [jsonText, setJsonText] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+
+  const runPreview = () => {
+    setError("");
+    setResult(null);
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch (e) {
+      setError("That doesn't look like valid JSON — make sure you copied the entire file content.");
+      return;
+    }
+    if (!parsed || typeof parsed !== "object" || !parsed.buildings || typeof parsed.buildings !== "object") {
+      setError("This doesn't look like the recovery backup file — no \"buildings\" section found in it.");
+      return;
+    }
+    const summary = Object.entries(parsed.buildings).map(([code, b]) => {
+      if (!b || !b.address) return { code, address: "(missing address)", skipped: true, reason: "no address in this entry", arrearsCount: 0, contactsCount: 0 };
+      const existingBuilding = data.buildings.find(bld => (bld.address || "").trim().toLowerCase() === b.address.trim().toLowerCase());
+      const alreadyHasData = existingBuilding && data.tenants.some(t => t.buildingId === existingBuilding.id);
+      return {
+        code, address: b.address,
+        skipped: !!alreadyHasData,
+        reason: alreadyHasData ? "this building already has tenants on file — will be left untouched" : "",
+        arrearsCount: b.arrears ? b.arrears.length : 0,
+        contactsCount: b.contacts ? b.contacts.length : 0,
+      };
+    });
+    setPreview({ raw: parsed, summary });
+  };
+
+  const runImport = () => {
+    if (!preview) return;
+    let resultSummary = [];
+    setData(d => {
+      const next = { ...d, buildings: [...d.buildings], units: [...d.units], tenants: [...d.tenants] };
+      for (const [code, b] of Object.entries(preview.raw.buildings)) {
+        if (!b || !b.address) continue;
+        const existingBuilding = next.buildings.find(bld => (bld.address || "").trim().toLowerCase() === b.address.trim().toLowerCase());
+        const alreadyHasData = existingBuilding && next.tenants.some(t => t.buildingId === existingBuilding.id);
+        if (alreadyHasData) {
+          resultSummary.push({ code, address: b.address, skipped: true, tenantsCreated: 0, unitsCreated: 0 });
+          continue;
+        }
+        let building = existingBuilding;
+        if (!building) {
+          building = { id: uid(), address: b.address, risPropCode: code, notes: "" };
+          next.buildings.push(building);
+        }
+        const contactsByApt = {};
+        (b.contacts || []).forEach(c => { contactsByApt[c.apt] = c; });
+        let unitsCreated = 0, tenantsCreated = 0;
+        const getOrCreateUnit = (aptNumber) => {
+          let unit = next.units.find(u => u.buildingId === building.id && u.unitNumber === aptNumber);
+          if (!unit) { unit = { id: uid(), buildingId: building.id, unitNumber: aptNumber }; next.units.push(unit); unitsCreated++; }
+          return unit;
+        };
+        (b.arrears || []).forEach(entry => {
+          const unit = getOrCreateUnit(entry.apt);
+          const contact = contactsByApt[entry.apt];
+          next.tenants.push({
+            id: uid(), buildingId: building.id, unitId: unit.id,
+            name: entry.name || (contact ? contact.name : "") || "",
+            phone: contact ? contact.phone || "" : "",
+            email: contact ? contact.email || "" : "",
+            balance: entry.balance || "0.00",
+            status: entry.status || "Current",
+            notes: [], messageLog: [], payments: [],
+            ...(entry.aging ? { aging: entry.aging } : {}),
+          });
+          tenantsCreated++;
+          delete contactsByApt[entry.apt];
+        });
+        // Contacts with no matching arrears entry — a unit with phone/email
+        // on file but no balance line in this particular report.
+        Object.values(contactsByApt).forEach(contact => {
+          const unit = getOrCreateUnit(contact.apt);
+          if (!next.tenants.some(t => t.unitId === unit.id)) {
+            next.tenants.push({
+              id: uid(), buildingId: building.id, unitId: unit.id,
+              name: contact.name || "", phone: contact.phone || "", email: contact.email || "",
+              balance: "0.00", status: "Current",
+              notes: [], messageLog: [], payments: [],
+            });
+            tenantsCreated++;
+          }
+        });
+        resultSummary.push({ code, address: b.address, skipped: false, tenantsCreated, unitsCreated });
+      }
+      return next;
+    });
+    setResult(resultSummary);
+    setPreview(null);
+    setJsonText("");
+  };
+
+  return (
+    <div className="form-panel" style={{ border: "2px solid var(--warn)", marginBottom: 16 }}>
+      <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠️ One-time recovery restore tool</div>
+      <p className="hint">Paste the full content of recovery-backup-2026-09-14.json below. This creates buildings, units, and tenants (name, phone, email, balance) from it — buildings that already have tenants on file are automatically left untouched, so this is safe to run more than once. Delete this tool once you've confirmed everything looks right.</p>
+      <textarea rows={8} value={jsonText} onChange={e => { setJsonText(e.target.value); setPreview(null); setResult(null); }} placeholder="Paste the entire JSON file content here…" />
+      {error && <div className="hint" style={{ color: "var(--danger)" }}>{error}</div>}
+      <div className="form-actions" style={{ marginTop: 8 }}>
+        <button className="btn-primary" onClick={runPreview} disabled={!jsonText.trim()}>Preview</button>
+      </div>
+      {preview && (
+        <div style={{ marginTop: 12 }}>
+          {preview.summary.map(s => (
+            <div key={s.code} className="hint" style={{ marginBottom: 4 }}>
+              <strong>{s.address}</strong> — {s.skipped
+                ? <span style={{ color: "var(--warn)" }}>skipped: {s.reason}</span>
+                : `will create ${s.arrearsCount} arrears entries + ${s.contactsCount} contacts, merged into one tenant per unit`}
+            </div>
+          ))}
+          <div className="form-actions" style={{ marginTop: 8 }}>
+            <button className="btn-primary" onClick={runImport}>Confirm import</button>
+            <button className="btn-ghost" onClick={() => setPreview(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {result && (
+        <div style={{ marginTop: 12 }}>
+          <div className="hint" style={{ fontWeight: 700, color: "var(--ok)" }}>Import complete.</div>
+          {result.map(r => (
+            <div key={r.code} className="hint">
+              {r.address} — {r.skipped ? "skipped (already had data)" : `${r.unitsCreated} units, ${r.tenantsCreated} tenants created`}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
   const [form, setForm] = useState(null);
   // Buildings default to collapsed — track which ones have been explicitly
@@ -2481,6 +2657,7 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
 
   return (
     <div>
+      <OneTimeJsonRestore data={data} setData={setData} />
       <div className="page-head">
         <h1 className="page-title">Buildings</h1>
         <div className="page-actions">
@@ -5031,6 +5208,11 @@ function Styles() {
       .save-error-banner {
         display: flex; align-items: center; gap: 8px; background: var(--danger-bg); color: var(--danger);
         padding: 10px 20px; font-size: 13px; border-bottom: 1px solid var(--danger);
+      }
+      .unsaved-alert-banner {
+        display: flex; align-items: center; gap: 8px; background: var(--danger-bg); color: var(--danger);
+        padding: 12px 16px; font-size: 14px; font-weight: 700; border: 1px solid var(--danger);
+        border-radius: 8px; margin-bottom: 16px;
       }
       .login-shell {
         min-height: 100vh; display: flex; align-items: center; justify-content: center;
