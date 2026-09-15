@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 // PDF upload support for RIS reports. Requires: npm install pdfjs-dist
@@ -357,8 +357,15 @@ function parseArrearsTextLineFormat(text) {
   // intentionally stays letter-first-only there.
   const COMBO_APT_RE = "[A-Z]_&_[A-Z]";
   const FLOOR_APT_RE = "\\d{1,2}(?:&\\d{1,2})?_FL(?:_[A-Z])?";
-  const SINGLE_LETTER_APT_RE = "[A-WYZ]";
-  const LINE_APT_RE = `(?:${APT_RE}|\\d{1,4}-\\d{1,4}|\\d{1,4}[A-Z]{1,4}|${COMBO_APT_RE}|${FLOOR_APT_RE}|[A-Z]{2}|${SINGLE_LETTER_APT_RE}|\\d{1,4})`;
+  // A bare letter-only unit code can be 1 to 4 letters long with no digit at
+  // all — "C"/"D"/"E" for a single letter, "GA"/"GB" for a 2-letter garden
+  // unit, or "HERC" (a commercial/super unit, 4 letters). Wide but safe
+  // here specifically because each span below is already isolated between
+  // two unambiguous dollar-amount boundaries — there's no risk of a
+  // coincidental word elsewhere in the document winning out the way there
+  // would be in a continuous whole-document scan.
+  const LETTER_ONLY_APT_RE = "[A-Z]{1,4}";
+  const LINE_APT_RE = `(?:${APT_RE}|\\d{1,4}-\\d{1,4}|\\d{1,4}[A-Z]{1,4}|${COMBO_APT_RE}|${FLOOR_APT_RE}|${LETTER_ONLY_APT_RE}|\\d{1,4})`;
   // Joined into one continuous string rather than matched line-by-line —
   // some paste sources flatten the whole report onto a single line with no
   // real breaks at all, and a per-line match would only ever find one
@@ -535,7 +542,23 @@ function parseContactsText(text) {
   // line goes with which, treat the whole report as one continuous block: find
   // every apartment header, then pull the first phone number and first email
   // found anywhere between that header and the next one, wherever it landed.
-  const cleaned = cleanLines(seqStripped).join(" ");
+  const lines = cleanLines(seqStripped);
+  // Track which character offsets in the joined text are genuine line
+  // starts from the source document — needed to tell a real letter-only
+  // unit ("D Beauty Options Inc.", starting its own new line) apart from
+  // an annotation word that just happens to share a line with a phone
+  // number ("CELL - 973-851-1585 KATY" — KATY is whose cell that is, not
+  // a new unit; "103 Bertha Trujillo" starting the actual next line is the
+  // real header). A text-pattern-only check can't reliably tell these
+  // apart since both follow a phone number — but only one of them starts
+  // a fresh line in the original document.
+  const lineStarts = new Set();
+  let cleaned = "";
+  for (const line of lines) {
+    if (cleaned) cleaned += " ";
+    lineStarts.add(cleaned.length);
+    cleaned += line;
+  }
   const LABELS = "(?:CELL|EMAIL ADDRESS|HOME|WORK|OTHER|FAX)";
   // & included so a business literally named with one ("Nixon & Son Meat
   // Market Corp.") doesn't break the match partway through — anywhere else
@@ -545,66 +568,53 @@ function parseContactsText(text) {
   // Some buildings also have commercial/storefront units identified by a bare
   // number (no letter prefix — anywhere from a single digit like "1" or "3"
   // up to a longer code like "9516 JH ORGANIC INC." or "319"), others use
-  // digit-then-letter codes ("1B", "2BB"), and others a bare letter code
-  // with no digit at all ("GA", "GB" for a garden-level unit). Support all
-  // four, but require the numeric/digit-first forms to have a real name
-  // after them — otherwise a phone number written with spaces instead of
-  // dashes ("718 833 3607 FAX") can look just like a unit code — and keep
-  // the letter-only form to exactly 2 letters, or it starts matching
-  // ordinary all-caps words inside a long name (e.g. catching "NAGI" and
-  // "SALA" out of "BASSAM NAGI AZAFARI SALA MOHAMED ALBADANI" as if each
-  // were its own unit).
+  // digit-then-letter codes ("1B", "2BB"), and others a bare letter-only code
+  // with no digit at all — anywhere from one letter ("C", "D", "E") to a
+  // 2-letter garden-unit code ("GA", "GB") up to a 4-letter commercial code
+  // ("HERC" for Hercules Corp). Support all of these, but require the
+  // numeric/digit-first forms to have a real name after them — otherwise a
+  // phone number written with spaces instead of dashes ("718 833 3607 FAX")
+  // can look just like a unit code.
   const ALT_APT_RE = "\\d{1,2}[A-Z]{1,2}";
-  const LETTER_APT_RE = "[A-Z]{2}";
   // A longer bare number can have its own single-letter sub-unit suffix too
   // ("2106A" — a sub-division of unit 2106) — same idea as ALT_APT_RE but
   // for numbers longer than the 2-digit cap that one allows.
   const LONG_ALT_APT_RE = "\\d{3,4}[A-Z]";
-  // A commercial/mixed-use building can also have: two units combined under
-  // one listing ("A_&_B"), a floor identified by number instead of a unit
-  // code ("6_FL"), or a single bare letter ("C", "D", "E" — as opposed to
-  // the 2-letter garden-unit codes above). X is excluded from the
-  // single-letter form specifically because "WORK - 555-1234 X 119" (a
-  // phone extension) is a far more common way to see a lone "X" in these
-  // reports than an actual unit named X.
+  // A commercial/mixed-use building can also have two units combined under
+  // one listing ("A_&_B"), or a floor identified by number instead of a
+  // unit code ("6_FL").
   const COMBO_APT_RE = "[A-Z]_&_[A-Z]";
   const FLOOR_APT_RE = "\\d{1,2}_FL";
-  const SINGLE_LETTER_APT_RE = "[A-WYZ]";
+  // X excluded specifically because "WORK - 555-1234 X 119" (a phone
+  // extension) is a far more common way to see a lone "X" in these reports
+  // than an actual unit named X.
+  const LETTER_ONLY_APT_RE = "[A-WYZ][A-Za-z]{0,3}";
   // A name normally starts with a capital letter (or Mr./Mrs./Ms.) — but a
   // business can be named starting with digits ("718 Bistro Inc."), so a
   // digit-led name is accepted too, as long as a real letter shows up
   // somewhere in it. That second clause is what separates a genuine name
   // like that from a bare number (a phone extension, an apartment number
   // munged into the wrong spot) that isn't a name at all.
-  const SINGLE_LETTER_NAME_RE = `(?:(?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?|\\d[\\d\\s]*[A-Za-z][A-Za-z0-9${NAME_CHARS.replace("A-Za-z", "")}]*?)`;
-  // A single bare letter only counts as a unit header where the previous
-  // entry plausibly just ended: right after a full phone number
-  // ("917-686-3777"), right after an email domain (".COM ", ".ORG "),
-  // optionally followed by one capitalized word (a contact person's first
-  // name sometimes appears between the previous entry's phone/email and the
-  // next unit) — or at the very start of the document. Anywhere else, a
-  // lone capital letter reads as an ordinary word inside a name ("Clean N
-  // Green Corp.") far more often than as an actual unit code. The phone
-  // pattern specifically requires the full dashed shape — a bare 3-4 digit
-  // number right before doesn't count, since that's exactly what a unit
-  // number itself looks like ("1417 Clean N Green Corp." — 1417 is the
-  // unit, not a phone number that already ended).
-  const PHONE_TAIL = "\\d{3}[-.\\s]\\d{3}[-.\\s]\\d{4}";
-  // Checked AFTER matching now, not as a lookbehind embedded in the match
-  // itself — regex lookbehind is a feature older mobile Safari doesn't
-  // support at all (it throws immediately, which is enough to crash the
-  // whole app before anything renders, not just misparse this one report).
-  // Same context requirement as before — right after a phone number or
-  // email domain, optionally with one contact-name word in between, or at
-  // the very start — just verified against the preceding text separately.
-  const CONTEXT_OK_RE = new RegExp(`(?:^|${PHONE_TAIL}\\s|\\.[A-Za-z]{2,4}\\s|${PHONE_TAIL}\\s[A-Z][A-Za-z]*\\s|\\.[A-Za-z]{2,4}\\s[A-Z][A-Za-z]*\\s)$`);
-  // Single-letter left out of this lookahead (lookahead itself is fine
+  const LETTER_ONLY_NAME_RE = `(?:(?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?|\\d[\\d\\s]*[A-Za-z][A-Za-z0-9${NAME_CHARS.replace("A-Za-z", "")}]*?)`;
+  // A letter-only unit — whether 1, 2, 3, or 4 letters — only counts as a
+  // header where it starts a genuine new line in the source document (or is
+  // the very first thing in it). Checking the text immediately before a
+  // candidate match (a phone number, an email domain) isn't reliable on its
+  // own — an annotation word sharing a line with a phone number ("CELL -
+  // 973-851-1585 KATY" — KATY is whose cell that is, not a new unit) is
+  // textually indistinguishable from a genuine letter-only unit that
+  // legitimately follows a phone number too ("CELL - 917-686-3777 D Beauty
+  // Options Inc.", where D starts its own real new line). Line boundaries
+  // from the original document are the one signal that actually tells them
+  // apart, since only the genuine unit starts a fresh line.
+  // Letter-only left out of this lookahead (lookahead itself is fine
   // everywhere — it's only lookbehind that's the compatibility problem) —
-  // since the real context check now happens after matching, including it
-  // here just meant another entry's own name-capture would stop early the
-  // moment ANY coincidental single letter appeared later in it, even
-  // though that letter would go on to fail the real check anyway.
-  const NEXT_HEADER = `(?:${APT_RE}|\\d{1,4}|${ALT_APT_RE}|${LONG_ALT_APT_RE}|${LETTER_APT_RE}|${COMBO_APT_RE}|${FLOOR_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
+  // since the real context check happens after matching against line
+  // boundaries, including it here just meant another entry's own
+  // name-capture would stop early the moment ANY coincidental letter-only
+  // word appeared later in it, even though that word would go on to fail
+  // the real check anyway.
+  const NEXT_HEADER = `(?:${APT_RE}|\\d{1,4}|${ALT_APT_RE}|${LONG_ALT_APT_RE}|${COMBO_APT_RE}|${FLOOR_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
   const headerRe = new RegExp(
     `(?:^|\\s)(?:` +
       `(${APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
@@ -615,21 +625,19 @@ function parseContactsText(text) {
       `|` +
       `(${ALT_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
       `|` +
-      `(${LETTER_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
-      `|` +
       `(${COMBO_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
       `|` +
       `(${FLOOR_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
       `|` +
-      `(${SINGLE_LETTER_APT_RE})\\s+(?!${LABELS}\\b)(${SINGLE_LETTER_NAME_RE})` +
+      `(${LETTER_ONLY_APT_RE})\\s+(?!${LABELS}\\b)(${LETTER_ONLY_NAME_RE})` +
     `)(?=\\s+${LABELS}\\b|\\s+${NEXT_HEADER}|$)`,
     "g"
   );
   const rawHeaders = [];
   let m;
   while ((m = headerRe.exec(cleaned))) {
-    const apt = m[1] || m[3] || m[5] || m[7] || m[9] || m[11] || m[13] || m[15];
-    const name = (m[2] || m[4] || m[6] || m[8] || m[10] || m[12] || m[14] || m[16] || "").trim();
+    const apt = m[1] || m[3] || m[5] || m[7] || m[9] || m[11] || m[13];
+    const name = (m[2] || m[4] || m[6] || m[8] || m[10] || m[12] || m[14] || "").trim();
     // Where the actual unit-code text starts, skipping the leading
     // separator captured by the outer (?:^|\s) — needed so the "text right
     // before this match" check below looks at the real preceding content,
@@ -637,15 +645,14 @@ function parseContactsText(text) {
     const matchStart = m.index + (m[0].match(/^\s*/)[0].length);
     rawHeaders.push({ apt, name, start: m.index, end: m.index + m[0].length, matchStart });
   }
-  // Single-letter matches only survive if the text right before them
-  // actually looks like the end of a previous entry (a phone number or
-  // email domain, optionally with one contact-name word after it) or the
-  // very start of the document — otherwise it's almost always just an
-  // ordinary word inside someone's name ("Clean N Green Corp.") that
-  // happened to be a single capital letter on its own.
+  // Letter-only matches (of any length, 1-4) only survive if they start a
+  // genuine new line in the source document (or are the very first thing
+  // in it) — otherwise it's almost always just an ordinary word sharing a
+  // line with a phone number ("CELL - 555-1234 WIFE") rather than a real
+  // unit code starting its own entry.
   const headers = rawHeaders.filter(h => {
-    if (!/^[A-WYZ]$/.test(h.apt)) return true;
-    return CONTEXT_OK_RE.test(cleaned.slice(0, h.matchStart));
+    if (!/^[A-Z]{1,4}$/.test(h.apt)) return true;
+    return lineStarts.has(h.matchStart);
   });
 
   const phoneRe = /\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}/;
@@ -993,6 +1000,11 @@ function PinLockScreen({ onUnlock, onForgot }) {
 export default function PropertyOpsApp() {
   const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
   const [data, setData] = useState(emptyData());
+  // Always mirrors the latest `data` — needed so a save that gets queued
+  // while another is still in flight can read the truly current data when
+  // it actually runs, not a stale value captured back when it was queued.
+  const dataRef = useRef(data);
+  useEffect(() => { dataRef.current = data; }, [data]);
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState("dashboard");
   const [query, setQuery] = useState("");
@@ -1015,12 +1027,33 @@ export default function PropertyOpsApp() {
   // suspiciously claims the document vanished after real data was already
   // showing (almost certainly a transient glitch, not an actual deletion).
   const hasLoadedRealDataOnce = useRef(false);
+  // A write to Firestore fully replaces the document rather than merging —
+  // so if two saves ever end up in flight at once and the earlier-started
+  // one happens to take longer (a slow connection, a brief hiccup — exactly
+  // what this app has to tolerate, being used on mobile), it could land
+  // AFTER the faster, newer one and silently overwrite it with stale data.
+  // These two refs keep saves strictly sequential: never more than one in
+  // flight, and if a newer save becomes owed while one is still running,
+  // it's queued rather than started concurrently, then fires immediately
+  // (using whatever is truly latest at that moment, via dataRef) the
+  // instant the in-flight one finishes.
+  const saveInFlight = useRef(false);
+  const saveQueued = useRef(false);
 
   useEffect(() => onAuthStateChanged(auth, u => setUser(u || null)), []);
 
   useEffect(() => {
-    if (!user) return;
+    // Reset unconditionally on ANY user change, including the transition
+    // to signed-out — not just when a new user is present. Both loaded and
+    // data need to flip immediately: loaded so the save effect's own guard
+    // (`if (!loaded...) return`) correctly blocks it without depending on
+    // effect-ordering timing, and data so that even in the worst case
+    // where something slips past that guard anyway, it would save empty
+    // data rather than the previous account's private data into whatever
+    // account signs in next in the same browser session.
     setLoaded(false);
+    setData(emptyData());
+    if (!user) return;
     setLoadError(false);
     hasLoadedRealDataOnce.current = false;
     // A live listener instead of a one-time fetch — using this on both a
@@ -1084,31 +1117,49 @@ export default function PropertyOpsApp() {
     return () => unsub();
   }, [user]);
 
+  const runSave = useCallback(async () => {
+    if (saveInFlight.current) {
+      // Something is already saving — don't start a second write
+      // concurrently. Mark that another one is owed; the in-flight save's
+      // own completion below will fire it immediately once this one is
+      // done, reading dataRef fresh at that point rather than whatever was
+      // current back when this call was made.
+      saveQueued.current = true;
+      return;
+    }
+    saveInFlight.current = true;
+    try {
+      // Firestore rejects any field that's literally `undefined` (as opposed to
+      // just missing) and throws instead of saving anything. A JSON round-trip
+      // strips those out automatically so a stray undefined somewhere can never
+      // silently break autosave.
+      const safe = JSON.parse(JSON.stringify(dataRef.current));
+      await setDoc(doc(db, "users", user.uid, "appData", "main"), safe);
+      setSaveError(false);
+      // Only a confirmed success with nothing further queued means there's
+      // truly nothing left owed — a failed save, or one where a newer
+      // change already arrived while this one was running, needs to keep
+      // the flag (and the leave-page warning it drives) reflecting that.
+      if (!saveQueued.current) hasPendingSave.current = false;
+    } catch (e) {
+      console.error("save failed", e);
+      setSaveError(true);
+    } finally {
+      saveInFlight.current = false;
+      if (saveQueued.current) {
+        saveQueued.current = false;
+        runSave();
+      }
+    }
+  }, [user]);
+
   useEffect(() => {
     if (!loaded || !user) return;
     hasPendingSave.current = true;
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      try {
-        // Firestore rejects any field that's literally `undefined` (as opposed to
-        // just missing) and throws instead of saving anything. A JSON round-trip
-        // strips those out automatically so a stray undefined somewhere can never
-        // silently break autosave.
-        const safe = JSON.parse(JSON.stringify(data));
-        await setDoc(doc(db, "users", user.uid, "appData", "main"), safe);
-        setSaveError(false);
-        // Only a confirmed success means there's nothing left owed — a
-        // failed save leaves the data genuinely unsaved, so the flag (and
-        // the leave-page warning it drives) needs to keep reflecting that
-        // instead of clearing just because the attempt is over.
-        hasPendingSave.current = false;
-      } catch (e) {
-        console.error("save failed", e);
-        setSaveError(true);
-      }
-    }, 400);
+    saveTimer.current = setTimeout(runSave, 400);
     return () => clearTimeout(saveTimer.current);
-  }, [data, loaded, user]);
+  }, [data, loaded, user, runSave]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -1157,12 +1208,36 @@ export default function PropertyOpsApp() {
     };
   }, [query, data]);
 
+  // Sign-out is a button click, not a browser navigation — the existing
+  // beforeunload warning only covers closing the tab or navigating away,
+  // so without this, clicking Sign Out while an edit is still sitting in
+  // its debounce window (or a save is actively failing) would discard it
+  // silently, with none of the protection closing the tab already has.
+  const handleSignOut = async () => {
+    if (hasPendingSave.current) {
+      clearTimeout(saveTimer.current);
+      await runSave();
+      const deadline = Date.now() + 5000;
+      while (hasPendingSave.current && saveInFlight.current && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      if (hasPendingSave.current) {
+        const proceed = window.confirm(
+          "Your last change hasn't saved yet (possibly a connection problem) — signing out now will lose it. Sign out anyway?"
+        );
+        if (!proceed) return;
+      }
+    }
+    localStorage.removeItem(PIN_STORAGE_KEY);
+    signOut(auth);
+  };
+
   if (user === undefined) return <div className="app-shell"><div className="loading">Loading…</div><Styles /></div>;
   if (user === null) return <LoginScreen />;
   if (!pinUnlocked) return (
     <PinLockScreen
       onUnlock={() => setPinUnlocked(true)}
-      onForgot={() => { localStorage.removeItem(PIN_STORAGE_KEY); signOut(auth); }}
+      onForgot={handleSignOut}
     />
   );
   if (!loaded) return <div className="app-shell"><div className="loading">Loading your ops board…</div><Styles /></div>;
@@ -1196,7 +1271,7 @@ export default function PropertyOpsApp() {
           <button className="btn-ghost no-print" title="Set a quick-unlock PIN for this device" onClick={() => setShowPinSetup(s => !s)} style={{ color: "#fff", borderColor: "rgba(255,255,255,0.3)" }}>
             {localStorage.getItem(PIN_STORAGE_KEY) ? "Change PIN" : "Set PIN"}
           </button>
-          <button className="btn-ghost no-print" title="Sign out" onClick={() => { localStorage.removeItem(PIN_STORAGE_KEY); signOut(auth); }} style={{ color: "#fff", borderColor: "rgba(255,255,255,0.3)" }}>
+          <button className="btn-ghost no-print" title="Sign out" onClick={handleSignOut} style={{ color: "#fff", borderColor: "rgba(255,255,255,0.3)" }}>
             Sign out
           </button>
         </div>
