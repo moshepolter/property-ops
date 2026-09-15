@@ -1009,6 +1009,12 @@ export default function PropertyOpsApp() {
   // tracks whether a save is still owed and, if so, asks the browser to
   // confirm before actually leaving.
   const hasPendingSave = useRef(false);
+  // Tracks whether a real (existing) document has been loaded at least
+  // once this session — used to tell a genuinely brand-new account (no
+  // document yet, safe to start empty) apart from a later snapshot that
+  // suspiciously claims the document vanished after real data was already
+  // showing (almost certainly a transient glitch, not an actual deletion).
+  const hasLoadedRealDataOnce = useRef(false);
 
   useEffect(() => onAuthStateChanged(auth, u => setUser(u || null)), []);
 
@@ -1016,6 +1022,7 @@ export default function PropertyOpsApp() {
     if (!user) return;
     setLoaded(false);
     setLoadError(false);
+    hasLoadedRealDataOnce.current = false;
     // A live listener instead of a one-time fetch — using this on both a
     // phone and a laptop in the same sitting means each device needs to see
     // the other's changes, not just whatever was saved the last time this
@@ -1048,8 +1055,23 @@ export default function PropertyOpsApp() {
             if (loaded[k] !== null && loaded[k] !== undefined) merged[k] = loaded[k];
           });
           setData(merged);
-        } else {
+          hasLoadedRealDataOnce.current = true;
+        } else if (!hasLoadedRealDataOnce.current) {
+          // Genuinely a brand-new account with nothing saved yet — this is
+          // the only situation where treating "no document" as "start
+          // empty" is actually safe.
           setData(emptyData());
+        } else {
+          // Real data was already loaded once this session, so a later
+          // snapshot claiming the document is gone doesn't add up — that's
+          // far more likely a transient hiccup than an actual deletion.
+          // Trusting it would wipe local state, and autosave would then
+          // write that emptiness back to Firestore moments later, turning
+          // a momentary blip into permanent data loss. Leave local data
+          // exactly as it is and surface the problem instead of acting on
+          // a signal this suspicious.
+          console.error("Snapshot reported the data document missing after data had already loaded — ignoring rather than clearing local state.");
+          setLoadError(true);
         }
         setLoaded(true);
       },
