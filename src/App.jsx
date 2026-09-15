@@ -358,39 +358,57 @@ function parseArrearsTextLineFormat(text) {
   const COMBO_APT_RE = "[A-Z]_&_[A-Z]";
   const FLOOR_APT_RE = "\\d{1,2}(?:&\\d{1,2})?_FL(?:_[A-Z])?";
   const SINGLE_LETTER_APT_RE = "[A-WYZ]";
-  const LINE_APT_RE = `(?:${APT_RE}|\\d{1,4}-\\d{1,4}|\\d{1,4}[A-Z]{1,4}|${COMBO_APT_RE}|${FLOOR_APT_RE}|[A-Z]{2}|\\d{1,4})`;
+  const LINE_APT_RE = `(?:${APT_RE}|\\d{1,4}-\\d{1,4}|\\d{1,4}[A-Z]{1,4}|${COMBO_APT_RE}|${FLOOR_APT_RE}|[A-Z]{2}|${SINGLE_LETTER_APT_RE}|\\d{1,4})`;
   // Joined into one continuous string rather than matched line-by-line —
   // some paste sources flatten the whole report onto a single line with no
-  // real breaks at all, and a ^...$-anchored per-line match would only ever
-  // find one record in that case no matter how many tenants are actually in
-  // the text. Matching repeatedly through the whole text instead finds
-  // every one regardless of whether real line breaks survived the paste.
+  // real breaks at all, and a per-line match would only ever find one
+  // record in that case no matter how many tenants are actually in the
+  // text. Working through the whole text instead finds every one
+  // regardless of whether real line breaks survived the paste.
   const cleaned = cleanLines(text).join(" ");
-  // A single bare letter unit only counts where the previous entry
-  // plausibly just ended — right after its TOTAL DUE dollar amount, or at
-  // the very start of the document. Nothing ever sits between one entry's
-  // numbers and the next unit code in this report style (unlike the
-  // contacts report, which can have a contact person's name in between), so
-  // this context check can stay simpler than the contacts version needed.
-  const SINGLE_LETTER_CONTEXT = `(?<=^|\\d\\.\\d{2}\\s)`;
-  // UNKNO is normally a fixed marker between the name and the dollar
-  // amounts, but a source report can occasionally drop it for one entry (a
-  // data-quality glitch in the report itself, not something predictable) —
-  // made optional here so a missing UNKNO doesn't cause the name-matching
-  // to run past the end of that entry and swallow the next tenant's data
-  // too. The four decimal dollar amounts are the real anchor either way.
-  const lineRe = new RegExp(
-    `(?:^|\\s)(?:(${LINE_APT_RE})|${SINGLE_LETTER_CONTEXT}(${SINGLE_LETTER_APT_RE}))(\\*)?\\s+(.+?)\\s+(?:UNKNO\\s+)?([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})\\s+([\\d,]+\\.\\d{2})(?=\\s|$)`,
-    "g"
-  );
+
+  // Rather than one giant pattern trying to tell "a single-letter unit code"
+  // apart from "an ordinary single-letter word inside someone's name" using
+  // a lookbehind (a regex feature older mobile Safari doesn't support at
+  // all — it throws immediately, which is enough to crash the whole app
+  // before anything renders), this finds the unambiguous part first: every
+  // "4 consecutive dollar amounts" sequence, which needs no lookaround of
+  // any kind. Each one marks where one entry ENDS. The text between one
+  // boundary and the next is then that entry's own self-contained "unit
+  // code + name" span, processed on its own — its own start IS the
+  // context, so there's nothing left to look behind for.
+  const AMOUNTS_RE = /([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})(?=\s|$)/g;
+  const boundaries = [];
+  let am;
+  while ((am = AMOUNTS_RE.exec(cleaned))) {
+    boundaries.push({ start: am.index, end: am.index + am[0].length, values: [am[1], am[2], am[3], am[4]] });
+  }
+
   const out = [];
-  let m;
-  while ((m = lineRe.exec(cleaned))) {
-    const apt = m[1] || m[2];
-    const moved = m[3];
-    const rawName = m[4];
-    const [d1, d2, d3, total] = [m[5], m[6], m[7], m[8]];
+  let spanStart = 0;
+  for (const b of boundaries) {
+    const span = cleaned.slice(spanStart, b.start).trim();
+    spanStart = b.end;
+    // The FIRST valid unit-code occurrence within the span, not necessarily
+    // right at its start — a building's own company name sometimes repeats
+    // itself right before the very first entry ("Neptune Group LLC APT:
+    // A_&_B Neptune Plumbing...", where none of "Neptune", "Group", or
+    // "LLC" individually satisfy any unit-code pattern as a complete,
+    // isolated word) and generic header-stripping can't know every
+    // building's name in advance to strip it specifically. The first VALID
+    // token in the span is always the real unit code — using the first
+    // (not last) occurrence also correctly steps past a coincidental
+    // matching word inside the tenant's own name later in the same span (a
+    // business named "...Steps To Success" has "To" as a standalone
+    // 2-letter word, but it always comes after the real unit code, never
+    // before it).
+    const startMatch = span.match(new RegExp(`(?:^|\\s)(${LINE_APT_RE})(\\*)?\\s+`));
+    if (!startMatch) continue; // no recognizable unit code anywhere in this span — skip, don't guess
+    const apt = startMatch[1];
+    const moved = startMatch[2];
+    const rawName = span.slice(startMatch.index + startMatch[0].length).replace(/\s*UNKNO\s*$/, "").trim();
     const name = rawName.replace(/^N-\d+\s+/, "").trim();
+    const [d1, d2, d3, total] = b.values;
     const totalNum = parseFloat(total.replace(/,/g, ""));
     const bucket1 = parseFloat(d1.replace(/,/g, ""));
     const bucket2 = parseFloat(d2.replace(/,/g, ""));
@@ -572,8 +590,21 @@ function parseContactsText(text) {
   // number itself looks like ("1417 Clean N Green Corp." — 1417 is the
   // unit, not a phone number that already ended).
   const PHONE_TAIL = "\\d{3}[-.\\s]\\d{3}[-.\\s]\\d{4}";
-  const SINGLE_LETTER_CONTEXT = `(?<=^|${PHONE_TAIL}\\s|\\.[A-Za-z]{2,4}\\s|${PHONE_TAIL}\\s[A-Z][A-Za-z]*\\s|\\.[A-Za-z]{2,4}\\s[A-Z][A-Za-z]*\\s)`;
-  const NEXT_HEADER = `(?:${APT_RE}|\\d{1,4}|${ALT_APT_RE}|${LONG_ALT_APT_RE}|${LETTER_APT_RE}|${COMBO_APT_RE}|${FLOOR_APT_RE}|${SINGLE_LETTER_CONTEXT}${SINGLE_LETTER_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
+  // Checked AFTER matching now, not as a lookbehind embedded in the match
+  // itself — regex lookbehind is a feature older mobile Safari doesn't
+  // support at all (it throws immediately, which is enough to crash the
+  // whole app before anything renders, not just misparse this one report).
+  // Same context requirement as before — right after a phone number or
+  // email domain, optionally with one contact-name word in between, or at
+  // the very start — just verified against the preceding text separately.
+  const CONTEXT_OK_RE = new RegExp(`(?:^|${PHONE_TAIL}\\s|\\.[A-Za-z]{2,4}\\s|${PHONE_TAIL}\\s[A-Z][A-Za-z]*\\s|\\.[A-Za-z]{2,4}\\s[A-Z][A-Za-z]*\\s)$`);
+  // Single-letter left out of this lookahead (lookahead itself is fine
+  // everywhere — it's only lookbehind that's the compatibility problem) —
+  // since the real context check now happens after matching, including it
+  // here just meant another entry's own name-capture would stop early the
+  // moment ANY coincidental single letter appeared later in it, even
+  // though that letter would go on to fail the real check anyway.
+  const NEXT_HEADER = `(?:${APT_RE}|\\d{1,4}|${ALT_APT_RE}|${LONG_ALT_APT_RE}|${LETTER_APT_RE}|${COMBO_APT_RE}|${FLOOR_APT_RE})\\s+(?:MR\\.|MRS\\.|MS\\.|[A-Z])`;
   const headerRe = new RegExp(
     `(?:^|\\s)(?:` +
       `(${APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
@@ -590,19 +621,32 @@ function parseContactsText(text) {
       `|` +
       `(${FLOOR_APT_RE})\\s+(?!${LABELS}\\b)((?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?)` +
       `|` +
-      `${SINGLE_LETTER_CONTEXT}(${SINGLE_LETTER_APT_RE})\\s+(?!${LABELS}\\b)(${SINGLE_LETTER_NAME_RE})` +
+      `(${SINGLE_LETTER_APT_RE})\\s+(?!${LABELS}\\b)(${SINGLE_LETTER_NAME_RE})` +
     `)(?=\\s+${LABELS}\\b|\\s+${NEXT_HEADER}|$)`,
     "g"
   );
-  const headers = [];
+  const rawHeaders = [];
   let m;
   while ((m = headerRe.exec(cleaned))) {
-    headers.push({
-      apt: m[1] || m[3] || m[5] || m[7] || m[9] || m[11] || m[13] || m[15],
-      name: (m[2] || m[4] || m[6] || m[8] || m[10] || m[12] || m[14] || m[16] || "").trim(),
-      start: m.index, end: m.index + m[0].length,
-    });
+    const apt = m[1] || m[3] || m[5] || m[7] || m[9] || m[11] || m[13] || m[15];
+    const name = (m[2] || m[4] || m[6] || m[8] || m[10] || m[12] || m[14] || m[16] || "").trim();
+    // Where the actual unit-code text starts, skipping the leading
+    // separator captured by the outer (?:^|\s) — needed so the "text right
+    // before this match" check below looks at the real preceding content,
+    // not a boundary that includes the separator itself.
+    const matchStart = m.index + (m[0].match(/^\s*/)[0].length);
+    rawHeaders.push({ apt, name, start: m.index, end: m.index + m[0].length, matchStart });
   }
+  // Single-letter matches only survive if the text right before them
+  // actually looks like the end of a previous entry (a phone number or
+  // email domain, optionally with one contact-name word after it) or the
+  // very start of the document — otherwise it's almost always just an
+  // ordinary word inside someone's name ("Clean N Green Corp.") that
+  // happened to be a single capital letter on its own.
+  const headers = rawHeaders.filter(h => {
+    if (!/^[A-WYZ]$/.test(h.apt)) return true;
+    return CONTEXT_OK_RE.test(cleaned.slice(0, h.matchStart));
+  });
 
   const phoneRe = /\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}/;
   const emailRe = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
@@ -1436,9 +1480,32 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
   );
 }
 
-function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
+function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData }) {
   const [rentPanelOpen, setRentPanelOpen] = useState(false);
   const [violationsPanelOpen, setViolationsPanelOpen] = useState(false);
+  const [excludedSectionOpen, setExcludedSectionOpen] = useState(false);
+  // Buildings marked "Mitch's father" are excluded from every main
+  // computation below — every reference to `data.X` throughout this
+  // component already reads from this scoped version, so shadowing the
+  // prop here is enough to keep them out of every stat, panel, and total
+  // without touching each computation individually. They still get their
+  // own small section further down, built straight from rawData.
+  const mainBuildingIds = new Set(rawData.buildings.filter(b => !b.excludedOwner).map(b => b.id));
+  const excludedBuildingsList = rawData.buildings.filter(b => b.excludedOwner);
+  const data = {
+    ...rawData,
+    buildings: rawData.buildings.filter(b => mainBuildingIds.has(b.id)),
+    units: rawData.units.filter(u => mainBuildingIds.has(u.buildingId)),
+    tenants: rawData.tenants.filter(t => mainBuildingIds.has(t.buildingId)),
+    violations: rawData.violations.filter(v => mainBuildingIds.has(v.buildingId)),
+    workOrders: rawData.workOrders.filter(w => mainBuildingIds.has(w.buildingId)),
+    // A court case with no buildingId at all (unlinked after its building
+    // was deleted) isn't tied to any excluded building either — it stays
+    // visible rather than becoming invisible for an unrelated reason.
+    courtCases: rawData.courtCases.filter(c => !c.buildingId || mainBuildingIds.has(c.buildingId)),
+    appointments: rawData.appointments.filter(a => mainBuildingIds.has(a.buildingId)),
+    localLaws: (rawData.localLaws || []).filter(l => mainBuildingIds.has(l.buildingId)),
+  };
   const [testEmailStatus, setTestEmailStatus] = useState(null); // null | "sending" | "sent" | "error"
   const [showAllOverdue, setShowAllOverdue] = useState(false);
   const [confirmingCleanup, setConfirmingCleanup] = useState(false);
@@ -1686,7 +1753,7 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
   };
 
   return (
-    <div>
+    <div className="dashboard-page">
       <div className="page-head">
         <h1 className="page-title">Dashboard</h1>
         <div className="page-actions">
@@ -1696,6 +1763,78 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
           </button>
           <button className="btn-ghost" onClick={exportAllData}><Download size={14} /> Export backup</button>
           <PrintButton label="Dashboard" />
+        </div>
+      </div>
+
+      <div className="print-only">
+        <h1 className="print-title">Property Overview</h1>
+        <div className="print-subtitle">As of {fmtDate(todayISO())}</div>
+
+        <div className="print-stats-row">
+          <div className="print-stat"><div className="print-stat-num">{overdueCount}</div><div>Overdue</div></div>
+          <div className="print-stat"><div className="print-stat-num">{openWorkOrders.length}</div><div>Open work orders</div></div>
+          <div className="print-stat"><div className="print-stat-num">{openCourtCases.length}</div><div>Open court cases</div></div>
+          <div className="print-stat"><div className="print-stat-num">{clearBuildingIds.size}</div><div>Buildings clear</div></div>
+        </div>
+
+        {violationAgencyGroups.length > 0 && (
+          <div className="print-section">
+            <div className="print-section-head"><span>Open violations ({totalViolationsDue})</span></div>
+            <table className="print-table">
+              <thead><tr><th>Agency</th><th>Building</th><th>Violation #</th><th>Cure deadline</th></tr></thead>
+              <tbody>
+                {violationAgencyGroups.flatMap(g => g.items.map(v => (
+                  <tr key={v.id}><td>{g.name}</td><td>{buildingName(v.buildingId)}</td><td>#{v.violationNumber}</td><td>{v.cureDeadline ? fmtDate(v.cureDeadline) : "not set"}</td></tr>
+                )))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {courtItems.length > 0 && (
+          <div className="print-section">
+            <div className="print-section-head"><span>Court dates due or overdue</span></div>
+            <table className="print-table">
+              <thead><tr><th>Building</th><th>Tenant</th><th>Next court date</th></tr></thead>
+              <tbody>
+                {courtItems.map(c => (
+                  <tr key={c.id}><td>{buildingName(c.buildingId)}</td><td>{tenantName(c.tenantId)}</td><td>{c.nextCourtDate ? fmtDate(c.nextCourtDate) : "not set"}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {(appointmentItems.length > 0 || recurringItems.length > 0) && (
+          <div className="print-section">
+            <div className="print-section-head"><span>Appointments coming up</span></div>
+            <table className="print-table">
+              <thead><tr><th>Building</th><th>Type</th><th>Date</th></tr></thead>
+              <tbody>
+                {[...appointmentItems, ...recurringItems].map(a => (
+                  <tr key={a.id}><td>{buildingName(a.buildingId)}</td><td>{a.type}</td><td>{a.date ? fmtDate(a.date) : "not set"}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="print-section">
+          <div className="print-section-head"><span>By building</span></div>
+          <table className="print-table">
+            <thead><tr><th>Building</th><th>Open violations</th><th>Tenants behind</th><th>Open work orders</th><th>Open court cases</th></tr></thead>
+            <tbody>
+              {data.buildings.map(b => (
+                <tr key={b.id}>
+                  <td>{b.address}</td>
+                  <td>{data.violations.filter(v => v.buildingId === b.id && !isViolationClosed(v)).length}</td>
+                  <td>{data.tenants.filter(t => t.buildingId === b.id && t.status !== "Current").length}</td>
+                  <td>{data.workOrders.filter(w => w.buildingId === b.id && w.status !== "Done").length}</td>
+                  <td>{data.courtCases.filter(c => c.buildingId === b.id && !c.archived).length}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -2081,6 +2220,43 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
           })}
         </div>
       )}
+
+      {excludedBuildingsList.length > 0 && (
+        <div style={{ marginTop: 24 }}>
+          <button
+            className="list-card-head"
+            style={{ width: "100%", background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 8, cursor: "pointer" }}
+            onClick={() => setExcludedSectionOpen(o => !o)}
+          >
+            {excludedSectionOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            <div className="list-card-title">Mitch's father ({excludedBuildingsList.length} building{excludedBuildingsList.length === 1 ? "" : "s"})</div>
+            <span className="pill pill-muted">excluded from totals above</span>
+          </button>
+          {excludedSectionOpen && (
+            <div className="dash-grid" style={{ marginTop: 10 }}>
+              {excludedBuildingsList.map(b => {
+                const bTenants = rawData.tenants.filter(t => t.buildingId === b.id);
+                const bViolations = rawData.violations.filter(v => v.buildingId === b.id && !isViolationClosed(v));
+                const bLate = bTenants.filter(t => t.status !== "Current");
+                const bOwed = bTenants.reduce((sum, t) => sum + parseBalance(t.balance), 0);
+                return (
+                  <div className="dash-building-card" key={b.id}>
+                    <div className="dash-building-name">{shortAddress(b.address)}</div>
+                    {bViolations.length === 0 && bLate.length === 0 ? (
+                      <span className="dash-building-clear">All clear</span>
+                    ) : (
+                      <div className="dash-building-chips">
+                        {bViolations.length > 0 && <span className="pill pill-warn">{bViolations.length} open violations</span>}
+                        {bLate.length > 0 && <span className="pill pill-danger">{bLate.length} tenants behind (${bOwed.toFixed(2)})</span>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2089,12 +2265,12 @@ function Dashboard({ data, buildingName, tenantName, setTab, setData }) {
 
 function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
   const [form, setForm] = useState(null);
-  // Buildings default to expanded (showing their unit list) — track which ones
-  // have been explicitly collapsed instead of which are open, so anything new
-  // (or anything the user hasn't touched) shows up neat and open by default.
-  const [collapsedIds, setCollapsedIds] = useState(new Set());
+  // Buildings default to collapsed — track which ones have been explicitly
+  // expanded instead of which are closed, so opening the tab always starts
+  // clean with nothing open until you choose to look inside one.
+  const [expandedIds, setExpandedIds] = useState(new Set());
   const toggleExpanded = (id) => {
-    setCollapsedIds(prev => {
+    setExpandedIds(prev => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
@@ -2257,8 +2433,9 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
         return (
           <div className="list-card" key={b.id}>
             <div className="list-card-head" onClick={() => toggleExpanded(b.id)}>
-              {(q || !collapsedIds.has(b.id)) ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+              {(q || expandedIds.has(b.id)) ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
               <div className="list-card-title">{b.address}</div>
+              {b.excludedOwner && <span className="pill pill-warn">Mitch's father</span>}
               <span className="pill pill-muted">{q ? `${units.length} match${units.length === 1 ? "" : "es"} of ${allUnits.length}` : `${units.length} units`}</span>
               {(() => {
                 const emptyCount = allUnits.filter(u => !data.tenants.some(t => t.unitId === u.id)).length;
@@ -2298,12 +2475,15 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                   {allUnits.some(u => !data.tenants.some(t => t.unitId === u.id)) && (
                     <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); setPendingCleanup(b.id); }}>Clean up empty units</button>
                   )}
+                  <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); update("buildings", b.id, { excludedOwner: !b.excludedOwner }); }}>
+                    {b.excludedOwner ? "Unmark Mitch's father" : "Mark: Mitch's father"}
+                  </button>
                   <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(b); }}><Pencil size={14} /></IconBtn>
                   <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); setPendingDelete(b.id); }}><Trash2 size={14} /></IconBtn>
                 </>
               )}
             </div>
-            {(q || !collapsedIds.has(b.id)) && (
+            {(q || expandedIds.has(b.id)) && (
               <div className="list-card-body">
                 {units.length === 0 && <div className="hint">No units added yet.</div>}
                 {units.slice().sort((a, b2) => compareUnits(a.unitNumber, b2.unitNumber)).map(u => {
@@ -2386,7 +2566,17 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
 
 /* ============================== rent collection ============================== */
 
-function RentTab({ data, add, update, remove, buildingName, setData }) {
+function RentTab({ data: rawData, add, update, remove, buildingName, setData }) {
+  const [excludedSectionOpen, setExcludedSectionOpen] = useState(false);
+  const mainBuildingIds = new Set(rawData.buildings.filter(b => !b.excludedOwner).map(b => b.id));
+  const excludedBuildingsList = rawData.buildings.filter(b => b.excludedOwner);
+  const data = {
+    ...rawData,
+    buildings: rawData.buildings.filter(b => mainBuildingIds.has(b.id)),
+    units: rawData.units.filter(u => mainBuildingIds.has(u.buildingId)),
+    tenants: rawData.tenants.filter(t => mainBuildingIds.has(t.buildingId)),
+    courtCases: rawData.courtCases.filter(c => !c.buildingId || mainBuildingIds.has(c.buildingId)),
+  };
   const [noteFor, setNoteFor] = useState(null);
   const [noteText, setNoteText] = useState("");
   const [followFor, setFollowFor] = useState(null);
@@ -2717,7 +2907,7 @@ function RentTab({ data, add, update, remove, buildingName, setData }) {
   );
 
   return (
-    <div>
+    <div className="rent-page">
       <div className="page-head">
         <h1 className="page-title">Rent Collection</h1>
         <div className="page-actions">
@@ -2725,6 +2915,38 @@ function RentTab({ data, add, update, remove, buildingName, setData }) {
           <button className="btn-ghost" onClick={exportCSV}><Download size={14} /> Export CSV</button>
           <button className="btn-primary" onClick={openNewTenant}><Plus size={14} /> Add tenant</button>
         </div>
+      </div>
+
+      <div className="print-only">
+        <h1 className="print-title">Rent Ledger</h1>
+        <div className="print-subtitle">As of {fmtDate(todayISO())}</div>
+        {buildingGroups.map(g => (
+          <div className="print-section" key={g.building.id}>
+            <div className="print-section-head">
+              <span>{g.building.address}</span>
+              <span>{g.tenants.length} tenant{g.tenants.length === 1 ? "" : "s"} — ${g.totalOwed.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} owed</span>
+            </div>
+            <table className="print-table">
+              <thead>
+                <tr><th>Unit</th><th>Tenant</th><th>Status</th><th>0–30 days</th><th>31–60 days</th><th>61+ days</th><th>Total owed</th></tr>
+              </thead>
+              <tbody>
+                {g.tenants.map(t => (
+                  <tr key={t.id}>
+                    <td>{unitOf(t)}</td>
+                    <td>{t.name || "(no name on file)"}</td>
+                    <td>{t.status}</td>
+                    <td>{t.aging ? `$${t.aging.bucket1.toFixed(2)}` : "—"}</td>
+                    <td>{t.aging ? `$${t.aging.bucket2.toFixed(2)}` : "—"}</td>
+                    <td>{t.aging ? `$${t.aging.bucket61.toFixed(2)}` : "—"}</td>
+                    <td className="print-table-amount">${parseBalance(t.balance).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
+        <div className="print-grand-total">Total owed across all buildings: ${totalOwedAll.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
       </div>
 
       <div className="filter-row">
@@ -2826,6 +3048,36 @@ function RentTab({ data, add, update, remove, buildingName, setData }) {
         </>
       )}
       </>
+      )}
+
+      {excludedBuildingsList.length > 0 && (
+        <div style={{ marginTop: 24 }}>
+          <button
+            className="list-card-head"
+            style={{ width: "100%", background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 8, cursor: "pointer" }}
+            onClick={() => setExcludedSectionOpen(o => !o)}
+          >
+            {excludedSectionOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            <div className="list-card-title">Mitch's father ({excludedBuildingsList.length} building{excludedBuildingsList.length === 1 ? "" : "s"})</div>
+            <span className="pill pill-muted">excluded from the total above</span>
+          </button>
+          {excludedSectionOpen && excludedBuildingsList.map(b => {
+            const bTenants = rawData.tenants.filter(t => t.buildingId === b.id);
+            const bOwed = bTenants.reduce((sum, t) => sum + parseBalance(t.balance), 0);
+            return (
+              <div className="list-card" key={b.id} style={{ marginTop: 10 }}>
+                <div className="list-card-head">
+                  <div className="list-card-title">{shortAddress(b.address)}</div>
+                  <span className="pill pill-muted">{bTenants.length} tenant{bTenants.length === 1 ? "" : "s"}</span>
+                  <span className={`pill ${bOwed > 0 ? "pill-warn" : "pill-ok"}`}>${bOwed.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} owed</span>
+                </div>
+                <div className="list-card-body" style={{ padding: "10px 14px 14px" }}>
+                  {renderTenantTable(bTenants)}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -3751,7 +4003,7 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
   };
 
   return (
-    <div>
+    <div className="court-page">
       <div className="page-head">
         <h1 className="page-title">Court Cases</h1>
         <div className="page-actions">
@@ -3760,6 +4012,26 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
             <Plus size={14} /> Add case
           </button>
         </div>
+      </div>
+
+      <div className="print-only">
+        <h1 className="print-title">Court Cases — {view === "closed" ? "Closed / Archived" : "Active"}</h1>
+        <div className="print-subtitle">As of {fmtDate(todayISO())}</div>
+        <table className="print-table">
+          <thead><tr><th>Building</th><th>Tenant</th><th>Docket #</th><th>Next court date</th><th>Stage</th><th>Result</th></tr></thead>
+          <tbody>
+            {list.map(c => (
+              <tr key={c.id}>
+                <td>{buildingName(c.buildingId)}</td>
+                <td>{tenantName(c.tenantId)}</td>
+                <td>{c.caseNumber || "—"}</td>
+                <td>{c.nextCourtDate ? fmtDate(c.nextCourtDate) : "not set"}</td>
+                <td>{c.stage || "—"}</td>
+                <td>{c.result || "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
       <div className="filter-row">
         <button className={`chip ${view === "active" ? "chip-active" : ""}`} onClick={() => setView("active")}>Active</button>
@@ -4672,6 +4944,7 @@ function Styles() {
         background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
         padding: 32px; width: 100%; max-width: 320px; display: flex; flex-direction: column; box-sizing: border-box;
       }
+      .print-only { display: none; }
       @media print {
         .no-print, .icon-btn, .btn-ghost, .btn-primary, .page-actions,
         .filter-row, .form-panel, .import-preview, .import-block,
@@ -4702,6 +4975,36 @@ function Styles() {
         .sheet-note-text { white-space: normal !important; max-width: none !important; }
         .pill { -webkit-print-color-adjust: exact; print-color-adjust: exact; border: 1px solid currentColor; }
         .sheet-court-pill { border: 1px solid var(--danger); }
+
+        /* Dashboard, Rent Collection, and Court Cases have their own
+           purpose-built print layout below (.print-only) instead of the
+           generic "hide the buttons and print whatever's on screen"
+           treatment every other page still uses — the calendar, the
+           collapsible panels, and the interactive sheet don't translate to
+           paper cleanly no matter how they're restyled, so on these three
+           pages specifically the normal screen content is hidden entirely
+           and replaced with a plain, purpose-built table report instead. */
+        .dashboard-page > :not(.print-only):not(.page-head),
+        .rent-page > :not(.print-only):not(.page-head),
+        .court-page > :not(.print-only):not(.page-head) {
+          display: none !important;
+        }
+        .print-only { display: block !important; }
+        .print-title { font-size: 22px; font-weight: 700; margin: 0 0 2px; color: #000; }
+        .print-subtitle { font-size: 12px; color: #444; margin-bottom: 16px; }
+        .print-stats-row { display: flex; gap: 16px; margin-bottom: 18px; }
+        .print-stat { border: 1px solid #999; border-radius: 6px; padding: 8px 14px; text-align: center; min-width: 90px; }
+        .print-stat-num { font-size: 20px; font-weight: 700; }
+        .print-section { margin-bottom: 18px; break-inside: avoid; }
+        .print-section-head {
+          display: flex; justify-content: space-between; font-weight: 700; font-size: 13px;
+          border-bottom: 2px solid #000; padding-bottom: 4px; margin-bottom: 6px;
+        }
+        .print-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        .print-table th, .print-table td { border: 1px solid #999; padding: 5px 8px; text-align: left; }
+        .print-table th { background: #eee; }
+        .print-table-amount { text-align: right; font-variant-numeric: tabular-nums; }
+        .print-grand-total { font-weight: 700; font-size: 14px; text-align: right; border-top: 2px solid #000; padding-top: 8px; }
       }
     `}</style>
   );
