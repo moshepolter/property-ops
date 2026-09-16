@@ -742,9 +742,9 @@ function Field({ label, children }) {
   );
 }
 
-function IconBtn({ onClick, title, children, danger }) {
+function IconBtn({ onClick, title, children, danger, active }) {
   return (
-    <button className={`icon-btn ${danger ? "icon-btn-danger" : ""}`} onClick={onClick} title={title} type="button">
+    <button className={`icon-btn ${danger ? "icon-btn-danger" : ""} ${active ? "icon-btn-active" : ""}`} onClick={onClick} title={title} type="button">
       {children}
     </button>
   );
@@ -2695,6 +2695,56 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
 
 /* ============================== rent collection ============================== */
 
+// Stores multiple numbers in the same t.phone field as a single "; "-joined
+// string rather than adding a new array field — every other place in the
+// app that reads t.phone (CSV export, print views, Dashboard, the RIS
+// import) keeps working unchanged, just showing the joined string if it
+// ever displays phone outside this cell. Click the arrow to cycle through
+// saved numbers one at a time; click + to add another.
+function PhoneCycleCell({ tenant, update }) {
+  const [idx, setIdx] = useState(0);
+  const numbers = (tenant.phone || "").split(";").map(s => s.trim());
+  const safeIdx = Math.min(idx, numbers.length - 1);
+  const current = numbers[safeIdx] || "";
+
+  const setNumbers = (next) => update("tenants", tenant.id, { phone: next.join("; ") });
+  const updateCurrent = (val) => {
+    const next = [...numbers];
+    next[safeIdx] = val;
+    setNumbers(next);
+  };
+  const addNumber = () => {
+    setNumbers([...numbers, ""]);
+    setIdx(numbers.length);
+  };
+  const removeCurrent = () => {
+    if (numbers.length <= 1) { updateCurrent(""); return; }
+    const next = numbers.filter((_, i) => i !== safeIdx);
+    setNumbers(next);
+    setIdx(i => Math.min(i, next.length - 1));
+  };
+  const cycle = () => setIdx(i => (i + 1) % numbers.length);
+
+  return (
+    <div className="phone-cycle-cell">
+      <input className="sheet-input" value={current} onChange={e => updateCurrent(e.target.value)} placeholder="phone" onClick={e => e.stopPropagation()} />
+      {numbers.length > 1 && (
+        <>
+          <button type="button" className="phone-cycle-btn" onClick={e => { e.stopPropagation(); cycle(); }} title={`Number ${safeIdx + 1} of ${numbers.length} — click for next`}>
+            {safeIdx + 1}/{numbers.length} <ChevronRight size={11} />
+          </button>
+          <button type="button" className="phone-cycle-btn" onClick={e => { e.stopPropagation(); removeCurrent(); }} title="Remove this number">
+            <X size={11} />
+          </button>
+        </>
+      )}
+      <button type="button" className="phone-cycle-btn" onClick={e => { e.stopPropagation(); addNumber(); }} title="Add another number">
+        <Plus size={11} />
+      </button>
+    </div>
+  );
+}
+
 function RentTab({ data: rawData, add, update, remove, buildingName, setData }) {
   const [excludedSectionOpen, setExcludedSectionOpen] = useState(false);
   const mainBuildingIds = new Set(rawData.buildings.filter(b => !b.excludedOwner).map(b => b.id));
@@ -2720,6 +2770,24 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
   const [section, setSection] = useState("sheet");
 
   const inCourt = (tenantId) => (data.courtCases || []).some(c => c.tenantId === tenantId && !c.archived);
+  // Creates a linked court case for the tenant — the moment one exists,
+  // inCourt(t.id) becomes true, which is what actually moves them out of
+  // the main sheet and into the In Court section below; there's no
+  // separate flag to keep in sync with the case itself.
+  const markInCourt = (tenantId) => {
+    if (inCourt(tenantId)) return;
+    const t = data.tenants.find(x => x.id === tenantId);
+    if (!t) return;
+    add("courtCases", {
+      tenantId, buildingId: t.buildingId, unitId: t.unitId, caseNumber: "",
+      stage: CASE_STAGES[0], nextCourtDate: "", result: "Pending",
+      stipulationTerms: "", nextPaymentDue: "",
+      archived: false, documents: [],
+      checklist: DEFAULT_ATTORNEY_CHECKLIST.map(label => ({ id: uid(), label, checked: false })),
+    });
+  };
+  const [selectedTenantId, setSelectedTenantId] = useState(null);
+  const [inCourtSectionOpen, setInCourtSectionOpen] = useState(false);
 
   const [newTenant, setNewTenant] = useState(null);
 
@@ -2770,9 +2838,9 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
   // filter can empty a building's visible tenant list, but the building
   // itself stays put with an empty-state message inside.
   const buildingGroups = data.buildings
-    .filter(b => data.tenants.some(t => t.buildingId === b.id))
+    .filter(b => data.tenants.some(t => t.buildingId === b.id && !inCourt(t.id)))
     .map(b => {
-      const allTenantsHere = data.tenants.filter(t => t.buildingId === b.id);
+      const allTenantsHere = data.tenants.filter(t => t.buildingId === b.id && !inCourt(t.id));
       const tenantsHere = sortTenants(allTenantsHere.filter(passesFilters));
       const totalOwed = tenantsHere.reduce((sum, t) => sum + parseBalance(t.balance), 0);
       const oldTenants = tenantsHere.filter(t => agingSeverity(t) === 3);
@@ -2782,6 +2850,8 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
 
   const totalOwedAll = buildingGroups.reduce((sum, g) => sum + g.totalOwed, 0);
   const visibleTenants = buildingGroups.flatMap(g => g.tenants);
+  const inCourtTenants = data.tenants.filter(t => inCourt(t.id));
+  const callBackTenants = data.tenants.filter(t => t.callBack && !inCourt(t.id));
 
   const toggleBuildingExpanded = (id) => setExpandedBuildings(prev => {
     const next = new Set(prev);
@@ -2843,7 +2913,7 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
     followSubmitting.current = true;
     const t = data.tenants.find(x => x.id === tenantId);
     update("tenants", tenantId, { followUps: [...tenantFollowUps(t), { id: uid(), date: newFollowDate, note: newFollowNote }] });
-    setNewFollowDate(""); setNewFollowNote("");
+    setNewFollowDate(""); setNewFollowNote(""); setFollowFor(null);
     setTimeout(() => { followSubmitting.current = false; }, 400);
   };
   const removeFollowUp = (tenantId, followUpId) => {
@@ -2867,7 +2937,7 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
       balance: newBalance,
       payments: [...paymentsArr(t), { id: uid(), date: todayISO(), amount: amt.toFixed(2), note: newPayNote }],
     });
-    setNewPayAmount(""); setNewPayNote("");
+    setNewPayAmount(""); setNewPayNote(""); setPayFor(null);
     setTimeout(() => { paySubmitting.current = false; }, 400);
   };
   const removePayment = (tenantId, paymentId) => {
@@ -2894,7 +2964,10 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
           )}
           {tenants.map(t => (
             <React.Fragment key={t.id}>
-              <tr className={t.status !== "Current" ? "sheet-row-flag" : ""}>
+              <tr
+                className={`${t.status !== "Current" ? "sheet-row-flag" : ""} ${selectedTenantId === t.id ? "sheet-row-selected" : ""}`}
+                onClick={() => setSelectedTenantId(selectedTenantId === t.id ? null : t.id)}
+              >
                 <td className="sheet-readonly">{unitOf(t) || "—"}</td>
                 <td>
                   <div className="sheet-name-cell">
@@ -2902,7 +2975,7 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
                     {inCourt(t.id) && <span className="pill pill-danger sheet-court-pill" title="Active court case — no need to independently follow up">In Court</span>}
                   </div>
                 </td>
-                <td><input className="sheet-input" value={t.phone} onChange={e => update("tenants", t.id, { phone: e.target.value })} /></td>
+                <td><PhoneCycleCell tenant={t} update={update} /></td>
                 <td className="sheet-col-balance">
                   <div className="balance-input-wrap">
                     <span className="balance-dollar">$</span>
@@ -2944,6 +3017,12 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
                 </td>
                 <td className="sheet-actions">
                   <IconBtn title="Notes" onClick={() => setNoteFor(noteFor === t.id ? null : t.id)}><Pencil size={14} /></IconBtn>
+                  <IconBtn
+                    title={t.callBack ? "Flagged to call back — click to clear" : "Flag to call back (didn't answer, try again — not a dated follow-up)"}
+                    active={!!t.callBack}
+                    onClick={() => update("tenants", t.id, { callBack: !t.callBack })}
+                  ><Phone size={14} /></IconBtn>
+                  <IconBtn title="Mark in court — moves to the In Court section below and creates a linked court case" onClick={() => markInCourt(t.id)}><Gavel size={14} /></IconBtn>
                   <IconBtn title="Delete" danger onClick={() => {
                     if (inCourt(t.id) && !window.confirm(`${t.name || "This tenant"} has an open court case. Delete anyway? The case will stay but lose its link to this tenant.`)) return;
                     remove("tenants", t.id);
@@ -3081,11 +3160,26 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
 
       <div className="filter-row">
         <button className={`chip ${section === "sheet" ? "chip-active" : ""}`} onClick={() => setSection("sheet")}>Sheet</button>
+        <button className={`chip ${section === "callback" ? "chip-active" : ""}`} onClick={() => setSection("callback")}>
+          Call Back{callBackTenants.length > 0 ? ` (${callBackTenants.length})` : ""}
+        </button>
         <button className={`chip ${section === "import" ? "chip-active" : ""}`} onClick={() => setSection("import")}>Import Aged Arrears</button>
       </div>
 
       {section === "import" ? (
         <ImportSection data={data} setData={setData} buildingName={buildingName} allowedTypes={["arrears"]} />
+      ) : section === "callback" ? (
+        <div className="list-card">
+          <div className="list-card-head">
+            <div className="list-card-title">Call Back</div>
+            <span className="pill pill-muted">tenants flagged to call back — not a dated follow-up, just a "didn't answer, try again" list</span>
+          </div>
+          <div className="list-card-body" style={{ padding: "10px 14px 14px" }}>
+            {callBackTenants.length === 0
+              ? <div className="hint">No one flagged for a call back right now.</div>
+              : renderTenantTable(callBackTenants)}
+          </div>
+        </div>
       ) : (
       <>
       {newTenant && (
@@ -3185,6 +3279,27 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
         </>
       )}
       </>
+      )}
+
+      {inCourtTenants.length > 0 && (
+        <div style={{ marginTop: 24 }}>
+          <button
+            className="list-card-head"
+            style={{ width: "100%", background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 8, cursor: "pointer" }}
+            onClick={() => setInCourtSectionOpen(o => !o)}
+          >
+            {inCourtSectionOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            <div className="list-card-title">In Court ({inCourtTenants.length} tenant{inCourtTenants.length === 1 ? "" : "s"})</div>
+            <span className="pill pill-muted">excluded from the total above</span>
+          </button>
+          {inCourtSectionOpen && (
+            <div className="list-card" style={{ marginTop: 10 }}>
+              <div className="list-card-body" style={{ padding: "10px 14px 14px" }}>
+                {renderTenantTable(inCourtTenants)}
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       {excludedBuildingsList.length > 0 && (
@@ -4742,6 +4857,8 @@ function Styles() {
       .icon-btn { background: none; border: none; color: var(--ink-soft); cursor: pointer; padding: 4px; border-radius: 4px; display: inline-flex; }
       .icon-btn:hover { background: #EFEBE2; color: var(--ink); }
       .icon-btn-danger:hover { color: var(--danger); }
+      .icon-btn-active { background: var(--navy); color: #fff; }
+      .icon-btn-active:hover { background: var(--navy); color: #fff; }
       .form-panel {
         background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
         padding: 16px; margin: 12px 0 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
@@ -4934,6 +5051,8 @@ function Styles() {
       .sheet tr:last-child td { border-bottom: none; }
       .sheet td:last-child, .sheet th:last-child { border-right: none; }
       .sheet-row-flag { background: #FBF6EF; }
+      .sheet-row-selected { background: #E8F0FE !important; box-shadow: inset 3px 0 0 var(--navy); cursor: pointer; }
+      .sheet-row-selected td { background: transparent; }
       .sheet-input {
         width: 100%; border: none; background: transparent; padding: 8px 10px; font-size: 13px;
         font-family: inherit; color: var(--ink); border-radius: 0;
@@ -4964,6 +5083,13 @@ function Styles() {
       }
       .sheet-follow-btn:hover { background: #F0EEE7; color: var(--navy); }
       .sheet-follow-date { font-size: 10px; }
+      .phone-cycle-cell { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
+      .phone-cycle-cell .sheet-input { flex: 1; min-width: 80px; }
+      .phone-cycle-btn {
+        display: flex; align-items: center; gap: 1px; background: none; border: 1px solid var(--border);
+        border-radius: 4px; color: var(--ink-soft); cursor: pointer; padding: 2px 4px; font-size: 10px; white-space: nowrap;
+      }
+      .phone-cycle-btn:hover { background: #F0EEE7; color: var(--navy); }
       .followup-scroll { max-height: 520px; overflow-y: auto; padding-right: 4px; }
       .dash-calendar {
         background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
