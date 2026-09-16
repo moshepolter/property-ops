@@ -3495,11 +3495,19 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
         const diffFields = {};
         Object.entries(fields).forEach(([k, v]) => { if (v && tenant[k] !== v) diffFields[k] = v; });
         if (Object.keys(diffFields).length > 0) {
-          // If this tenant was already flagged Late/In Arrears before this import, don't
-          // silently overwrite whatever's being tracked for them — require an explicit
-          // approve. Tenants currently "Current" (or brand-new changes) apply automatically.
           const priorStatus = tenant.status || "Current";
-          const needsApproval = type === "arrears" && priorStatus !== "Current";
+          // Auto-apply by default now — only pause for approval if this
+          // tenant is actively being worked: an open follow-up reminder, or
+          // flagged to call back. Their prior Late/In Arrears status alone
+          // no longer gates this, and neither does an active court case on
+          // its own — a court-case tenant isn't shown on the spreadsheet at
+          // all, so there's no risk of overwriting something visible
+          // mid-conversation the way there is for a follow-up or call-back;
+          // their balance still updates here, and the court tab's balance
+          // pill (pulled live from this same tenant record) reflects it
+          // automatically.
+          const activelyWorking = tenantFollowUps(tenant).length > 0 || tenant.callBack === true;
+          const needsApproval = type === "arrears" && activelyWorking;
           // If the balance changed, work out whether that's a payment (balance went
           // down) or a new charge (balance went up), so it can be logged as a dated
           // ledger entry on confirm instead of just silently becoming a new number.
@@ -3528,9 +3536,25 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
   let missing = [];
   if (type === "arrears") {
     const parsedApts = new Set(parsedEntries.map(e => (e.apt || "").trim().toUpperCase()));
-    missing = unitsForBuilding
-      .filter(u => !parsedApts.has((u.unitNumber || "").trim().toUpperCase()))
-      .map(u => ({ apt: u.unitNumber, name: tenantByUnit(u.id)?.name || "(no tenant on file)" }));
+    const missingUnits = unitsForBuilding.filter(u => !parsedApts.has((u.unitNumber || "").trim().toUpperCase()));
+    for (const u of missingUnits) {
+      const tenant = tenantByUnit(u.id);
+      missing.push({ apt: u.unitNumber, name: tenant?.name || "(no tenant on file)" });
+      if (!tenant) continue; // nothing to mark paid if no tenant exists on this unit
+      const currentBalance = parseBalance(tenant.balance);
+      if (currentBalance <= 0 && (tenant.status || "Current") === "Current") continue; // already correct, no change needed
+      const activelyWorking = tenantFollowUps(tenant).length > 0 || tenant.callBack === true;
+      changes.push({
+        apt: u.unitNumber, unitId: u.id, tenantId: tenant.id, isNew: false, derivedFromMissing: true,
+        fields: { balance: "0.00", status: "Current" },
+        before: { balance: tenant.balance || "0.00", status: tenant.status || "Current" },
+        name: tenant.name, needsReview: false,
+        priorStatus: tenant.status || "Current", needsApproval: activelyWorking, approved: !activelyWorking,
+        aging: undefined, balanceDelta: currentBalance,
+        existingFollowUps: tenantFollowUps(tenant), clearFollowUps: false,
+        inCourt: hasActiveCourtCase(tenant.id),
+      });
+    }
   }
   return { changes, missing };
 }
@@ -3711,6 +3735,7 @@ function ImportBlock({ type, data, setData, buildingName }) {
               <span className="pill pill-muted">{c.apt}</span>
               <span className="import-row-name">{c.name}</span>
               {c.isNew && <span className="pill pill-warn">New</span>}
+              {c.derivedFromMissing && <span className="pill pill-ok">Not in this report — marking paid up</span>}
               {c.movedOut && <span className="pill pill-danger">Moved out (flagged)</span>}
               {c.needsReview && <span className="pill pill-warn">⚠ Review — shared unit, verify names</span>}
               {c.inCourt && <span className="pill pill-danger">In Court</span>}
@@ -3738,10 +3763,10 @@ function ImportBlock({ type, data, setData, buildingName }) {
               )}
             </div>
           ))}
-          {preview.missing.length > 0 && (
+          {preview.missing.filter(m => !preview.changes.some(c => c.derivedFromMissing && c.apt === m.apt)).length > 0 && (
             <>
-              <div className="row" style={{ marginTop: 10 }}><strong>Not found in this file (review — may have moved out)</strong></div>
-              {preview.missing.map((m, i) => (
+              <div className="row" style={{ marginTop: 10 }}><strong>Not found in this file (already $0 / Current — no change needed)</strong></div>
+              {preview.missing.filter(m => !preview.changes.some(c => c.derivedFromMissing && c.apt === m.apt)).map((m, i) => (
                 <div className="import-row" key={i}>
                   <span className="pill pill-muted">{m.apt}</span>
                   <span className="import-row-name">{m.name}</span>
@@ -4612,6 +4637,12 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
             {c.stage && <span className="pill pill-muted">{c.stage}</span>}
             <span className="pill pill-muted">{c.result}</span>
             <span className="pill pill-muted">{buildingName(c.buildingId)}</span>
+            {c.tenantId && (() => {
+              const t = data.tenants.find(x => x.id === c.tenantId);
+              if (!t) return null;
+              const bal = parseBalance(t.balance);
+              return <span className={`pill ${bal > 0 ? "pill-warn" : "pill-ok"}`}>${bal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} owed</span>;
+            })()}
             {c.nextCourtDate && !c.archived && <Flag date={c.nextCourtDate} label="court date" />}
             <div className="spacer" />
             <IconBtn title="Edit" onClick={() => openEdit(c)}><Pencil size={14} /></IconBtn>
