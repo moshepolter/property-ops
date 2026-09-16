@@ -4,7 +4,16 @@ import * as XLSX from "xlsx";
 // PDF upload support for RIS reports. Requires: npm install pdfjs-dist
 // The worker is loaded from a CDN so it works with any bundler — no local worker file needed.
 import * as pdfjsLib from "pdfjs-dist";
-pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.js";
+// pdf.js 4.x only ships an ES-module worker build (.mjs) — the classic .js
+// build some older examples reference doesn't exist at this version, and
+// pointing at it 404s silently, breaking every single PDF upload with no
+// clue why. cdnjs is primary since it's already the CSP-allowed host used
+// elsewhere in this app; unpkg is a fallback extractPdfText retries with if
+// the primary ever fails to load, so one CDN having a bad day doesn't take
+// PDF reading down entirely.
+const PDF_WORKER_PRIMARY = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs";
+const PDF_WORKER_FALLBACK = "https://unpkg.com/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_PRIMARY;
 // Firebase for real persistence + login. Requires: npm install firebase
 // Fill in firebaseConfig below with the values from your Firebase project settings.
 import { initializeApp } from "firebase/app";
@@ -793,7 +802,23 @@ function parseDirectoryText(text) {
 // y-position since pdf.js returns a flat list of positioned text fragments.
 async function extractPdfText(file) {
   const buffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+  let pdf;
+  try {
+    pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+  } catch (e) {
+    // If the worker itself failed to load (a CDN outage, a URL that
+    // stopped resolving) rather than the PDF being genuinely unreadable,
+    // one retry against a different CDN can recover from it instead of
+    // failing every single upload on what's really a single point of
+    // failure. Only worth trying once — if this also fails, the error is
+    // almost certainly the PDF itself, not the worker.
+    if (pdfjsLib.GlobalWorkerOptions.workerSrc !== PDF_WORKER_FALLBACK) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_FALLBACK;
+      pdf = await pdfjsLib.getDocument({ data: buffer.slice(0) }).promise;
+    } else {
+      throw e;
+    }
+  }
   let fullText = "";
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
     const page = await pdf.getPage(pageNum);
@@ -3323,12 +3348,12 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
             {["All", ...RENT_STATUSES.filter(s => s !== "In Arrears")].map(s => (
               <button key={s} className={`chip ${statusFilter === s ? "chip-active" : ""}`} onClick={() => setStatusFilter(s)}>{s}</button>
             ))}
-            <button className={`chip ${statusFilter === "Follow-ups" ? "chip-active" : ""}`} onClick={() => setStatusFilter("Follow-ups")}>Follow-ups</button>
+            <button className={`chip ${statusFilter === "61+" ? "chip-active" : ""}`} onClick={() => setStatusFilter("61+")}>61+ days only</button>
             <span className="row-muted" style={{ margin: "0 2px", fontSize: 14 }}>|</span>
+            <button className={`chip ${statusFilter === "Follow-ups" ? "chip-active" : ""}`} onClick={() => setStatusFilter("Follow-ups")}>Follow-ups</button>
             <button className={`chip ${statusFilter === "Call Back" ? "chip-active" : ""}`} onClick={() => setStatusFilter("Call Back")}>
               Call Back{callBackTenants.length > 0 ? ` (${callBackTenants.length})` : ""}
             </button>
-            <button className={`chip ${statusFilter === "61+" ? "chip-active" : ""}`} onClick={() => setStatusFilter("61+")}>61+ days only</button>
           </div>
           <div className="filter-row">
             <span className="row-muted" style={{ fontSize: 12, marginRight: 2 }}>Sort:</span>
