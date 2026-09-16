@@ -524,6 +524,21 @@ function parseArrearsTextColumnar(text) {
 }
 
 function parseArrearsText(text) {
+  // A columnar-format report (TOTAL DUE:, TENANT NAME:, CODE:, and the
+  // three aging-bucket headers each as their own standalone section,
+  // followed by a block of numbers) can occasionally trip the line-format
+  // parser's own "4 consecutive dollar amounts" boundary detection — a run
+  // of aging-bucket numbers can coincidentally look like that pattern,
+  // producing SOME output even though it's actually garbage, which
+  // previously meant the line parser's result got trusted blindly and the
+  // columnar parser never even ran. Counting how many of these markers
+  // appear gives a reliable structural signal for which format this
+  // actually is, checked before trusting either parser's raw output.
+  const columnarMarkerCount = ARREARS_SECTION_MARKERS.filter(marker => new RegExp(marker).test(text)).length;
+  if (columnarMarkerCount >= 4) {
+    const columnar = parseArrearsTextColumnar(text);
+    if (columnar.length > 0) return columnar;
+  }
   const lineFormat = parseArrearsTextLineFormat(text);
   if (lineFormat.length > 0) return lineFormat;
   return parseArrearsTextColumnar(text);
@@ -595,7 +610,7 @@ function parseContactsText(text) {
   // somewhere in it. That second clause is what separates a genuine name
   // like that from a bare number (a phone extension, an apartment number
   // munged into the wrong spot) that isn't a name at all.
-  const LETTER_ONLY_NAME_RE = `(?:(?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?|\\d[\\d\\s]*[A-Za-z][A-Za-z0-9${NAME_CHARS.replace("A-Za-z", "")}]*?)`;
+  const LETTER_ONLY_NAME_RE = `(?:(?:MR\\.|MRS\\.|MS\\.|[A-Z])[${NAME_CHARS}]*?|\\d[\\d\\s]*(?!(?:MR\\.|MRS\\.|MS\\.)\\s)[A-Za-z][A-Za-z0-9${NAME_CHARS.replace("A-Za-z", "")}]*?)`;
   // A letter-only unit — whether 1, 2, 3, or 4 letters — only counts as a
   // header where it starts a genuine new line in the source document (or is
   // the very first thing in it). Checking the text immediately before a
@@ -656,15 +671,94 @@ function parseContactsText(text) {
   });
 
   const phoneRe = /\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}/;
+  const phoneReGlobal = new RegExp(phoneRe.source, "g");
   const emailRe = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 
   return headers.map((h, i) => {
     const blockEnd = i + 1 < headers.length ? headers[i + 1].start : cleaned.length;
     const block = cleaned.slice(h.end, blockEnd);
-    const phone = block.match(phoneRe);
+    // A tenant's block can list more than one number (their own cell, a
+    // spouse's, a work line) — capture all of them, not just the first,
+    // so PhoneCycleCell has something to actually cycle through. Deduped
+    // and joined with "; ", the same format that cell already expects.
+    const phoneMatches = block.match(phoneReGlobal) || [];
+    const uniquePhones = [...new Set(phoneMatches.map(p => p.trim()))];
     const email = block.match(emailRe);
-    return { apt: h.apt, name: h.name, phone: phone ? phone[0].trim() : "", email: email ? email[0].trim() : "" };
+    return { apt: h.apt, name: h.name, phone: uniquePhones.join("; "), email: email ? email[0].trim() : "" };
   }); // keep every detected apartment, even ones with no phone/email on file
+}
+
+// Attorney "Complete Client Status" export (e.g. Azoulay Weiss, LLP) —
+// a narrative case log, not a table: each case block repeats its own
+// header on every page it spans (with Name/Index/Addr/Landlord blank on
+// continuation pages), followed by a chronological action list with the
+// MOST RECENT action listed first. This pulls out one record per unique
+// case number, using whichever page first supplied each field, and takes
+// the very first dated action line as "the latest on the case."
+function parseCourtCasesText(text) {
+  const lines = text.split("\n").filter(line => {
+    const t = line.trim();
+    if (!t) return false;
+    if (/^Page:\s*\d+$/.test(t)) return false;
+    if (/^Date of Report:/.test(t)) return false;
+    if (/^AZOULAY WEISS, LLP$/.test(t)) return false;
+    if (/^Complete Client Status$/.test(t)) return false;
+    if (/^From Client = /.test(t)) return false;
+    if (/^All actions$/.test(t)) return false;
+    if (/^Client: MSHPEL\s+Mitchell Shelfogel$/.test(t)) return false;
+    return true;
+  });
+  const cleaned = lines.join("\n");
+  const blocks = cleaned.split(/(?=Case#:\d+)/).filter(b => b.includes("Case#:"));
+
+  const casesByNumber = {};
+  for (const block of blocks) {
+    const caseNumMatch = block.match(/Case#:(\d+)/);
+    if (!caseNumMatch) continue;
+    const caseNum = caseNumMatch[1];
+
+    const buildingMatch = block.match(/Building:\s*(\S+)/);
+    const aptMatch = block.match(/Apt:\s*(.+?)\s*$/m);
+    const nameMatch = block.match(/Name:\s*(.+?)\s{2,}Index:/);
+    const indexMatch = block.match(/Index:\s*(\S+)/);
+    // Match up to whichever comes first — the Assg field on the same line
+    // if present, or end of line if not (not every case has one).
+    const addrMatch = block.match(/Addr:\s*(.+?)(?:\s{2,}Assg\.:|\s*$)/m);
+    const assgMatch = block.match(/Assg\.:\s*(\S+)/);
+    const landlordMatch = block.match(/Landlord:\s*(.+?)\s*$/m);
+    // "MM/DD/YYYY <description>" at the start of a line, not an indented
+    // wrapped continuation of the previous action's description.
+    const actionMatch = block.match(/^(\d{2}\/\d{2}\/\d{4})\s+(\S.+?)(?:\s{2,}|\n|$)/m);
+
+    if (!casesByNumber[caseNum]) {
+      casesByNumber[caseNum] = {
+        caseNumber: caseNum, building: buildingMatch ? buildingMatch[1] : "",
+        apt: aptMatch ? aptMatch[1].trim() : "", name: "", index: "", address: "",
+        assigned: "", landlord: "", latestActionDate: "", latestActionDesc: "",
+      };
+    }
+    const c = casesByNumber[caseNum];
+    // Continuation pages leave Name/Index/Addr/Assg/Landlord blank — only
+    // overwrite with a genuinely non-empty value found on a later page,
+    // never blank out what an earlier page already supplied.
+    if (nameMatch && nameMatch[1].trim()) c.name = nameMatch[1].trim();
+    if (indexMatch && indexMatch[1].trim() && indexMatch[1] !== "/") c.index = indexMatch[1].trim();
+    if (addrMatch && addrMatch[1].trim()) c.address = addrMatch[1].trim();
+    if (assgMatch && assgMatch[1].trim()) c.assigned = assgMatch[1].trim();
+    if (landlordMatch && landlordMatch[1].trim()) c.landlord = landlordMatch[1].trim();
+    // Only the first block encountered for a case has its true most-recent
+    // action — later blocks for the same case are older continuation
+    // pages further down in the document. Stored as ISO (YYYY-MM-DD),
+    // matching every other date field in the app, not the report's own
+    // MM/DD/YYYY — so fmtDate() and date-sorting elsewhere work on it the
+    // same as any other date without special-casing this one field.
+    if (!c.latestActionDate && actionMatch) {
+      const [mm, dd, yyyy] = actionMatch[1].split("/");
+      c.latestActionDate = `${yyyy}-${mm}-${dd}`;
+      c.latestActionDesc = actionMatch[2].trim();
+    }
+  }
+  return Object.values(casesByNumber);
 }
 
 // Building Directory: two apt/name pairs per line, best-effort split
@@ -2851,7 +2945,7 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
   const totalOwedAll = buildingGroups.reduce((sum, g) => sum + g.totalOwed, 0);
   const visibleTenants = buildingGroups.flatMap(g => g.tenants);
   const inCourtTenants = data.tenants.filter(t => inCourt(t.id));
-  const callBackTenants = data.tenants.filter(t => t.callBack && !inCourt(t.id));
+  const callBackTenants = rawData.tenants.filter(t => t.callBack);
 
   const toggleBuildingExpanded = (id) => setExpandedBuildings(prev => {
     const next = new Set(prev);
@@ -3160,26 +3254,11 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
 
       <div className="filter-row">
         <button className={`chip ${section === "sheet" ? "chip-active" : ""}`} onClick={() => setSection("sheet")}>Sheet</button>
-        <button className={`chip ${section === "callback" ? "chip-active" : ""}`} onClick={() => setSection("callback")}>
-          Call Back{callBackTenants.length > 0 ? ` (${callBackTenants.length})` : ""}
-        </button>
         <button className={`chip ${section === "import" ? "chip-active" : ""}`} onClick={() => setSection("import")}>Import Aged Arrears</button>
       </div>
 
       {section === "import" ? (
         <ImportSection data={data} setData={setData} buildingName={buildingName} allowedTypes={["arrears"]} />
-      ) : section === "callback" ? (
-        <div className="list-card">
-          <div className="list-card-head">
-            <div className="list-card-title">Call Back</div>
-            <span className="pill pill-muted">tenants flagged to call back — not a dated follow-up, just a "didn't answer, try again" list</span>
-          </div>
-          <div className="list-card-body" style={{ padding: "10px 14px 14px" }}>
-            {callBackTenants.length === 0
-              ? <div className="hint">No one flagged for a call back right now.</div>
-              : renderTenantTable(callBackTenants)}
-          </div>
-        </div>
       ) : (
       <>
       {newTenant && (
@@ -3227,10 +3306,12 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
         <EmptyState text="No tenants yet — import RIS data or add a tenant." />
       ) : (
         <>
-          <div className="rent-total-banner">
-            <div className="rent-total-num">${totalOwedAll.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-            <div className="rent-total-label">total owed across {visibleTenants.length} tenant{visibleTenants.length === 1 ? "" : "s"}{statusFilter !== "All" ? " (matching current filters)" : ""}</div>
-          </div>
+          {statusFilter !== "Call Back" && (
+            <div className="rent-total-banner">
+              <div className="rent-total-num">${totalOwedAll.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+              <div className="rent-total-label">total owed across {visibleTenants.length} tenant{visibleTenants.length === 1 ? "" : "s"}{statusFilter !== "All" ? " (matching current filters)" : ""}</div>
+            </div>
+          )}
 
           <div className="filter-row">
             {/* "In Arrears" intentionally left out here — that status is
@@ -3243,6 +3324,10 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
               <button key={s} className={`chip ${statusFilter === s ? "chip-active" : ""}`} onClick={() => setStatusFilter(s)}>{s}</button>
             ))}
             <button className={`chip ${statusFilter === "Follow-ups" ? "chip-active" : ""}`} onClick={() => setStatusFilter("Follow-ups")}>Follow-ups</button>
+            <span className="row-muted" style={{ margin: "0 2px", fontSize: 14 }}>|</span>
+            <button className={`chip ${statusFilter === "Call Back" ? "chip-active" : ""}`} onClick={() => setStatusFilter("Call Back")}>
+              Call Back{callBackTenants.length > 0 ? ` (${callBackTenants.length})` : ""}
+            </button>
             <button className={`chip ${statusFilter === "61+" ? "chip-active" : ""}`} onClick={() => setStatusFilter("61+")}>61+ days only</button>
           </div>
           <div className="filter-row">
@@ -3253,7 +3338,24 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
             <button className={`chip ${sortMode === "oldest" ? "chip-active" : ""}`} onClick={() => setSortMode("oldest")}>Oldest debt</button>
           </div>
 
-          {buildingGroups.map(g => {
+          {statusFilter === "Call Back" ? (
+            // Call Back intentionally bypasses buildingGroups (which excludes
+            // "Mitch's father" buildings) and shows every flagged tenant
+            // regardless — it's meant to be a complete reminder list, not
+            // scoped by any other business rule, matching how it behaved as
+            // its own dedicated section before this became a filter chip.
+            <div className="list-card">
+              <div className="list-card-head">
+                <div className="list-card-title">Call Back</div>
+                <span className="pill pill-muted">tenants flagged to call back — not a dated follow-up, just a "didn't answer, try again" list</span>
+              </div>
+              <div className="list-card-body" style={{ padding: "10px 14px 14px" }}>
+                {callBackTenants.length === 0
+                  ? <div className="hint">No one flagged for a call back right now.</div>
+                  : renderTenantTable(callBackTenants)}
+              </div>
+            </div>
+          ) : buildingGroups.map(g => {
             const isOpen = expandedBuildings.has(g.building.id);
             return (
               <div className="list-card" key={g.building.id}>
@@ -4204,11 +4306,136 @@ function VendorsTab({ data, add, update, remove, buildingName }) {
 
 /* ============================== court cases ============================== */
 
+// Matches a law firm's "Complete Client Status" export against the app's
+// own tenants — court report building codes are the firm's own internal
+// numbering and don't reliably match this app's building records (a
+// commercial unit can even show a completely different "Building:" code
+// than its real address, e.g. an AKA street), so building matching goes by
+// address text instead, and unit matching falls back to a name-overlap
+// check when the report's apt value doesn't cleanly correspond to a real
+// unit number (a storefront listed as "STORE FRONT" rather than its
+// actual unit number, for instance).
+function normalizeAddrForMatch(s) { return (s || "").toLowerCase().replace(/[^a-z0-9]/g, ""); }
+function normalizeAptForMatch(s) { return (s || "").toUpperCase().replace(/[^A-Z0-9]/g, ""); }
+function normalizeNameForMatch(s) { return (s || "").toLowerCase().replace(/[^a-z\s]/g, "").split(/\s+/).filter(w => w.length > 2); }
+
+function findCourtBuildingMatch(courtAddress, buildings) {
+  const fragments = (courtAddress || "").split(/,|\bAKA\b/i).map(normalizeAddrForMatch).filter(Boolean);
+  if (fragments.length === 0) return null;
+  return buildings.find(b => {
+    const nb = normalizeAddrForMatch(b.address);
+    return fragments.some(f => nb.includes(f));
+  }) || null;
+}
+function findCourtTenantMatch(courtCase, building, tenants, units) {
+  if (!building) return { tenant: null, reason: "no building match" };
+  const buildingTenants = tenants.filter(t => t.buildingId === building.id);
+  const naApt = normalizeAptForMatch(courtCase.apt);
+  const byApt = buildingTenants.find(t => {
+    const unit = units.find(u => u.id === t.unitId);
+    return unit && normalizeAptForMatch(unit.unitNumber) === naApt;
+  });
+  if (byApt) return { tenant: byApt, reason: "matched by unit number" };
+  const courtWords = normalizeNameForMatch(courtCase.name);
+  if (courtWords.length === 0) return { tenant: null, reason: "no unit match, no usable name" };
+  let best = null, bestScore = 0;
+  for (const t of buildingTenants) {
+    const overlap = courtWords.filter(w => normalizeNameForMatch(t.name).includes(w)).length;
+    if (overlap > bestScore) { bestScore = overlap; best = t; }
+  }
+  if (best && bestScore >= 1) return { tenant: best, reason: `matched by name (${bestScore} word${bestScore === 1 ? "" : "s"} in common)` };
+  return { tenant: null, reason: "no unit or name match found" };
+}
+
+function CourtCaseImportSection({ data, add, update }) {
+  const [rawText, setRawText] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+
+  const runPreview = () => {
+    setError(""); setResult(null);
+    if (!rawText.trim()) { setError("Paste the report text first."); return; }
+    const cases = parseCourtCasesText(rawText);
+    if (cases.length === 0) { setError("No cases found — make sure this is the full report text, including the \"Case#:\" lines."); return; }
+    const rows = cases.map(c => {
+      const building = findCourtBuildingMatch(c.address, data.buildings);
+      const { tenant, reason } = findCourtTenantMatch(c, building, data.tenants, data.units);
+      const yearMatch = c.latestActionDate.match(/^(\d{4})-/);
+      const suspiciousYear = yearMatch && Math.abs(parseInt(yearMatch[1]) - new Date().getFullYear()) > 3;
+      const existingCase = tenant ? data.courtCases.find(cc => cc.tenantId === tenant.id && !cc.archived) : null;
+      return { ...c, building, tenant, matchReason: reason, suspiciousYear, existingCase };
+    });
+    setPreview(rows);
+  };
+
+  const runImport = () => {
+    if (!preview) return;
+    let created = 0, updated = 0;
+    for (const row of preview) {
+      if (!row.tenant) continue;
+      const fields = {
+        tenantId: row.tenant.id, buildingId: row.tenant.buildingId, unitId: row.tenant.unitId,
+        caseNumber: row.caseNumber, lastUpdateDate: row.latestActionDate, lastUpdateNote: row.latestActionDesc,
+      };
+      if (row.existingCase) { update("courtCases", row.existingCase.id, fields); updated++; }
+      else {
+        add("courtCases", {
+          ...fields, stage: CASE_STAGES[0], nextCourtDate: "", result: "Pending",
+          stipulationTerms: "", nextPaymentDue: "", archived: false, documents: [],
+          checklist: DEFAULT_ATTORNEY_CHECKLIST.map(label => ({ id: uid(), label, checked: false })),
+        });
+        created++;
+      }
+    }
+    setResult({ created, updated, unmatched: preview.filter(r => !r.tenant).length });
+    setPreview(null); setRawText("");
+  };
+
+  return (
+    <div className="form-panel" style={{ marginBottom: 16 }}>
+      <div style={{ fontWeight: 700, marginBottom: 4 }}>Import from attorney report</div>
+      <p className="hint">Paste the full text of the "Complete Client Status" export. Each case gets matched to a tenant by building address and unit number (falling back to name matching when the report's apt value doesn't line up with a real unit, like a storefront listed as "STORE FRONT"). Review the matches below before confirming — nothing is saved until you click Confirm import.</p>
+      <textarea rows={8} value={rawText} onChange={e => { setRawText(e.target.value); setPreview(null); setResult(null); }} placeholder="Paste the full report text here…" />
+      {error && <div className="hint" style={{ color: "var(--danger)" }}>{error}</div>}
+      <div className="form-actions" style={{ marginTop: 8 }}>
+        <button className="btn-primary" onClick={runPreview} disabled={!rawText.trim()}>Preview</button>
+      </div>
+      {preview && (
+        <div style={{ marginTop: 12 }}>
+          {preview.map(row => (
+            <div key={row.caseNumber} className="hint" style={{ marginBottom: 6, paddingBottom: 6, borderBottom: "1px solid var(--border)" }}>
+              <strong>Case #{row.caseNumber}</strong> — {row.name || "(no name on file)"}, apt {row.apt || "?"}
+              <br />
+              {row.tenant
+                ? <span style={{ color: "var(--ok)" }}>✓ {row.existingCase ? "will update" : "will create"} — matched to {row.tenant.name} ({row.matchReason})</span>
+                : <span style={{ color: "var(--warn)" }}>⚠ not matched — {row.matchReason}. Skipped; add manually if needed.</span>}
+              <br />
+              Latest: {fmtDate(row.latestActionDate)} — {row.latestActionDesc}
+              {row.suspiciousYear && <span style={{ color: "var(--danger)" }}> ⚠ this date's year looks off — check the source report</span>}
+            </div>
+          ))}
+          <div className="form-actions" style={{ marginTop: 8 }}>
+            <button className="btn-primary" onClick={runImport}>Confirm import</button>
+            <button className="btn-ghost" onClick={() => setPreview(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {result && (
+        <div className="hint" style={{ marginTop: 12, fontWeight: 700, color: "var(--ok)" }}>
+          Done — {result.created} case{result.created === 1 ? "" : "s"} created, {result.updated} updated{result.unmatched > 0 ? `, ${result.unmatched} skipped (no match)` : ""}.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
   const [form, setForm] = useState(null);
   const [view, setView] = useState("active");
   const [checklistText, setChecklistText] = useState({});
   const [detailsFor, setDetailsFor] = useState(null);
+  const [showCourtImport, setShowCourtImport] = useState(false);
 
   const submit = () => {
     if (!form.tenantId) return; // a case with no tenant is a silent data-quality trap
@@ -4260,11 +4487,14 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
         <h1 className="page-title">Court Cases</h1>
         <div className="page-actions">
           <PrintButton label="Court Cases" />
+          <button className="btn-ghost" onClick={() => setShowCourtImport(s => !s)}><Upload size={14} /> Import from attorney report</button>
           <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", unitId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: CASE_STAGES[0], stipulationTerms: "", nextPaymentDue: "" })}>
             <Plus size={14} /> Add case
           </button>
         </div>
       </div>
+
+      {showCourtImport && <CourtCaseImportSection data={data} add={add} update={update} />}
 
       <div className="print-only">
         <h1 className="print-title">Court Cases — {view === "closed" ? "Closed / Archived" : "Active"}</h1>
@@ -4365,6 +4595,11 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
               : <IconBtn title="Move to closed" onClick={() => update("courtCases", c.id, { archived: true })}><ArchiveIcon size={14} /></IconBtn>}
             <IconBtn title="Delete" danger onClick={() => remove("courtCases", c.id)}><Trash2 size={14} /></IconBtn>
           </div>
+          {c.lastUpdateDate && (
+            <div className="list-card-body" style={{ paddingBottom: 0 }}>
+              <div className="row"><em>Latest ({fmtDate(c.lastUpdateDate)}):</em> {c.lastUpdateNote}</div>
+            </div>
+          )}
           {c.result === "Stipulation (payment plan)" && (
             <div className="list-card-body">
               {c.stipulationTerms && <div className="row"><em>Terms:</em> {c.stipulationTerms}</div>}
