@@ -786,7 +786,43 @@ function parseCourtCasesText(text) {
     // stitching wrapped text across a page boundary risks garbling it, so
     // this stays honest about capturing the dated line itself rather than
     // guessing at where a wrapped sentence continues.
-    const actionMatches = [...block.matchAll(/^(\d{2}\/\d{2}\/\d{4})\s+(\S.+?)(?:\s{2,}|\n|$)/gm)];
+    // A "Stipulation:" line lists a payment schedule (date + dollar amount
+    // pairs, e.g. "09/01/2026 1696.25 N"), sometimes wrapping onto a
+    // following line with no "Stipulation:" prefix — these aren't case
+    // actions and were being misread as ones with a garbled "description"
+    // that's actually just a dollar figure. A genuine action's description
+    // is words ("Court Appearance", "Reminder"); a bare amount like
+    // "1696.25 N" or "1696.25" never is, so that shape is what's filtered.
+    // Split into segments, each starting at a dated line (the report uses
+    // both MM/DD/YYYY and the shorter M/D/YY here) and running until the
+    // next dated line, a Stipulation:/Repairs:/Comment:/Landlord: section
+    // (those aren't part of the action itself), or the end of this page's
+    // block — giving the FULL wrapped description (e.g. what a reminder
+    // note actually said), not just its first line. This only joins text
+    // that's still within the same page; it never reaches across a page
+    // break, since reliably knowing where a wrapped sentence continues on
+    // the next page isn't something that can be verified without risking
+    // garbled results.
+    const segments = block.split(/(?=^\d{1,2}\/\d{1,2}\/\d{2,4}\s)/m);
+    const actionMatches = [];
+    for (const seg of segments) {
+      const dateMatch = seg.match(/^(\d{1,2}\/\d{1,2}\/(\d{2}|\d{4}))\s+([\s\S]*)/);
+      if (!dateMatch) continue;
+      let rest = dateMatch[3];
+      const markerIdx = rest.search(/^(Stipulation:|Repairs:|Comment:|Landlord:)/m);
+      if (markerIdx !== -1) rest = rest.slice(0, markerIdx);
+      const fullText = rest.split("\n").map(l => l.trim()).filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 500);
+      // A "Stipulation:" line lists a payment schedule (date + dollar
+      // amount pairs, e.g. "09/01/2026 1696.25 N"), sometimes wrapping
+      // onto a following line with no "Stipulation:" prefix — these
+      // aren't case actions and were being misread as ones with a
+      // garbled "description" that's actually just a dollar figure. A
+      // genuine action's description is words ("Court Appearance",
+      // "Reminder"); a bare amount like "1696.25 N" never is, so that
+      // shape is what's filtered.
+      if (/^\$?[\d,]+\.\d{2}\s*[A-Z]?$/.test(fullText)) continue;
+      if (fullText) actionMatches.push([null, dateMatch[1], fullText]);
+    }
 
     if (!casesByNumber[caseNum]) {
       casesByNumber[caseNum] = {
@@ -805,7 +841,12 @@ function parseCourtCasesText(text) {
     if (assgMatch && assgMatch[1].trim()) c.assigned = assgMatch[1].trim();
     if (landlordMatch && landlordMatch[1].trim()) c.landlord = landlordMatch[1].trim();
     for (const m of actionMatches) {
-      const [mm, dd, yyyy] = m[1].split("/");
+      // Normalize both MM/DD/YYYY and the shorter M/D/YY into the same
+      // ISO date — YY is always 20YY here, every date in this report
+      // falls within this system's operating years.
+      const parts = m[1].split("/");
+      const mm = parts[0].padStart(2, "0"), dd = parts[1].padStart(2, "0");
+      const yyyy = parts[2].length === 2 ? "20" + parts[2] : parts[2];
       const isoDate = `${yyyy}-${mm}-${dd}`;
       const desc = m[2].trim();
       // Skip an exact date+description repeat — the same action line
