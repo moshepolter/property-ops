@@ -778,15 +778,21 @@ function parseCourtCasesText(text) {
     const addrMatch = block.match(/Addr:\s*(.+?)(?:\s{2,}Assg\.:|\s*$)/m);
     const assgMatch = block.match(/Assg\.:\s*(\S+)/);
     const landlordMatch = block.match(/Landlord:\s*(.+?)\s*$/m);
-    // "MM/DD/YYYY <description>" at the start of a line, not an indented
-    // wrapped continuation of the previous action's description.
-    const actionMatch = block.match(/^(\d{2}\/\d{2}\/\d{4})\s+(\S.+?)(?:\s{2,}|\n|$)/m);
+    // Every dated action line in this block, not just the first — a case
+    // typically has several actions (reminders, appearances, filings) and
+    // the report lists them most-recent-first within each page. Long
+    // descriptions that wrap onto indented continuation lines or across a
+    // page break may only capture their first line here — reliably
+    // stitching wrapped text across a page boundary risks garbling it, so
+    // this stays honest about capturing the dated line itself rather than
+    // guessing at where a wrapped sentence continues.
+    const actionMatches = [...block.matchAll(/^(\d{2}\/\d{2}\/\d{4})\s+(\S.+?)(?:\s{2,}|\n|$)/gm)];
 
     if (!casesByNumber[caseNum]) {
       casesByNumber[caseNum] = {
         caseNumber: caseNum, building: buildingMatch ? buildingMatch[1] : "",
         apt: aptMatch ? aptMatch[1].trim() : "", name: "", index: "", address: "",
-        assigned: "", landlord: "", latestActionDate: "", latestActionDesc: "",
+        assigned: "", landlord: "", latestActionDate: "", latestActionDesc: "", actions: [],
       };
     }
     const c = casesByNumber[caseNum];
@@ -798,18 +804,31 @@ function parseCourtCasesText(text) {
     if (addrMatch && addrMatch[1].trim()) c.address = addrMatch[1].trim();
     if (assgMatch && assgMatch[1].trim()) c.assigned = assgMatch[1].trim();
     if (landlordMatch && landlordMatch[1].trim()) c.landlord = landlordMatch[1].trim();
+    for (const m of actionMatches) {
+      const [mm, dd, yyyy] = m[1].split("/");
+      const isoDate = `${yyyy}-${mm}-${dd}`;
+      const desc = m[2].trim();
+      // Skip an exact date+description repeat — the same action line
+      // shouldn't be logged twice if it somehow appears on more than one
+      // page for this case.
+      if (!c.actions.some(a => a.date === isoDate && a.desc === desc)) {
+        c.actions.push({ date: isoDate, desc });
+      }
+    }
     // Only the first block encountered for a case has its true most-recent
     // action — later blocks for the same case are older continuation
     // pages further down in the document. Stored as ISO (YYYY-MM-DD),
     // matching every other date field in the app, not the report's own
     // MM/DD/YYYY — so fmtDate() and date-sorting elsewhere work on it the
     // same as any other date without special-casing this one field.
-    if (!c.latestActionDate && actionMatch) {
-      const [mm, dd, yyyy] = actionMatch[1].split("/");
+    if (!c.latestActionDate && actionMatches.length > 0) {
+      const [mm, dd, yyyy] = actionMatches[0][1].split("/");
       c.latestActionDate = `${yyyy}-${mm}-${dd}`;
-      c.latestActionDesc = actionMatch[2].trim();
+      c.latestActionDesc = actionMatches[0][2].trim();
     }
   }
+  // Newest action first, matching how every other log in the app displays.
+  Object.values(casesByNumber).forEach(c => c.actions.sort((a, b) => b.date.localeCompare(a.date)));
   return Object.values(casesByNumber);
 }
 
@@ -1521,7 +1540,7 @@ export default function PropertyOpsApp() {
             {tab === "workorders" && <WorkOrdersTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} />}
             {tab === "violations" && <ViolationsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} setData={setData} />}
             {tab === "vendors" && <VendorsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
-            {tab === "court" && <CourtTab data={data} add={add} update={update} remove={remove} tenantName={tenantName} buildingName={buildingName} />}
+            {tab === "court" && <CourtTab data={data} add={add} update={update} remove={remove} setData={setData} tenantName={tenantName} buildingName={buildingName} />}
             {tab === "inspections" && <AppointmentsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} />}
             {tab === "laws" && <LocalLawsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
             {tab === "reminders" && <RemindersTab data={data} add={add} update={update} remove={remove} />}
@@ -1921,7 +1940,6 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
     return da - db;
   };
   const hearingItems = data.violations.filter(v => v.hasHearing && !isViolationClosed(v) && dateDue(v.hearingDate)).sort(byHearingDate);
-  const stipItems = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && dateDue(c.nextPaymentDue));
   const recurringItems = data.appointments.filter(a => !a.completed && a.recurring && dateDue(a.date));
   const appointmentItems = data.appointments.filter(a => !a.completed && !a.recurring && dateDue(a.date));
   // A reminder set for later stays off the dashboard until that date actually
@@ -1949,7 +1967,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
   const totalViolationsDue = violationAgencyGroups.reduce((sum, g) => sum + g.items.length, 0);
-  const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + totalViolationsDue + bossReminderItems.length + hearingItems.length;
+  const totalAttention = rentPanelCount + recurringItems.length + appointmentItems.length + quickNoteItems.length + totalViolationsDue + bossReminderItems.length + hearingItems.length;
 
   // Top stat row + follow-up roster
   const allDated = allDatedItems(data, tenantName, buildingName);
@@ -2344,20 +2362,6 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
 
           <AttentionPanel
             icon={<Gavel size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>Court dates due or overdue <span className="dash-panel-sub">(within 7 days, or no date set — except settled payment plans)</span></>} items={courtItems} tab="court" setTab={setTab}
-            itemKey={c => c.id}
-            renderItem={c => (
-              <>
-                <Flag date={c.nextCourtDate} />
-                <div className="followup-item-main">
-                  <div className="followup-item-name">{tenantName(c.tenantId)} {c.caseNumber && `· Docket #${c.caseNumber}`}</div>
-                </div>
-              </>
-            )}
-          />
-
-          <AttentionPanel
-            icon={<Gavel size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
             label={<>Hearings due or overdue <span className="dash-panel-sub">(within 7 days, or no date set)</span></>} items={hearingItems} tab="violations" setTab={setTab}
             itemKey={v => v.id}
             renderItem={v => (
@@ -2366,21 +2370,6 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
                 <div className="followup-item-main">
                   <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
                   {v.hearingCompany && <div className="followup-item-note">{v.hearingCompany}</div>}
-                </div>
-              </>
-            )}
-          />
-
-          <AttentionPanel
-            icon={<Gavel size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
-            label={<>Stipulation payments due <span className="dash-panel-sub">(within 7 days, or no payment date set)</span></>} items={stipItems} tab="court" setTab={setTab}
-            itemKey={c => c.id}
-            renderItem={c => (
-              <>
-                <Flag date={c.nextPaymentDue} />
-                <div className="followup-item-main">
-                  <div className="followup-item-name">{tenantName(c.tenantId)}</div>
-                  {c.stipulationTerms && <div className="followup-item-note">{c.stipulationTerms}</div>}
                 </div>
               </>
             )}
@@ -4774,15 +4763,14 @@ function CourtCaseImportSection({ data, add, update }) {
     for (const row of preview) {
       if (!row.tenant) continue;
       const existingLog = row.existingCase?.log || [];
-      // Skip adding a duplicate entry if the "latest action" pulled from
-      // this import is identical to what's already the newest thing in the
-      // log — re-importing the same report with nothing new to report
-      // shouldn't pile up repeat entries.
-      const alreadyLogged = existingLog.some(l => l.date === row.latestActionDate && l.note === row.latestActionDesc);
-      const newLog = alreadyLogged ? existingLog : [
-        ...existingLog,
-        { id: uid(), date: row.latestActionDate, note: row.latestActionDesc, source: "attorney report" },
-      ];
+      // Add every action from this import that isn't already in the log —
+      // re-importing the same report shouldn't pile up repeat entries, but
+      // a newer report with additional actions since the last import
+      // should add all of the new ones, not just the single latest one.
+      const newEntries = (row.actions || [])
+        .filter(a => !existingLog.some(l => l.date === a.date && l.note === a.desc))
+        .map(a => ({ id: uid(), date: a.date, note: a.desc, source: "attorney report" }));
+      const newLog = [...existingLog, ...newEntries];
       const fields = {
         tenantId: row.tenant.id, buildingId: row.tenant.buildingId, unitId: row.tenant.unitId,
         caseNumber: row.caseNumber, log: newLog,
@@ -4851,13 +4839,19 @@ function CourtCaseImportSection({ data, add, update }) {
   );
 }
 
-function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
+function CourtTab({ data, add, update, remove, setData, tenantName, buildingName }) {
   const [form, setForm] = useState(null);
   const [view, setView] = useState("active");
   const [checklistText, setChecklistText] = useState({});
   const [detailsFor, setDetailsFor] = useState(null);
   const [showCourtImport, setShowCourtImport] = useState(false);
   const [logForm, setLogForm] = useState({});
+  const [confirmingDeleteAll, setConfirmingDeleteAll] = useState(false);
+
+  const deleteAllCases = () => {
+    setData(d => ({ ...d, courtCases: [] }));
+    setConfirmingDeleteAll(false);
+  };
 
   const addLogEntry = (c) => {
     const entry = logForm[c.id];
@@ -4918,6 +4912,17 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
         <div className="page-actions">
           <PrintButton label="Court Cases" />
           <button className="btn-ghost" onClick={() => setShowCourtImport(s => !s)}><Upload size={14} /> Import from attorney report</button>
+          {data.courtCases.length > 0 && (
+            confirmingDeleteAll ? (
+              <>
+                <span className="row-muted" style={{ fontSize: 12 }}>Delete all {data.courtCases.length} case{data.courtCases.length === 1 ? "" : "s"}? This can't be undone.</span>
+                <button className="btn-ghost" style={{ color: "var(--danger)" }} onClick={deleteAllCases}>Yes, delete all</button>
+                <button className="btn-ghost" onClick={() => setConfirmingDeleteAll(false)}>Cancel</button>
+              </>
+            ) : (
+              <button className="btn-ghost" style={{ color: "var(--danger)" }} onClick={() => setConfirmingDeleteAll(true)}><Trash2 size={14} /> Delete all</button>
+            )
+          )}
           <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", unitId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: CASE_STAGES[0], stipulationTerms: "", nextPaymentDue: "" })}>
             <Plus size={14} /> Add case
           </button>
