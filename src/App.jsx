@@ -3567,134 +3567,159 @@ const IMPORT_TYPES = [
 
 function buildImportDiff(type, parsedEntries, data, buildingId) {
   const unitsForBuilding = data.units.filter(u => u.buildingId === buildingId);
-  // A unit can now have two tenant records at once (the moved-out one, kept
-  // for its own history, plus whoever's there now) — excluding movedOut
-  // here is what makes a future import find and update the CURRENT
-  // occupant instead of accidentally matching the departed one.
-  const tenantByUnit = unitId => data.tenants.find(t => t.unitId === unitId && !t.movedOut);
-  // Fallback for a unit whose only tenant on file is already moved-out —
-  // needed because the same departed name can keep reappearing on future
-  // reports (their unpaid debt still being tracked) with no one new having
-  // moved in yet. Without this, tenantByUnit above (which correctly
-  // excludes moved-out tenants for normal matching) would find no active
-  // tenant here and the import would create a duplicate record for the
-  // same person instead of updating their existing one.
-  const movedOutTenantByUnitAndName = (unitId, name) => data.tenants.find(t =>
-    t.unitId === unitId && t.movedOut && t.name && name &&
-    t.name.trim().toUpperCase() === name.trim().toUpperCase()
-  );
   const hasActiveCourtCase = tenantId => (data.courtCases || []).some(c => c.tenantId === tenantId && !c.archived);
   const changes = [];
-  // Two entries can share the same apt when a unit turned over mid-report
-  // (one line for who's leaving, one for who's now there) — if the unit
-  // doesn't exist yet, both would otherwise independently decide to create
-  // it, producing two separate duplicate unit records instead of one
-  // shared unit. This tracks a placeholder token per apt the first time
-  // it's needed in this batch, so a second entry for the same not-yet-
-  // existing apt reuses that same pending unit instead of creating another.
+  const normalizeName = n => (n || "").trim().toUpperCase();
+  // Two report entries sharing one apt happen routinely — one line for who's
+  // leaving, one for who's now there. Matching entries independently (as an
+  // earlier version of this did) let the wrong entry claim an existing
+  // tenant's record: an unrelated new arrival's name/balance could overwrite
+  // a departing tenant's identity, and the departing tenant's own entry
+  // would then flag that now-overwritten record as moved-out — silently
+  // erasing the real departing tenant and mislabeling the real new arrival.
+  // Grouping by apt and matching by exact name FIRST (claiming that tenant
+  // so no other entry in the same batch can also claim them) fixes this: an
+  // entry only falls back to "this is the existing active tenant, just with
+  // a new name" when it's the one and only unmatched entry for that apt,
+  // matched against the one and only remaining unclaimed active tenant —
+  // the genuine single-name-change turnover case.
+  const entriesByApt = new Map();
+  parsedEntries.forEach(entry => {
+    const key = normalizeName(entry.apt);
+    if (!entriesByApt.has(key)) entriesByApt.set(key, []);
+    entriesByApt.get(key).push(entry);
+  });
+  const claimedTenantIds = new Set();
+  // Shared placeholder for a unit that doesn't exist yet, so multiple
+  // entries for the same not-yet-existing apt attach to one unit once
+  // created on confirm, not a separate duplicate each.
   const pendingNewUnits = new Map();
 
-  parsedEntries.forEach(entry => {
-    const unit = unitsForBuilding.find(u => (u.unitNumber || "").trim().toUpperCase() === (entry.apt || "").trim().toUpperCase());
-    let fields = {};
-    if (type === "arrears") fields = { balance: entry.balance, status: entry.status, name: entry.name };
-    if (type === "directory") fields = { name: entry.name };
-    if (type === "contacts") {
-      if (entry.phone) fields.phone = entry.phone;
-      if (entry.email) fields.email = entry.email;
+  entriesByApt.forEach((entriesForApt, aptKey) => {
+    const unit = unitsForBuilding.find(u => normalizeName(u.unitNumber) === aptKey);
+    const candidates = unit ? data.tenants.filter(t => t.unitId === unit.id && !claimedTenantIds.has(t.id)) : [];
+
+    // Pass 1: exact name match per entry, regardless of active/moved-out
+    // status — this is what lets Maheen's own asterisk-marked line find
+    // and update her own existing record even while Dharmesh's separate,
+    // non-matching line is present in the same batch.
+    const matchedTenant = new Map();
+    entriesForApt.forEach(entry => {
+      const match = candidates.find(t => !claimedTenantIds.has(t.id) && t.name && entry.name && normalizeName(t.name) === normalizeName(entry.name));
+      if (match) { claimedTenantIds.add(match.id); matchedTenant.set(entry, match); }
+    });
+
+    // Pass 2: exactly one leftover entry and exactly one leftover active
+    // tenant means a genuine single turnover with a changed name — anything
+    // more ambiguous than that falls through to "new" rather than guessing.
+    const unmatchedEntries = entriesForApt.filter(e => !matchedTenant.has(e));
+    if (unmatchedEntries.length === 1) {
+      const remainingActive = candidates.filter(t => !t.movedOut && !claimedTenantIds.has(t.id));
+      if (remainingActive.length === 1) {
+        claimedTenantIds.add(remainingActive[0].id);
+        matchedTenant.set(unmatchedEntries[0], remainingActive[0]);
+      }
     }
-    // aging (the 30/60/90+ bucket breakdown) rides along separately from
-    // `fields` — fields feeds the diff/approval preview, which renders each
-    // value with String(v), so an object there would show as "[object
-    // Object]". aging gets applied straight through on confirm instead.
-    const aging = type === "arrears" ? entry.aging : undefined;
-    if (unit) {
-      const tenant = entry.movedOut
-        ? (movedOutTenantByUnitAndName(unit.id, entry.name) || tenantByUnit(unit.id))
-        : tenantByUnit(unit.id);
-      if (tenant) {
-        const diffFields = {};
-        // Compare by actual meaning, not raw string equality — "1500" and
-        // "1500.00" are the same balance, and "JANE DOE" and "JANE DOE "
-        // are the same name; treating them as different would make a
-        // re-import of literally the same report keep surfacing "changes"
-        // that aren't real changes, just formatting drift from an older
-        // import, a manual edit, or trailing whitespace.
-        Object.entries(fields).forEach(([k, v]) => {
-          if (!v) return;
-          const current = tenant[k];
-          const same = k === "balance"
-            ? Math.abs(parseBalance(current) - parseBalance(v)) < 0.005
-            : (current || "").toString().trim() === v.toString().trim();
-          if (!same) diffFields[k] = v;
-        });
-        // A tenant whose only "change" is newly qualifying as moved-out
-        // (report shows the asterisk, they're not flagged that way yet)
-        // still needs to surface here even with zero field-level diffs —
-        // the status flip itself is the meaningful change, not something
-        // diffFields tracks.
-        if (Object.keys(diffFields).length > 0 || (entry.movedOut && !tenant.movedOut)) {
-          const priorStatus = tenant.status || "Current";
-          // Auto-apply by default now — only pause for approval if this
-          // tenant is actively being worked: an open follow-up reminder, or
-          // flagged to call back. Their prior Late/In Arrears status alone
-          // no longer gates this, and neither does an active court case on
-          // its own — a court-case tenant isn't shown on the spreadsheet at
-          // all, so there's no risk of overwriting something visible
-          // mid-conversation the way there is for a follow-up or call-back;
-          // their balance still updates here, and the court tab's balance
-          // pill (pulled live from this same tenant record) reflects it
-          // automatically.
-          const activelyWorking = tenantFollowUps(tenant).length > 0 || tenant.callBack === true;
-          const needsApproval = type === "arrears" && activelyWorking;
-          // If the balance changed, work out whether that's a payment (balance went
-          // down) or a new charge (balance went up), so it can be logged as a dated
-          // ledger entry on confirm instead of just silently becoming a new number.
-          let balanceDelta = 0;
-          if (type === "arrears" && "balance" in diffFields) {
-            balanceDelta = parseBalance(tenant.balance) - parseBalance(diffFields.balance);
-          }
-          const existingFollowUps = tenantFollowUps(tenant);
-          // The report's own legend says "* - MOVED OUT", and balances on
-          // asterisk-marked units stay completely frozen across separate
-          // report snapshots weeks apart — the signature of a departed
-          // tenant's unpaid debt just sitting there, not someone still
-          // accruing rent. Trust the asterisk directly rather than
-          // requiring a name change too: a unit can sit vacant for months
-          // with the same departed name still listed, well before anyone
-          // new moves in to replace them.
-          const nameActuallyChanged = entry.name && tenant.name && entry.name.trim().toUpperCase() !== tenant.name.trim().toUpperCase();
-          changes.push({
-            apt: entry.apt, unitId: unit.id, tenantId: tenant.id, isNew: false,
-            fields: diffFields, before: Object.fromEntries(Object.keys(diffFields).map(k => [k, tenant[k] || "—"])),
-            name: tenant.name || entry.name, movedOut: entry.movedOut, nameActuallyChanged, needsReview: entry.needsReview,
-            priorStatus, needsApproval, approved: !needsApproval, aging, balanceDelta,
-            existingFollowUps, clearFollowUps: false, callBackFlag: tenant.callBack === true,
-            inCourt: hasActiveCourtCase(tenant.id),
+
+    entriesForApt.forEach(entry => {
+      let fields = {};
+      if (type === "arrears") fields = { balance: entry.balance, status: entry.status, name: entry.name };
+      if (type === "directory") fields = { name: entry.name };
+      if (type === "contacts") {
+        if (entry.phone) fields.phone = entry.phone;
+        if (entry.email) fields.email = entry.email;
+      }
+      // aging (the 30/60/90+ bucket breakdown) rides along separately from
+      // `fields` — fields feeds the diff/approval preview, which renders each
+      // value with String(v), so an object there would show as "[object
+      // Object]". aging gets applied straight through on confirm instead.
+      const aging = type === "arrears" ? entry.aging : undefined;
+
+      if (unit) {
+        const tenant = matchedTenant.get(entry);
+        if (tenant) {
+          const diffFields = {};
+          // Compare by actual meaning, not raw string equality — "1500" and
+          // "1500.00" are the same balance, and "JANE DOE" and "JANE DOE "
+          // are the same name; treating them as different would make a
+          // re-import of literally the same report keep surfacing "changes"
+          // that aren't real changes, just formatting drift from an older
+          // import, a manual edit, or trailing whitespace.
+          Object.entries(fields).forEach(([k, v]) => {
+            if (!v) return;
+            const current = tenant[k];
+            const same = k === "balance"
+              ? Math.abs(parseBalance(current) - parseBalance(v)) < 0.005
+              : (current || "").toString().trim() === v.toString().trim();
+            if (!same) diffFields[k] = v;
           });
+          // A tenant whose only "change" is newly qualifying as moved-out
+          // (report shows the asterisk, they're not flagged that way yet)
+          // still needs to surface here even with zero field-level diffs —
+          // the status flip itself is the meaningful change, not something
+          // diffFields tracks.
+          if (Object.keys(diffFields).length > 0 || (entry.movedOut && !tenant.movedOut)) {
+            const priorStatus = tenant.status || "Current";
+            // Auto-apply by default now — only pause for approval if this
+            // tenant is actively being worked: an open follow-up reminder, or
+            // flagged to call back. Their prior Late/In Arrears status alone
+            // no longer gates this, and neither does an active court case on
+            // its own — a court-case tenant isn't shown on the spreadsheet at
+            // all, so there's no risk of overwriting something visible
+            // mid-conversation the way there is for a follow-up or call-back;
+            // their balance still updates here, and the court tab's balance
+            // pill (pulled live from this same tenant record) reflects it
+            // automatically.
+            const activelyWorking = tenantFollowUps(tenant).length > 0 || tenant.callBack === true;
+            const needsApproval = type === "arrears" && activelyWorking;
+            // If the balance changed, work out whether that's a payment (balance went
+            // down) or a new charge (balance went up), so it can be logged as a dated
+            // ledger entry on confirm instead of just silently becoming a new number.
+            let balanceDelta = 0;
+            if (type === "arrears" && "balance" in diffFields) {
+              balanceDelta = parseBalance(tenant.balance) - parseBalance(diffFields.balance);
+            }
+            const existingFollowUps = tenantFollowUps(tenant);
+            // The report's own legend says "* - MOVED OUT", and balances on
+            // asterisk-marked units stay completely frozen across separate
+            // report snapshots weeks apart — the signature of a departed
+            // tenant's unpaid debt just sitting there, not someone still
+            // accruing rent. Trust the asterisk directly rather than
+            // requiring a name change too: a unit can sit vacant for months
+            // with the same departed name still listed, well before anyone
+            // new moves in to replace them.
+            const nameActuallyChanged = entry.name && tenant.name && normalizeName(entry.name) !== normalizeName(tenant.name);
+            changes.push({
+              apt: entry.apt, unitId: unit.id, tenantId: tenant.id, isNew: false,
+              fields: diffFields, before: Object.fromEntries(Object.keys(diffFields).map(k => [k, tenant[k] || "—"])),
+              name: tenant.name || entry.name, movedOut: entry.movedOut, nameActuallyChanged, needsReview: entry.needsReview,
+              priorStatus, needsApproval, approved: !needsApproval, aging, balanceDelta,
+              existingFollowUps, clearFollowUps: false, callBackFlag: tenant.callBack === true,
+              inCourt: hasActiveCourtCase(tenant.id),
+            });
+          }
+        } else {
+          changes.push({ apt: entry.apt, unitId: unit.id, tenantId: null, isNew: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false, aging });
         }
       } else {
-        changes.push({ apt: entry.apt, unitId: unit.id, tenantId: null, isNew: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false, aging });
+        const existingToken = pendingNewUnits.get(aptKey);
+        if (existingToken) {
+          changes.push({ apt: entry.apt, unitId: existingToken, tenantId: null, isNew: true, newUnit: false, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false, aging });
+        } else {
+          const token = "__pending_" + uid();
+          pendingNewUnits.set(aptKey, token);
+          changes.push({ apt: entry.apt, unitId: token, tenantId: null, isNew: true, newUnit: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false, aging });
+        }
       }
-    } else {
-      const aptKey = (entry.apt || "").trim().toUpperCase();
-      const existingToken = pendingNewUnits.get(aptKey);
-      if (existingToken) {
-        changes.push({ apt: entry.apt, unitId: existingToken, tenantId: null, isNew: true, newUnit: false, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false, aging });
-      } else {
-        const token = "__pending_" + uid();
-        pendingNewUnits.set(aptKey, token);
-        changes.push({ apt: entry.apt, unitId: token, tenantId: null, isNew: true, newUnit: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false, aging });
-      }
-    }
+    });
   });
 
   let missing = [];
   if (type === "arrears") {
-    const parsedApts = new Set(parsedEntries.map(e => (e.apt || "").trim().toUpperCase()));
-    const missingUnits = unitsForBuilding.filter(u => !parsedApts.has((u.unitNumber || "").trim().toUpperCase()));
+    const parsedApts = new Set(parsedEntries.map(e => normalizeName(e.apt)));
+    const missingUnits = unitsForBuilding.filter(u => !parsedApts.has(normalizeName(u.unitNumber)));
     for (const u of missingUnits) {
-      const tenant = tenantByUnit(u.id);
+      const tenant = data.tenants.find(t => t.unitId === u.id && !t.movedOut);
       missing.push({ apt: u.unitNumber, name: tenant?.name || "(no tenant on file)" });
       if (!tenant) continue; // nothing to mark paid if no tenant exists on this unit
       const currentBalance = parseBalance(tenant.balance);
