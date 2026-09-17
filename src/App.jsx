@@ -127,7 +127,7 @@ function formatItemsForCopy(items, data) {
     const issueLines = g.issues.join("\n");
     const tenant = data.tenants.find(t => t.unitId === g.unitId);
     const tenantLine = tenant
-      ? `"${tenant.name || "(no name on file)"}": ${tenant.phone || "(no phone on file)"}, please schedule`
+      ? `${tenant.name || "(no name on file)"}: ${tenant.phone || "(no phone on file)"}, please schedule`
       : `(no tenant on file), please schedule`;
     return `${addressLine}\n${issueLines}\n${tenantLine}`;
   });
@@ -1906,7 +1906,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
     .flatMap(t => tenantFollowUps(t).filter(f => f.date && f.date <= today).map(f => ({ tenant: t, followUp: f })))
     .sort((a, b) => (a.followUp.date || "").localeCompare(b.followUp.date || ""));
   const overdueShown = showAllOverdue ? overdueTenants : overdueTenants.slice(0, 5);
-  const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id));
+  const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id && !t.movedOut));
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
   const totalViolationsDue = violationAgencyGroups.reduce((sum, g) => sum + g.items.length, 0);
@@ -2962,6 +2962,7 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
   };
   const [selectedTenantId, setSelectedTenantId] = useState(null);
   const [inCourtSectionOpen, setInCourtSectionOpen] = useState(false);
+  const [movedOutSectionOpen, setMovedOutSectionOpen] = useState(false);
 
   const [newTenant, setNewTenant] = useState(null);
 
@@ -3012,9 +3013,9 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
   // filter can empty a building's visible tenant list, but the building
   // itself stays put with an empty-state message inside.
   const buildingGroups = data.buildings
-    .filter(b => data.tenants.some(t => t.buildingId === b.id && !inCourt(t.id)))
+    .filter(b => data.tenants.some(t => t.buildingId === b.id && !inCourt(t.id) && !t.movedOut))
     .map(b => {
-      const allTenantsHere = data.tenants.filter(t => t.buildingId === b.id && !inCourt(t.id));
+      const allTenantsHere = data.tenants.filter(t => t.buildingId === b.id && !inCourt(t.id) && !t.movedOut);
       const tenantsHere = sortTenants(allTenantsHere.filter(passesFilters));
       const totalOwed = tenantsHere.reduce((sum, t) => sum + parseBalance(t.balance), 0);
       const oldTenants = tenantsHere.filter(t => agingSeverity(t) === 3);
@@ -3024,8 +3025,9 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
 
   const totalOwedAll = buildingGroups.reduce((sum, g) => sum + g.totalOwed, 0);
   const visibleTenants = buildingGroups.flatMap(g => g.tenants);
-  const inCourtTenants = data.tenants.filter(t => inCourt(t.id));
+  const inCourtTenants = data.tenants.filter(t => inCourt(t.id) && !t.movedOut);
   const callBackTenants = rawData.tenants.filter(t => t.callBack);
+  const movedOutTenants = data.tenants.filter(t => t.movedOut);
 
   const toggleBuildingExpanded = (id) => setExpandedBuildings(prev => {
     const next = new Set(prev);
@@ -3484,6 +3486,27 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
         </div>
       )}
 
+      {movedOutTenants.length > 0 && (
+        <div style={{ marginTop: 24 }}>
+          <button
+            className="list-card-head"
+            style={{ width: "100%", background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 8, cursor: "pointer" }}
+            onClick={() => setMovedOutSectionOpen(o => !o)}
+          >
+            {movedOutSectionOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            <div className="list-card-title">Moved Out ({movedOutTenants.length} tenant{movedOutTenants.length === 1 ? "" : "s"})</div>
+            <span className="pill pill-muted">excluded from the total above — kept for reference (deposits, disputes, records)</span>
+          </button>
+          {movedOutSectionOpen && (
+            <div className="list-card" style={{ marginTop: 10 }}>
+              <div className="list-card-body" style={{ padding: "10px 14px 14px" }}>
+                {renderTenantTable(movedOutTenants)}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {excludedBuildingsList.length > 0 && (
         <div style={{ marginTop: 24 }}>
           <button
@@ -3526,7 +3549,11 @@ const IMPORT_TYPES = [
 
 function buildImportDiff(type, parsedEntries, data, buildingId) {
   const unitsForBuilding = data.units.filter(u => u.buildingId === buildingId);
-  const tenantByUnit = unitId => data.tenants.find(t => t.unitId === unitId);
+  // A unit can now have two tenant records at once (the moved-out one, kept
+  // for its own history, plus whoever's there now) — excluding movedOut
+  // here is what makes a future import find and update the CURRENT
+  // occupant instead of accidentally matching the departed one.
+  const tenantByUnit = unitId => data.tenants.find(t => t.unitId === unitId && !t.movedOut);
   const hasActiveCourtCase = tenantId => (data.courtCases || []).some(c => c.tenantId === tenantId && !c.archived);
   const changes = [];
 
@@ -3549,7 +3576,12 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
       if (tenant) {
         const diffFields = {};
         Object.entries(fields).forEach(([k, v]) => { if (v && tenant[k] !== v) diffFields[k] = v; });
-        if (Object.keys(diffFields).length > 0) {
+        // A tenant whose only "change" is newly qualifying as moved-out
+        // (report shows the asterisk, they're not flagged that way yet)
+        // still needs to surface here even with zero field-level diffs —
+        // the status flip itself is the meaningful change, not something
+        // diffFields tracks.
+        if (Object.keys(diffFields).length > 0 || (entry.movedOut && !tenant.movedOut)) {
           const priorStatus = tenant.status || "Current";
           // Auto-apply by default now — only pause for approval if this
           // tenant is actively being worked: an open follow-up reminder, or
@@ -3571,10 +3603,19 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
             balanceDelta = parseBalance(tenant.balance) - parseBalance(diffFields.balance);
           }
           const existingFollowUps = tenantFollowUps(tenant);
+          // The report's own legend says "* - MOVED OUT", and balances on
+          // asterisk-marked units stay completely frozen across separate
+          // report snapshots weeks apart — the signature of a departed
+          // tenant's unpaid debt just sitting there, not someone still
+          // accruing rent. Trust the asterisk directly rather than
+          // requiring a name change too: a unit can sit vacant for months
+          // with the same departed name still listed, well before anyone
+          // new moves in to replace them.
+          const nameActuallyChanged = entry.name && tenant.name && entry.name.trim().toUpperCase() !== tenant.name.trim().toUpperCase();
           changes.push({
             apt: entry.apt, unitId: unit.id, tenantId: tenant.id, isNew: false,
             fields: diffFields, before: Object.fromEntries(Object.keys(diffFields).map(k => [k, tenant[k] || "—"])),
-            name: tenant.name || entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview,
+            name: tenant.name || entry.name, movedOut: entry.movedOut, nameActuallyChanged, needsReview: entry.needsReview,
             priorStatus, needsApproval, approved: !needsApproval, aging, balanceDelta,
             existingFollowUps, clearFollowUps: false,
             inCourt: hasActiveCourtCase(tenant.id),
@@ -3709,6 +3750,32 @@ function ImportBlock({ type, data, setData, buildingName }) {
             notes: [], messageLog: [], payments: [],
             ...(ch.aging ? { aging: ch.aging } : {}),
           });
+        } else if (ch.movedOut && ch.nameActuallyChanged) {
+          // A genuine detected turnover (the report's asterisk plus an
+          // actual name change) — don't overwrite the departing tenant's
+          // identity and history with the new person's. The old tenant
+          // keeps their own name, balance, notes, and payment history
+          // exactly as they were, just flagged moved-out so they drop out
+          // of the main sheet; a brand new record gets created for the
+          // incoming tenant with this import's balance, not anything
+          // carried over from the old one. Same unit as before — the
+          // apartment hasn't changed, only who lives there.
+          next.tenants = next.tenants.map(t => t.id === ch.tenantId ? { ...t, movedOut: true } : t);
+          next.tenants.push({
+            id: uid(), buildingId, unitId: ch.unitId,
+            name: ch.fields.name || ch.name || "", phone: "", email: "",
+            balance: ch.fields.balance || "0.00", status: ch.fields.status || "Current",
+            notes: [], messageLog: [], payments: [], followUps: [],
+            ...(ch.aging ? { aging: ch.aging } : {}),
+          });
+        } else if (ch.movedOut) {
+          // Asterisk present, same name still listed — no one new has
+          // moved in yet, this is just the departed tenant's unpaid debt
+          // still being tracked. Flag moved-out (drops them off the main
+          // sheet, unit reads as vacant) and apply whatever this report
+          // shows for their balance, in case it genuinely changed — no
+          // second record, since there's no new person to create one for.
+          next.tenants = next.tenants.map(t => t.id === ch.tenantId ? { ...t, ...ch.fields, movedOut: true, ...(ch.aging ? { aging: ch.aging } : {}) } : t);
         } else {
           next.tenants = next.tenants.map(t => {
             if (t.id !== ch.tenantId) return t;
@@ -3804,7 +3871,8 @@ function ImportBlock({ type, data, setData, buildingName }) {
               <span className="import-row-name">{c.name}</span>
               {c.isNew && <span className="pill pill-warn">New</span>}
               {c.derivedFromMissing && <span className="pill pill-ok">Not in this report — marking paid up</span>}
-              {c.movedOut && <span className="pill pill-danger">Moved out (flagged)</span>}
+              {c.movedOut && c.nameActuallyChanged && <span className="pill pill-danger" title="Report marks this unit moved-out and the name changed — the old tenant's history stays intact and gets flagged moved-out; a new record is created for the incoming name">Moved out — new tenant record created</span>}
+              {c.movedOut && !c.nameActuallyChanged && <span className="pill pill-warn" title="Report marks this unit moved-out, same name still listed — no one new has moved in yet, this tenant just gets flagged moved-out">Moved out — no replacement yet</span>}
               {c.needsReview && <span className="pill pill-warn">⚠ Review — shared unit, verify names</span>}
               {c.inCourt && <span className="pill pill-danger">In Court</span>}
               <div className="import-row-fields">
@@ -3902,11 +3970,18 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
   const [filter, setFilter] = useState("All");
   const [selected, setSelected] = useState(new Set());
   const [copiedId, setCopiedId] = useState(null);
+  const [expandedRow, setExpandedRow] = useState(null);
+  const [noteFor, setNoteFor] = useState(null);
+  const [noteText, setNoteText] = useState("");
 
   const submit = () => {
     if (!form.description) return;
-    if (form.id) update("workOrders", form.id, form);
-    else add("workOrders", form);
+    const exists = data.workOrders.some(w => w.id === form.id);
+    if (exists) update("workOrders", form.id, form);
+    else {
+      add("workOrders", form); // form.id was pre-generated when the form opened
+      setExpandedRow(form.id); // so photos/notes can be added immediately, no re-opening needed
+    }
     setForm(null);
   };
 
@@ -3933,6 +4008,15 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
     setCopiedId("__batch__");
     setTimeout(() => setCopiedId(null), 1500);
   };
+  const addNote = (w) => {
+    if (!noteText.trim()) return;
+    // timestamp (a plain millisecond number) is what sorting relies on, not
+    // date alone — several notes logged the same day would otherwise have
+    // no reliable order between them. date stays for display (fmtDate
+    // reads that), timestamp never needs to be shown.
+    update("workOrders", w.id, { notes: [...(w.notes || []), { date: todayISO(), timestamp: Date.now(), text: noteText }] });
+    setNoteText(""); setNoteFor(null);
+  };
 
   return (
     <div>
@@ -3945,7 +4029,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
             </button>
           )}
           <PrintButton label="Work Orders" />
-          <button className="btn-primary" onClick={() => setForm({ buildingId: data.buildings[0]?.id || "", unitId: "", vendorId: "", description: "", status: "Open", priority: "Routine", dateOpened: todayISO() })}>
+          <button className="btn-primary" onClick={() => setForm({ id: uid(), buildingId: data.buildings[0]?.id || "", unitId: "", vendorId: "", description: "", status: "Open", priority: "Routine", dateOpened: todayISO() })}>
             <Plus size={14} /> Add work order
           </button>
         </div>
@@ -3995,10 +4079,14 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
       )}
 
       {list.length === 0 && <EmptyState text="No work orders here." />}
-      {list.map(w => (
+      {list.map(w => {
+        const isOpen = expandedRow === w.id;
+        const sortedNotes = [...(w.notes || [])].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        return (
         <div className="list-card" key={w.id}>
-          <div className="list-card-head">
-            <input type="checkbox" checked={selected.has(w.id)} onChange={() => toggleSelected(w.id)} title="Select for batch copy" />
+          <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : w.id)} style={{ cursor: "pointer" }}>
+            {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <input type="checkbox" checked={selected.has(w.id)} onChange={(e) => { e.stopPropagation(); toggleSelected(w.id); }} onClick={(e) => e.stopPropagation()} title="Select for batch copy" />
             {w.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === w.unitId)?.unitNumber || "—"}</span>}
             <div className="list-card-title">{w.description}</div>
             {w.priority !== "Routine" && <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span>}
@@ -4006,23 +4094,38 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
             <span className="pill pill-muted">{buildingName(w.buildingId)}</span>
             {w.vendorId && <span className="pill pill-muted">{vendorName(w.vendorId)}</span>}
             <div className="spacer" />
-            <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={() => copyOne(w)}><ScrollText size={14} /></IconBtn>
-            <IconBtn title="Edit" onClick={() => setForm(w)}><Pencil size={14} /></IconBtn>
-            <IconBtn title="Delete" danger onClick={() => remove("workOrders", w.id)}><Trash2 size={14} /></IconBtn>
+            <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={(e) => { e.stopPropagation(); copyOne(w); }}><ScrollText size={14} /></IconBtn>
+            <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(w); }}><Pencil size={14} /></IconBtn>
+            <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("workOrders", w.id); }}><Trash2 size={14} /></IconBtn>
           </div>
-          <div className="list-card-body">
-            <PhotoUploader
-              photos={w.photos}
-              pathPrefix={`workOrders/${w.id}/photos`}
-              onAdd={(newPhotos) => update("workOrders", w.id, { photos: [...(w.photos || []), ...newPhotos] })}
-              onRemove={(p) => {
-                update("workOrders", w.id, { photos: (w.photos || []).filter(x => x.id !== p.id) });
-                if (p.storagePath) deleteObject(storageRef(storage, p.storagePath)).catch(() => {});
-              }}
-            />
-          </div>
+          {isOpen && (
+            <div className="list-card-body">
+              <PhotoUploader
+                photos={w.photos}
+                pathPrefix={`workOrders/${w.id}/photos`}
+                onAdd={(newPhotos) => update("workOrders", w.id, { photos: [...(w.photos || []), ...newPhotos] })}
+                onRemove={(p) => {
+                  update("workOrders", w.id, { photos: (w.photos || []).filter(x => x.id !== p.id) });
+                  if (p.storagePath) deleteObject(storageRef(storage, p.storagePath)).catch(() => {});
+                }}
+              />
+              <div className="row" style={{ marginTop: 8 }}>
+                <strong>Notes</strong>
+                <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => setNoteFor(noteFor === w.id ? null : w.id)}><Plus size={14} /> Add note</button>
+              </div>
+              {noteFor === w.id && (
+                <div className="inline-form">
+                  <input placeholder="Update…" value={noteText} onChange={e => setNoteText(e.target.value)} onKeyDown={e => e.key === "Enter" && addNote(w)} />
+                  <button className="btn-primary" onClick={() => addNote(w)}>Save</button>
+                </div>
+              )}
+              {sortedNotes.map((n, i) => (
+                <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
+              ))}
+            </div>
+          )}
         </div>
-      ))}
+      );})}
     </div>
   );
 }
@@ -4083,7 +4186,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   const blankForm = (a) => {
     const { agency: ag, otherAgency: oa } = agencyFieldsFor(a);
     return {
-      agency: ag, buildingId: data.buildings[0]?.id || "", unitId: "", violationNumber: "",
+      id: uid(), agency: ag, buildingId: data.buildings[0]?.id || "", unitId: "", violationNumber: "",
       class: "", description: "", dateIssued: todayISO(), cureDeadline: "",
       fineAmount: "", company: "", otherAgency: oa || otherAgencyOptions[0] || "",
       status: statusesFor(ag)[0], vendorId: "",
@@ -4092,14 +4195,22 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
 
   const submit = () => {
     if (!form.violationNumber) return;
-    if (form.id) update("violations", form.id, form);
-    else add("violations", { ...form, photos: [], notes: [] });
+    const exists = data.violations.some(x => x.id === form.id);
+    if (exists) update("violations", form.id, form);
+    else {
+      add("violations", { ...form, photos: [], notes: [] }); // form.id was pre-generated when the form opened
+      setExpandedRow(form.id); // so photos/notes can be added immediately, no re-opening needed
+    }
     setForm(null);
   };
 
   const addNote = (v) => {
     if (!noteText.trim()) return;
-    update("violations", v.id, { notes: [...(v.notes || []), { date: todayISO(), text: noteText }] });
+    // timestamp (a plain millisecond number) is what sorting relies on, not
+    // date alone — several notes logged the same day would otherwise have
+    // no reliable order between them. date stays for display (fmtDate
+    // reads that), timestamp never needs to be shown.
+    update("violations", v.id, { notes: [...(v.notes || []), { date: todayISO(), timestamp: Date.now(), text: noteText }] });
     setNoteText(""); setNoteFor(null);
   };
 
@@ -4253,7 +4364,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
                 <button className="btn-primary" onClick={() => addNote(v)}>Save</button>
               </div>
             )}
-            {(v.notes || []).slice().reverse().map((n, i) => (
+            {[...(v.notes || [])].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).map((n, i) => (
               <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
             ))}
           </div>
