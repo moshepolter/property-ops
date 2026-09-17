@@ -803,7 +803,7 @@ function parseCourtCasesText(text) {
     // break, since reliably knowing where a wrapped sentence continues on
     // the next page isn't something that can be verified without risking
     // garbled results.
-    const segments = block.split(/(?=^\d{1,2}\/\d{1,2}\/\d{2,4}\s)/m);
+    const segments = block.split(/(?=^\d{1,2}\/\d{1,2}\/\d{2,4}\s)|(?<=\.\s)(?=\d{1,2}\/\d{1,2}\/\d{2,4}\s)/m);
     const actionMatches = [];
     for (const seg of segments) {
       const dateMatch = seg.match(/^(\d{1,2}\/\d{1,2}\/(\d{2}|\d{4}))\s+([\s\S]*)/);
@@ -1722,6 +1722,9 @@ function allDatedItems(data, tenantName, buildingName) {
   data.violations.forEach(v => {
     if (v.cureDeadline && !isViolationClosed(v)) {
       items.push({ key: `v-${v.id}`, date: v.cureDeadline, type: `${v.agency} cure deadline`, label: `#${v.violationNumber}`, sub: buildingName(v.buildingId), tab: "violations" });
+    }
+    if (v.hasHearing && v.hearingDate && !isViolationClosed(v)) {
+      items.push({ key: `vh-${v.id}`, date: v.hearingDate, type: `${v.agency} hearing`, label: `#${v.violationNumber}`, sub: buildingName(v.buildingId), tab: "violations" });
     }
   });
   data.courtCases.forEach(c => {
@@ -4913,7 +4916,9 @@ function CourtCaseImportSection({ data, add, update }) {
       const { tenant, reason } = findCourtTenantMatch(c, building, data.tenants, data.units);
       const yearMatch = c.latestActionDate.match(/^(\d{4})-/);
       const suspiciousYear = yearMatch && Math.abs(parseInt(yearMatch[1]) - new Date().getFullYear()) > 3;
-      const existingCase = tenant ? data.courtCases.find(cc => cc.tenantId === tenant.id && !cc.archived) : null;
+      const existingCase = tenant
+        ? data.courtCases.find(cc => cc.tenantId === tenant.id && !cc.archived)
+        : data.courtCases.find(cc => !cc.tenantId && cc.caseNumber === c.caseNumber && !cc.archived);
       return { ...c, building, tenant, matchReason: reason, suspiciousYear, existingCase };
     });
     setPreview(rows);
@@ -4942,7 +4947,13 @@ function CourtCaseImportSection({ data, add, update }) {
     if (!preview) return;
     let created = 0, updated = 0;
     for (const row of preview) {
-      if (!row.tenant) continue;
+      // Even without a matched tenant (a housing-department case like one
+      // filed against "DHPD" rather than a person, or a name that doesn't
+      // line up with anyone on file), still save it as long as the
+      // building matched — visible with its building and details instead
+      // of silently vanishing. Only skip when there's truly nothing to
+      // link it to.
+      if (!row.tenant && !row.building) continue;
       const existingLog = row.existingCase?.log || [];
       // Add every action from this import that isn't already in the log —
       // re-importing the same report shouldn't pile up repeat entries, but
@@ -4953,7 +4964,12 @@ function CourtCaseImportSection({ data, add, update }) {
         .map(a => ({ id: uid(), date: a.date, note: a.desc, source: "attorney report" }));
       const newLog = [...existingLog, ...newEntries];
       const fields = {
-        tenantId: row.tenant.id, buildingId: row.tenant.buildingId, unitId: row.tenant.unitId,
+        tenantId: row.tenant ? row.tenant.id : "",
+        buildingId: row.tenant ? row.tenant.buildingId : row.building.id,
+        unitId: row.tenant ? row.tenant.unitId : "",
+        // The report's own name (e.g. "DHPD") — the only label available
+        // when there's no matched tenant to pull a name from.
+        rawName: row.tenant ? "" : row.name,
         caseNumber: row.caseNumber, log: newLog,
       };
       if (row.existingCase) { update("courtCases", row.existingCase.id, fields); updated++; }
@@ -4966,7 +4982,7 @@ function CourtCaseImportSection({ data, add, update }) {
         created++;
       }
     }
-    setResult({ created, updated, unmatched: preview.filter(r => !r.tenant).length });
+    setResult({ created, updated, unmatched: preview.filter(r => !r.tenant && !r.building).length });
     setPreview(null); setRawText("");
   };
 
@@ -5138,7 +5154,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                 <tbody>
                   {items.map(c => (
                     <tr key={c.id}>
-                      <td>{tenantName(c.tenantId)}</td>
+                      <td>{c.tenantId ? tenantName(c.tenantId) : (c.rawName || "(no tenant matched)")}</td>
                       <td>{c.caseNumber || "—"}</td>
                       <td>{c.nextCourtDate ? fmtDate(c.nextCourtDate) : "not set"}</td>
                       <td>{c.stage || "—"}</td>
@@ -5227,7 +5243,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
           <div className="list-card-head" onClick={() => setDetailsFor(isOpen ? null : c.id)} style={{ cursor: "pointer" }}>
             {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
             {c.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === c.unitId)?.unitNumber || "—"}</span>}
-            <div className="list-card-title">{tenantName(c.tenantId)} {c.caseNumber && `· Docket #${c.caseNumber}`}</div>
+            <div className="list-card-title">{c.tenantId ? tenantName(c.tenantId) : (c.rawName || "(no tenant matched)")} {c.caseNumber && `· Docket #${c.caseNumber}`}</div>
             <span className="pill pill-muted">{buildingName(c.buildingId)}</span>
             {c.nextCourtDate && !c.archived && <Flag date={c.nextCourtDate} label="court date" />}
           </div>
