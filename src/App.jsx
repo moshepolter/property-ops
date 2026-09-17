@@ -1096,7 +1096,7 @@ function LoginScreen() {
   return (
     <div className="login-shell">
       <form className="login-card" onSubmit={submit}>
-        <div className="brand-mark" style={{ marginBottom: 14 }}>PO</div>
+        <div className="brand-mark" style={{ marginBottom: 14 }}>O</div>
         <h1 className="page-title" style={{ marginBottom: 4 }}>Property Ops</h1>
         <p className="hint" style={{ marginBottom: 16 }}>Sign in to continue.</p>
         <Field label="Email"><input type="email" value={email} onChange={e => setEmail(e.target.value)} required /></Field>
@@ -1129,7 +1129,7 @@ function PinLockScreen({ onUnlock, onForgot }) {
   return (
     <div className="login-shell">
       <form className="login-card" onSubmit={submit}>
-        <div className="brand-mark" style={{ marginBottom: 14 }}>PO</div>
+        <div className="brand-mark" style={{ marginBottom: 14 }}>O</div>
         <h1 className="page-title" style={{ marginBottom: 4 }}>Enter PIN</h1>
         <p className="hint" style={{ marginBottom: 16 }}>Quick unlock for this device — you're still signed in.</p>
         <Field label="PIN">
@@ -1444,7 +1444,7 @@ export default function PropertyOpsApp() {
             <Menu size={18} />
           </button>
           <button className="brand" onClick={() => setTab("dashboard")} title="Go to Dashboard">
-            <div className="brand-mark">PO</div>
+            <div className="brand-mark">O</div>
             <div>
               <div className="brand-title">Property Ops</div>
               <div className="brand-sub">{data.buildings.length} buildings tracked</div>
@@ -5378,6 +5378,7 @@ function Styles() {
         --border: #DAD5C8;
         --navy: #1E2A38;
         --accent: #C1622D;
+        --brand-blue: #2F6FE0;
         --ok: #4C7A5E;
         --ok-bg: #E7EFE9;
         --warn: #C1690C;
@@ -5412,9 +5413,9 @@ function Styles() {
       .menu-btn:hover { background: rgba(255,255,255,0.2); }
       .brand { display: flex; align-items: center; gap: 10px; background: none; border: none; padding: 0; cursor: pointer; text-align: left; font: inherit; color: inherit; }
       .brand-mark {
-        width: 34px; height: 34px; border-radius: 6px; background: var(--accent);
-        display: flex; align-items: center; justify-content: center;
-        font-family: Georgia, "Times New Roman", serif; font-weight: 700; font-size: 14px;
+        width: 34px; height: 34px; border-radius: 50%; background: var(--brand-blue);
+        display: flex; align-items: center; justify-content: center; color: #fff;
+        font-family: Georgia, "Times New Roman", serif; font-weight: 700; font-size: 17px;
       }
       .brand-title { font-family: Georgia, "Times New Roman", serif; font-size: 16px; line-height: 1.2; }
       .brand-sub { font-size: 11px; color: #C9CFD6; }
