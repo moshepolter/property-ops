@@ -2962,7 +2962,6 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
   };
   const [selectedTenantId, setSelectedTenantId] = useState(null);
   const [inCourtSectionOpen, setInCourtSectionOpen] = useState(false);
-  const [movedOutSectionOpen, setMovedOutSectionOpen] = useState(false);
 
   const [newTenant, setNewTenant] = useState(null);
 
@@ -3028,6 +3027,14 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
   const inCourtTenants = data.tenants.filter(t => inCourt(t.id) && !t.movedOut);
   const callBackTenants = rawData.tenants.filter(t => t.callBack);
   const movedOutTenants = data.tenants.filter(t => t.movedOut);
+  const movedOutBuildingGroups = data.buildings
+    .filter(b => movedOutTenants.some(t => t.buildingId === b.id))
+    .map(b => {
+      const tenantsHere = movedOutTenants.filter(t => t.buildingId === b.id).sort((a, b2) => compareUnits(unitOf(a), unitOf(b2)));
+      const totalOwed = tenantsHere.reduce((sum, t) => sum + parseBalance(t.balance), 0);
+      return { building: b, tenants: tenantsHere, totalOwed };
+    });
+  const [mainView, setMainView] = useState("current");
 
   const toggleBuildingExpanded = (id) => setExpandedBuildings(prev => {
     const next = new Set(prev);
@@ -3339,9 +3346,18 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
         <button className={`chip ${section === "import" ? "chip-active" : ""}`} onClick={() => setSection("import")}>Import Aged Arrears</button>
       </div>
 
+      {section === "sheet" && (
+        <div className="filter-row">
+          <button className={`chip ${mainView === "current" ? "chip-active" : ""}`} onClick={() => setMainView("current")}>Current</button>
+          <button className={`chip ${mainView === "movedOut" ? "chip-active" : ""}`} onClick={() => setMainView("movedOut")}>
+            Moved Out{movedOutTenants.length > 0 ? ` (${movedOutTenants.length})` : ""}
+          </button>
+        </div>
+      )}
+
       {section === "import" ? (
         <ImportSection data={data} setData={setData} buildingName={buildingName} allowedTypes={["arrears"]} />
-      ) : (
+      ) : mainView === "current" ? (
       <>
       {newTenant && (
         <div className="form-panel">
@@ -3463,9 +3479,9 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
         </>
       )}
       </>
-      )}
+      ) : null}
 
-      {inCourtTenants.length > 0 && (
+      {mainView === "current" && inCourtTenants.length > 0 && (
         <div style={{ marginTop: 24 }}>
           <button
             className="list-card-head"
@@ -3486,25 +3502,27 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
         </div>
       )}
 
-      {movedOutTenants.length > 0 && (
-        <div style={{ marginTop: 24 }}>
-          <button
-            className="list-card-head"
-            style={{ width: "100%", background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 8, cursor: "pointer" }}
-            onClick={() => setMovedOutSectionOpen(o => !o)}
-          >
-            {movedOutSectionOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-            <div className="list-card-title">Moved Out ({movedOutTenants.length} tenant{movedOutTenants.length === 1 ? "" : "s"})</div>
-            <span className="pill pill-muted">excluded from the total above — kept for reference (deposits, disputes, records)</span>
-          </button>
-          {movedOutSectionOpen && (
-            <div className="list-card" style={{ marginTop: 10 }}>
-              <div className="list-card-body" style={{ padding: "10px 14px 14px" }}>
-                {renderTenantTable(movedOutTenants)}
+      {section === "sheet" && mainView === "movedOut" && (
+        movedOutBuildingGroups.length === 0 ? (
+          <EmptyState text="No moved-out tenants yet." />
+        ) : movedOutBuildingGroups.map(g => {
+          const isOpen = expandedBuildings.has("movedOut_" + g.building.id);
+          return (
+            <div className="list-card" key={g.building.id}>
+              <div className="list-card-head" onClick={() => toggleBuildingExpanded("movedOut_" + g.building.id)} style={{ cursor: "pointer" }}>
+                {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                <div className="list-card-title">{shortAddress(g.building.address)}</div>
+                <span className="pill pill-muted">{g.tenants.length} tenant{g.tenants.length === 1 ? "" : "s"}</span>
+                <span className={`pill ${g.totalOwed > 0 ? "pill-warn" : "pill-ok"}`}>${g.totalOwed.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} owed</span>
               </div>
+              {isOpen && (
+                <div className="list-card-body" style={{ padding: "10px 14px 14px" }}>
+                  {renderTenantTable(g.tenants)}
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          );
+        })
       )}
 
       {excludedBuildingsList.length > 0 && (
@@ -3554,6 +3572,17 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
   // here is what makes a future import find and update the CURRENT
   // occupant instead of accidentally matching the departed one.
   const tenantByUnit = unitId => data.tenants.find(t => t.unitId === unitId && !t.movedOut);
+  // Fallback for a unit whose only tenant on file is already moved-out —
+  // needed because the same departed name can keep reappearing on future
+  // reports (their unpaid debt still being tracked) with no one new having
+  // moved in yet. Without this, tenantByUnit above (which correctly
+  // excludes moved-out tenants for normal matching) would find no active
+  // tenant here and the import would create a duplicate record for the
+  // same person instead of updating their existing one.
+  const movedOutTenantByUnitAndName = (unitId, name) => data.tenants.find(t =>
+    t.unitId === unitId && t.movedOut && t.name && name &&
+    t.name.trim().toUpperCase() === name.trim().toUpperCase()
+  );
   const hasActiveCourtCase = tenantId => (data.courtCases || []).some(c => c.tenantId === tenantId && !c.archived);
   const changes = [];
 
@@ -3572,7 +3601,7 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
     // Object]". aging gets applied straight through on confirm instead.
     const aging = type === "arrears" ? entry.aging : undefined;
     if (unit) {
-      const tenant = tenantByUnit(unit.id);
+      const tenant = tenantByUnit(unit.id) || (entry.movedOut ? movedOutTenantByUnitAndName(unit.id, entry.name) : null);
       if (tenant) {
         const diffFields = {};
         Object.entries(fields).forEach(([k, v]) => { if (v && tenant[k] !== v) diffFields[k] = v; });
@@ -3617,7 +3646,7 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
             fields: diffFields, before: Object.fromEntries(Object.keys(diffFields).map(k => [k, tenant[k] || "—"])),
             name: tenant.name || entry.name, movedOut: entry.movedOut, nameActuallyChanged, needsReview: entry.needsReview,
             priorStatus, needsApproval, approved: !needsApproval, aging, balanceDelta,
-            existingFollowUps, clearFollowUps: false,
+            existingFollowUps, clearFollowUps: false, callBackFlag: tenant.callBack === true,
             inCourt: hasActiveCourtCase(tenant.id),
           });
         }
@@ -3647,7 +3676,7 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
         name: tenant.name, needsReview: false,
         priorStatus: tenant.status || "Current", needsApproval: activelyWorking, approved: !activelyWorking,
         aging: undefined, balanceDelta: currentBalance,
-        existingFollowUps: tenantFollowUps(tenant), clearFollowUps: false,
+        existingFollowUps: tenantFollowUps(tenant), clearFollowUps: false, callBackFlag: tenant.callBack === true,
         inCourt: hasActiveCourtCase(tenant.id),
       });
     }
@@ -3888,7 +3917,12 @@ function ImportBlock({ type, data, setData, buildingName }) {
               {c.needsApproval && (
                 <label className="import-approve">
                   <input type="checkbox" checked={c.approved} onChange={() => toggleApprove(i)} />
-                  Already marked "{c.priorStatus}" — update to this?
+                  {[
+                    c.existingFollowUps && c.existingFollowUps.length > 0
+                      ? `You have a follow-up scheduled ${c.existingFollowUps.map(f => fmtDate(f.date) + (f.note ? ` (${f.note})` : "")).join(", ")}`
+                      : null,
+                    c.callBackFlag ? "flagged to call back" : null,
+                  ].filter(Boolean).join(" and ")} — update to this anyway?
                 </label>
               )}
               {c.balanceDelta > 0 && c.existingFollowUps && c.existingFollowUps.length > 0 && (c.fields.status === "Current" || parseBalance(c.fields.balance) <= 0) && (
@@ -5363,14 +5397,14 @@ function Styles() {
       }
       .loading { padding: 40px; text-align: center; color: var(--ink-soft); }
       .topbar {
-        display: flex; align-items: center; justify-content: space-between;
+        display: flex; align-items: center; justify-content: flex-start;
         gap: 16px; padding: 14px 20px; background: var(--navy); color: #fff;
         padding-top: max(14px, env(safe-area-inset-top));
         padding-left: max(20px, env(safe-area-inset-left));
         padding-right: max(20px, env(safe-area-inset-right));
       }
       .topbar-left { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
-      .topbar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+      .topbar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: auto; }
       .menu-btn {
         background: rgba(255,255,255,0.1); border: none; color: #fff; width: 34px; height: 34px;
         border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0;
@@ -5384,7 +5418,7 @@ function Styles() {
       }
       .brand-title { font-family: Georgia, "Times New Roman", serif; font-size: 16px; line-height: 1.2; }
       .brand-sub { font-size: 11px; color: #C9CFD6; }
-      .search-wrap { position: relative; flex: 1; max-width: 440px; margin: 0 auto; }
+      .search-wrap { position: relative; flex: 0 1 440px; margin-left: 16px; }
       .search-icon { position: absolute; left: 10px; top: 9px; color: #9AA3AD; }
       .search-input {
         width: 100%; padding: 8px 32px; border-radius: 6px; border: 1px solid transparent;
@@ -5769,6 +5803,19 @@ function Styles() {
         */
         .spacer { flex: 1 1 100%; height: 0; }
         .list-card-head, .filter-row { row-gap: 6px; }
+        /* The sheet table's Notes preview column is sized for desktop
+           readability (220-320px) — on a phone that alone eats more than
+           half the screen, forcing heavy horizontal scroll just to see
+           Balance or Status. Shrinking it to a short preview on mobile
+           still shows enough to know there's a note, without dominating
+           the layout; tapping it still opens the full text either way. */
+        .sheet-col-notes { min-width: 110px; max-width: 140px; }
+        .sheet-note-text { font-size: 11px; }
+        /* Same idea for the phone cell — the cycle/add buttons add real
+           width on top of the input itself, so give it less room to work
+           with before the row needs to scroll. */
+        .phone-cycle-cell .sheet-input { min-width: 60px; }
+        .phone-cycle-btn { padding: 2px 3px; font-size: 9px; }
       }
       .save-error-banner {
         display: flex; align-items: center; gap: 8px; background: var(--danger-bg); color: var(--danger);
