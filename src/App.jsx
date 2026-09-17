@@ -5041,7 +5041,8 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
   const [view, setView] = useState("active");
   const [checklistText, setChecklistText] = useState({});
   const [detailsFor, setDetailsFor] = useState(null);
-  const [showCourtImport, setShowCourtImport] = useState(false);
+  const [section, setSection] = useState("cases"); // cases | import
+  const [buildingFilter, setBuildingFilter] = useState("All");
   const [logForm, setLogForm] = useState({});
   const [confirmingDeleteAll, setConfirmingDeleteAll] = useState(false);
 
@@ -5084,8 +5085,16 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
 
   const list = data.courtCases
     .filter(c => view === "closed" ? c.archived : !c.archived)
+    .filter(c => buildingFilter === "All" || c.buildingId === buildingFilter)
     .slice()
     .sort((a, b) => (a.nextCourtDate || "9999-99-99").localeCompare(b.nextCourtDate || "9999-99-99"));
+
+  // Buildings that actually have at least one active case, so the filter
+  // row only ever shows relevant options, not every building regardless
+  // of whether it has any cases.
+  const buildingsWithCases = data.buildings.filter(b => data.courtCases.some(c => c.buildingId === b.id && !c.archived));
+  const courtDatesDueCount = data.courtCases.filter(c => !c.archived && (c.result === "Stipulation (payment plan)" ? dateDueStrict(c.nextCourtDate) : dateDue(c.nextCourtDate))).length;
+  const stipDueCount = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && dateDue(c.nextPaymentDue)).length;
 
   const toggleChecklistItem = (c, itemId) => {
     update("courtCases", c.id, {
@@ -5108,7 +5117,6 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
         <h1 className="page-title">Court Cases</h1>
         <div className="page-actions">
           <PrintButton label="Court Cases" />
-          <button className="btn-ghost" onClick={() => setShowCourtImport(s => !s)}><Upload size={14} /> Import from attorney report</button>
           {data.courtCases.length > 0 && (
             confirmingDeleteAll ? (
               <>
@@ -5126,7 +5134,36 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
         </div>
       </div>
 
-      {showCourtImport && <CourtCaseImportSection data={data} add={add} update={update} />}
+      <div className="no-print" style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+        <div className="dash-stat-card" style={{ flex: 1, cursor: "default" }}>
+          <div className="dash-stat-num">{data.courtCases.filter(c => !c.archived).length}</div>
+          <div className="dash-stat-label">Active cases</div>
+        </div>
+        <div className="dash-stat-card" style={{ flex: 1, cursor: "default" }}>
+          <div className="dash-stat-num" style={{ color: courtDatesDueCount > 0 ? "var(--danger)" : undefined }}>{courtDatesDueCount}</div>
+          <div className="dash-stat-label">Court dates coming up</div>
+        </div>
+        <div className="dash-stat-card" style={{ flex: 1, cursor: "default" }}>
+          <div className="dash-stat-num" style={{ color: stipDueCount > 0 ? "var(--warn)" : undefined }}>{stipDueCount}</div>
+          <div className="dash-stat-label">Payments coming up</div>
+        </div>
+      </div>
+
+      <div className="filter-row">
+        <button className={`chip ${section === "cases" ? "chip-active" : ""}`} onClick={() => setSection("cases")}>Cases</button>
+        <button className={`chip ${section === "import" ? "chip-active" : ""}`} onClick={() => setSection("import")}>Import from attorney report</button>
+      </div>
+
+      {section === "cases" && buildingsWithCases.length > 1 && (
+        <div className="filter-row">
+          <button className={`chip ${buildingFilter === "All" ? "chip-active" : ""}`} onClick={() => setBuildingFilter("All")}>All buildings</button>
+          {buildingsWithCases.map(b => (
+            <button key={b.id} className={`chip ${buildingFilter === b.id ? "chip-active" : ""}`} onClick={() => setBuildingFilter(b.id)}>{shortAddress(b.address)}</button>
+          ))}
+        </div>
+      )}
+
+      {section === "import" && <CourtCaseImportSection data={data} add={add} update={update} />}
 
       <div className="print-only">
         <div className="print-header">
@@ -5171,12 +5208,14 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
           <span>Generated {fmtDate(todayISO())}</span>
         </div>
       </div>
+      {section === "cases" && (
       <div className="filter-row">
         <button className={`chip ${view === "active" ? "chip-active" : ""}`} onClick={() => setView("active")}>Active</button>
         <button className={`chip ${view === "closed" ? "chip-active" : ""}`} onClick={() => setView("closed")}>Closed / Archived</button>
       </div>
+      )}
 
-      {form && (
+      {section === "cases" && form && (
         <div className="form-panel">
           <Field label="Building">
             <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value, unitId: "", tenantId: "" })}>
@@ -5232,8 +5271,8 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
         </div>
       )}
 
-      {list.length === 0 && <EmptyState text={view === "active" ? "No open court cases." : "Nothing closed yet."} />}
-      {list.map(c => {
+      {section === "cases" && list.length === 0 && <EmptyState text={view === "active" ? "No open court cases." : "Nothing closed yet."} />}
+      {section === "cases" && list.map(c => {
         const checkedCount = (c.checklist || []).filter(i => i.checked).length;
         const sortedLog = [...(c.log || [])].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
         const latestLog = sortedLog[0];
