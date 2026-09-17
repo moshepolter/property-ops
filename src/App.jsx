@@ -4745,11 +4745,16 @@ function CourtCaseImportSection({ data, add, update }) {
   const [preview, setPreview] = useState(null);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
+  const [pdfStatus, setPdfStatus] = useState(null); // null | "reading" | "error"
+  const [pdfError, setPdfError] = useState("");
+  const [showPaste, setShowPaste] = useState(false);
+  const pdfInputRef = useRef(null);
 
-  const runPreview = () => {
+  const runPreview = (text = undefined) => {
+    const source = text !== undefined ? text : rawText;
     setError(""); setResult(null);
-    if (!rawText.trim()) { setError("Paste the report text first."); return; }
-    const cases = parseCourtCasesText(rawText);
+    if (!source.trim()) { setError("Paste the report text first."); return; }
+    const cases = parseCourtCasesText(source);
     if (cases.length === 0) { setError("No cases found — make sure this is the full report text, including the \"Case#:\" lines."); return; }
     const rows = cases.map(c => {
       const building = findCourtBuildingMatch(c.address, data.buildings);
@@ -4760,6 +4765,25 @@ function CourtCaseImportSection({ data, add, update }) {
       return { ...c, building, tenant, matchReason: reason, suspiciousYear, existingCase };
     });
     setPreview(rows);
+  };
+
+  const handlePdfUpload = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setPdfStatus("reading");
+    setPdfError("");
+    setPreview(null);
+    try {
+      const text = await extractPdfText(file);
+      setRawText(text);
+      setPdfStatus(null);
+      runPreview(text);
+    } catch (err) {
+      setPdfStatus("error");
+      setPdfError("Couldn't read that PDF automatically — use \"paste the text instead\" below (open the PDF, Ctrl/Cmd+A, Ctrl/Cmd+C, then paste).");
+      setShowPaste(true);
+    }
   };
 
   const runImport = () => {
@@ -4798,12 +4822,24 @@ function CourtCaseImportSection({ data, add, update }) {
   return (
     <div className="form-panel" style={{ marginBottom: 16 }}>
       <div style={{ fontWeight: 700, marginBottom: 4 }}>Import from attorney report</div>
-      <p className="hint">Paste the full text of the "Complete Client Status" export. Each case gets matched to a tenant by building address and unit number (falling back to name matching when the report's apt value doesn't line up with a real unit, like a storefront listed as "STORE FRONT"). Review the matches below before confirming — nothing is saved until you click Confirm import.</p>
-      <textarea rows={8} value={rawText} onChange={e => { setRawText(e.target.value); setPreview(null); setResult(null); }} placeholder="Paste the full report text here…" />
-      {error && <div className="hint" style={{ color: "var(--danger)" }}>{error}</div>}
-      <div className="form-actions" style={{ marginTop: 8 }}>
-        <button className="btn-primary" onClick={runPreview} disabled={!rawText.trim()}>Preview</button>
+      <p className="hint">Upload the "Complete Client Status" PDF directly, or paste its text. Each case gets matched to a tenant by building address and unit number (falling back to name matching when the report's apt value doesn't line up with a real unit, like a storefront listed as "STORE FRONT"). Review the matches below before confirming — nothing is saved until you click Confirm import.</p>
+      <div className="form-actions" style={{ marginTop: 4, marginBottom: 8 }}>
+        <button className="btn-primary" type="button" onClick={() => pdfInputRef.current.click()} disabled={pdfStatus === "reading"}>
+          <Upload size={14} /> {pdfStatus === "reading" ? "Reading PDF…" : "Upload attorney report PDF"}
+        </button>
+        <input ref={pdfInputRef} type="file" accept="application/pdf" hidden onChange={handlePdfUpload} />
+        <button className="btn-ghost" type="button" onClick={() => setShowPaste(s => !s)}>{showPaste ? "Hide" : "Or paste the text instead"}</button>
       </div>
+      {pdfStatus === "error" && <div className="hint" style={{ color: "var(--danger)" }}>{pdfError}</div>}
+      {showPaste && (
+        <textarea rows={8} value={rawText} onChange={e => { setRawText(e.target.value); setPreview(null); setResult(null); }} placeholder="Paste the full report text here…" />
+      )}
+      {error && <div className="hint" style={{ color: "var(--danger)" }}>{error}</div>}
+      {showPaste && (
+        <div className="form-actions" style={{ marginTop: 8 }}>
+          <button className="btn-primary" onClick={() => runPreview()} disabled={!rawText.trim()}>Preview</button>
+        </div>
+      )}
       {preview && (
         <div style={{ marginTop: 12 }}>
           {preview.map(row => (
