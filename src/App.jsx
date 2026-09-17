@@ -38,7 +38,7 @@ const storage = getStorage(firebaseApp);
 const functions = getFunctions(firebaseApp);
 import {
   Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat, Home, Phone, Mail,
-  CalendarClock, ScrollText, MessageSquare, Archive as ArchiveIcon, DollarSign,
+  CalendarClock, ScrollText, MessageSquare, Archive as ArchiveIcon, DollarSign, StickyNote,
   Plus, X, Camera, Download, LayoutDashboard, ChevronDown, ChevronRight, ChevronLeft,
   Trash2, Pencil, Upload, Menu, Printer, CheckCircle2
 } from "lucide-react";
@@ -1405,6 +1405,9 @@ export default function PropertyOpsApp() {
       courtCases: data.courtCases.filter(c => (c.caseNumber || "").toLowerCase().includes(q) || tenantName(c.tenantId).toLowerCase().includes(q)),
       buildings: data.buildings.filter(b => (b.address || "").toLowerCase().includes(q)),
       appointments: data.appointments.filter(a => (a.type || "").toLowerCase().includes(q) || (a.notes || "").toLowerCase().includes(q) || buildingName(a.buildingId).toLowerCase().includes(q)),
+      workOrders: data.workOrders.filter(w => (w.description || "").toLowerCase().includes(q) || buildingName(w.buildingId).toLowerCase().includes(q) || (w.status || "").toLowerCase().includes(q)),
+      vendors: data.vendors.filter(v => (v.name || "").toLowerCase().includes(q) || (v.specialty || "").toLowerCase().includes(q) || (v.phone || "").toLowerCase().includes(q)),
+      quickNotes: data.quickNotes.filter(n => (n.text || "").toLowerCase().includes(q) || buildingName(n.buildingId).toLowerCase().includes(q)),
     };
   }, [query, data]);
 
@@ -1461,7 +1464,7 @@ export default function PropertyOpsApp() {
           <Search size={16} className="search-icon" />
           <input
             className="search-input"
-            placeholder="Search tenants, violations, cases, appointments, addresses…"
+            placeholder="Search tenants, violations, work orders, cases, vendors, notes, addresses…"
             value={query}
             onChange={e => setQuery(e.target.value)}
           />
@@ -1534,7 +1537,7 @@ export default function PropertyOpsApp() {
 /* ============================== search ============================== */
 
 function SearchResults({ results, buildingName, onClose, setTab }) {
-  const total = results.tenants.length + results.violations.length + results.courtCases.length + results.buildings.length + results.appointments.length;
+  const total = results.tenants.length + results.violations.length + results.courtCases.length + results.buildings.length + results.appointments.length + results.workOrders.length + results.vendors.length + results.quickNotes.length;
   const goTo = (t) => { setTab(t); onClose(); };
   return (
     <div className="content" style={{ maxWidth: 900, margin: "0 auto" }}>
@@ -1565,6 +1568,15 @@ function SearchResults({ results, buildingName, onClose, setTab }) {
           ))}
         </Section>
       )}
+      {results.workOrders.length > 0 && (
+        <Section icon={<Wrench size={16} />} title="Work Orders" count={results.workOrders.length}>
+          {results.workOrders.map(w => (
+            <button className="row search-result-row" key={w.id} onClick={() => goTo("workorders")}>
+              {w.description} — {buildingName(w.buildingId)} · {w.status}
+            </button>
+          ))}
+        </Section>
+      )}
       {results.courtCases.length > 0 && (
         <Section icon={<Gavel size={16} />} title="Court Cases" count={results.courtCases.length}>
           {results.courtCases.map(c => (
@@ -1579,6 +1591,24 @@ function SearchResults({ results, buildingName, onClose, setTab }) {
           {results.appointments.map(a => (
             <button className="row search-result-row" key={a.id} onClick={() => goTo("inspections")}>
               <strong>{a.type}</strong> — {buildingName(a.buildingId)}{a.date ? ` · ${fmtDate(a.date)}` : ""}{a.completed ? " · Completed" : ""}
+            </button>
+          ))}
+        </Section>
+      )}
+      {results.vendors.length > 0 && (
+        <Section icon={<Wrench size={16} />} title="Vendors" count={results.vendors.length}>
+          {results.vendors.map(v => (
+            <button className="row search-result-row" key={v.id} onClick={() => goTo("vendors")}>
+              <strong>{v.name}</strong>{v.specialty ? ` — ${v.specialty}` : ""}
+            </button>
+          ))}
+        </Section>
+      )}
+      {results.quickNotes.length > 0 && (
+        <Section icon={<StickyNote size={16} />} title="Quick Notes" count={results.quickNotes.length}>
+          {results.quickNotes.map(n => (
+            <button className="row search-result-row" key={n.id} onClick={() => goTo("quicknotes")}>
+              {n.text}{n.buildingId ? ` — ${buildingName(n.buildingId)}` : ""}
             </button>
           ))}
         </Section>
@@ -1801,10 +1831,9 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
     tenants: rawData.tenants.filter(t => mainBuildingIds.has(t.buildingId)),
     violations: rawData.violations.filter(v => mainBuildingIds.has(v.buildingId)),
     workOrders: rawData.workOrders.filter(w => mainBuildingIds.has(w.buildingId)),
-    // A court case with no buildingId at all (unlinked after its building
-    // was deleted) isn't tied to any excluded building either — it stays
-    // visible rather than becoming invisible for an unrelated reason.
-    courtCases: rawData.courtCases.filter(c => !c.buildingId || mainBuildingIds.has(c.buildingId)),
+    // Court cases are never excluded by building owner — for court
+    // purposes, every building is treated as a regular one.
+    courtCases: rawData.courtCases,
     appointments: rawData.appointments.filter(a => mainBuildingIds.has(a.buildingId)),
     localLaws: (rawData.localLaws || []).filter(l => mainBuildingIds.has(l.buildingId)),
   };
@@ -2900,7 +2929,7 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
     buildings: rawData.buildings.filter(b => mainBuildingIds.has(b.id)),
     units: rawData.units.filter(u => mainBuildingIds.has(u.buildingId)),
     tenants: rawData.tenants.filter(t => mainBuildingIds.has(t.buildingId)),
-    courtCases: rawData.courtCases.filter(c => !c.buildingId || mainBuildingIds.has(c.buildingId)),
+    courtCases: rawData.courtCases,
   };
   const [noteFor, setNoteFor] = useState(null);
   const [noteText, setNoteText] = useState("");
@@ -4882,21 +4911,6 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
     update("courtCases", c.id, { checklist: (c.checklist || []).filter(i => i.id !== itemId) });
   };
 
-  // Same logic as the Dashboard's two court panels — a settled payment plan
-  // isn't chasing a court date the same way an open case is, so it only
-  // flags here if the date itself is genuinely close/overdue, not just unset.
-  const courtDateItems = data.courtCases
-    .filter(c => !c.archived && (c.result === "Stipulation (payment plan)" ? dateDueStrict(c.nextCourtDate) : dateDue(c.nextCourtDate)))
-    .sort((a, b) => (a.nextCourtDate || "9999-99-99").localeCompare(b.nextCourtDate || "9999-99-99"));
-  const stipDateItems = data.courtCases
-    .filter(c => !c.archived && c.result === "Stipulation (payment plan)" && dateDue(c.nextPaymentDue))
-    .sort((a, b) => (a.nextPaymentDue || "9999-99-99").localeCompare(b.nextPaymentDue || "9999-99-99"));
-  const jumpToCase = (c) => {
-    setView(c.archived ? "closed" : "active");
-    setDetailsFor(c.id);
-    setTimeout(() => document.getElementById(`court-case-${c.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
-  };
-
   return (
     <div className="court-page">
       <div className="page-head">
@@ -4909,35 +4923,6 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
           </button>
         </div>
       </div>
-
-      {(courtDateItems.length > 0 || stipDateItems.length > 0) && (
-        <div className="court-summary no-print">
-          {courtDateItems.length > 0 && (
-            <div className="court-summary-col">
-              <div className="court-summary-head">Court dates due or overdue <span className="row-muted">({courtDateItems.length})</span></div>
-              {courtDateItems.map(c => (
-                <button key={c.id} className="court-summary-row" onClick={() => jumpToCase(c)}>
-                  <Flag date={c.nextCourtDate} />
-                  <span className="court-summary-name">{tenantName(c.tenantId)}</span>
-                  <span className="row-muted">{buildingName(c.buildingId)}</span>
-                </button>
-              ))}
-            </div>
-          )}
-          {stipDateItems.length > 0 && (
-            <div className="court-summary-col">
-              <div className="court-summary-head">Stipulation payments due <span className="row-muted">({stipDateItems.length})</span></div>
-              {stipDateItems.map(c => (
-                <button key={c.id} className="court-summary-row" onClick={() => jumpToCase(c)}>
-                  <Flag date={c.nextPaymentDue} />
-                  <span className="court-summary-name">{tenantName(c.tenantId)}</span>
-                  <span className="row-muted">{buildingName(c.buildingId)}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {showCourtImport && <CourtCaseImportSection data={data} add={add} update={update} />}
 
@@ -5028,7 +5013,7 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
         const latestLog = sortedLog[0];
         const isOpen = detailsFor === c.id;
         return (
-        <div className="list-card" id={`court-case-${c.id}`} key={c.id}>
+        <div className="list-card" key={c.id}>
           <div className="list-card-head" onClick={() => setDetailsFor(isOpen ? null : c.id)} style={{ cursor: "pointer" }}>
             {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
             {c.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === c.unitId)?.unitNumber || "—"}</span>}
@@ -5587,21 +5572,6 @@ function Styles() {
       .list-card-warn { border-left: 4px solid var(--warn); }
       .list-card-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; cursor: default; flex-wrap: wrap; }
       .list-card-title { font-weight: 600; font-size: 14px; margin-right: 4px; }
-      .court-summary {
-        display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap;
-      }
-      .court-summary-col {
-        flex: 1 1 280px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
-      }
-      .court-summary-head { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
-      .court-summary-row {
-        display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-        background: none; border: none; border-top: 1px solid var(--border); padding: 7px 2px;
-        cursor: pointer; font-family: inherit; font-size: 13px; color: var(--ink);
-      }
-      .court-summary-row:first-of-type { border-top: none; }
-      .court-summary-row:hover { background: #F0EEE7; }
-      .court-summary-name { font-weight: 500; }
       .list-card-body { padding: 0 14px 14px 14px; border-top: 1px solid var(--border); padding-top: 10px; font-size: 13px; }
       .spacer { flex: 1; }
       .pill { font-size: 11px; padding: 3px 8px; border-radius: 20px; background: #EEEAE0; color: var(--ink-soft); white-space: nowrap; }
