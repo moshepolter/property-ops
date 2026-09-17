@@ -246,6 +246,12 @@ function flagFor(dateStr) {
   if (d <= 7) return "soon";
   return null;
 }
+// A missing date counts as "due" too — no date set means go set one, not a
+// free pass. dateDueStrict is for cases where an unset date genuinely isn't
+// urgent (a stip payment with no scheduled date isn't overdue the same way
+// a missing court date is).
+function dateDue(d) { const days = daysUntil(d); return days === null || days <= 7; }
+function dateDueStrict(d) { const days = daysUntil(d); return days !== null && days <= 7; }
 function fmtDate(dateStr) {
   if (!dateStr) return "—";
   const d = new Date(dateStr + "T00:00:00");
@@ -1778,7 +1784,6 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
 }
 
 function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, saveStuck }) {
-  const [rentPanelOpen, setRentPanelOpen] = useState(false);
   const [violationsPanelOpen, setViolationsPanelOpen] = useState(false);
   const [excludedSectionOpen, setExcludedSectionOpen] = useState(false);
   // Buildings marked "Mitch's father" are excluded from every main
@@ -1804,7 +1809,6 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
     localLaws: (rawData.localLaws || []).filter(l => mainBuildingIds.has(l.buildingId)),
   };
   const [testEmailStatus, setTestEmailStatus] = useState(null); // null | "sending" | "sent" | "error"
-  const [showAllOverdue, setShowAllOverdue] = useState(false);
   const [confirmingCleanup, setConfirmingCleanup] = useState(false);
   const [expandedBuilding, setExpandedBuilding] = useState(null);
   const [statOpen, setStatOpen] = useState(null);
@@ -1873,8 +1877,6 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
   const violationAgencyGroups = Object.keys(openViolationsByAgency)
     .sort((a, b) => a.localeCompare(b))
     .map(name => ({ name, items: openViolationsByAgency[name].sort(byCureDeadline) }));
-  const dateDue = (d) => { const days = daysUntil(d); return days === null || days <= 7; };
-  const dateDueStrict = (d) => { const days = daysUntil(d); return days !== null && days <= 7; };
   // A stipulation case's normal resting state is having NO next court date —
   // proceedings are over, all that's left is the payment schedule (tracked
   // separately below). Treating that empty field as "needs attention" would
@@ -1905,7 +1907,6 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
   const followUpEntries = tenantsWithFollowUps
     .flatMap(t => tenantFollowUps(t).filter(f => f.date && f.date <= today).map(f => ({ tenant: t, followUp: f })))
     .sort((a, b) => (a.followUp.date || "").localeCompare(b.followUp.date || ""));
-  const overdueShown = showAllOverdue ? overdueTenants : overdueTenants.slice(0, 5);
   const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id && !t.movedOut));
   // A new tenant created from an arrears import only ever has a name and
   // balance — never phone or email, since the report doesn't carry that.
@@ -1933,7 +1934,6 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
     const hasOpenCourt = data.courtCases.some(c => c.buildingId === b.id && !c.archived);
     return !hasViolation && !hasLateTenant && !hasOpenWO && !hasOpenCourt;
   }).map(b => b.id));
-  const buildingsClearCount = clearBuildingIds.size;
   const rosterEntries = followUpEntries.slice(0, 8);
 
   const exportAllData = () => {
@@ -2186,10 +2186,10 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
           <div className="dash-stat-label">Open court cases</div>
           <div className="dash-stat-sub">Active, not archived</div>
         </button>
-        <button className="dash-stat-card" onClick={() => setStatOpen(s => s === "clear" ? null : "clear")}>
-          <div className="dash-stat-num" style={{ color: "var(--ok)" }}>{buildingsClearCount}</div>
-          <div className="dash-stat-label">Buildings clear</div>
-          <div className="dash-stat-sub">No open issues</div>
+        <button className="dash-stat-card" onClick={() => setStatOpen(s => s === "tenantsdue" ? null : "tenantsdue")}>
+          <div className="dash-stat-num" style={{ color: "var(--danger)" }}>{overdueTenants.length}</div>
+          <div className="dash-stat-label">Tenants due</div>
+          <div className="dash-stat-sub">Not current on rent</div>
         </button>
       </div>
 
@@ -2234,13 +2234,16 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
                 </button>
               ))
           )}
-          {statOpen === "clear" && (
-            data.buildings.filter(b => clearBuildingIds.has(b.id)).length === 0
-              ? <div className="hint">No buildings are fully clear right now.</div>
-              : data.buildings.filter(b => clearBuildingIds.has(b.id)).map(b => (
-                <button key={b.id} className="dash-detail-item" onClick={() => setTab("buildings")}>
-                  <span className="pill pill-ok">All clear</span>
-                  <div className="followup-item-main"><div className="followup-item-name">{shortAddress(b.address)}</div></div>
+          {statOpen === "tenantsdue" && (
+            overdueTenants.length === 0
+              ? <div className="hint">No tenants behind on rent.</div>
+              : overdueTenants.map(t => (
+                <button key={t.id} className="dash-detail-item" onClick={() => setTab("rent")}>
+                  <span className={`pill ${t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status}</span>
+                  <div className="followup-item-main">
+                    <div className="followup-item-name">{t.name}<span className="row-muted"> — {buildingName(t.buildingId)}</span></div>
+                    {t.balance && <div className="followup-item-note">Balance: ${t.balance}</div>}
+                  </div>
                 </button>
               ))
           )}
@@ -2280,37 +2283,6 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
         <div className="all-clear"><CheckCircle2 size={18} /> Nothing needs attention right now.</div>
       ) : (
         <>
-          {overdueTenants.length > 0 && (
-            <div className="followup-panel">
-              <button className="followup-panel-head" onClick={() => setRentPanelOpen(o => !o)}>
-                <Users size={18} className="attention-icon" style={{ color: "var(--danger)" }} />
-                <span className="attention-count">{overdueTenants.length}</span>
-                <span className="attention-label">Tenants not current on rent</span>
-                {rentPanelOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-              </button>
-              {rentPanelOpen && (
-                <div className="followup-panel-body">
-                  <div className="followup-subsection">
-                    {overdueShown.map(t => (
-                      <div className="followup-item" key={t.id}>
-                        <span className={`pill ${t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status}</span>
-                        <div className="followup-item-main">
-                          <div className="followup-item-name">{t.name} <span className="row-muted">— {buildingName(t.buildingId)}</span></div>
-                          {t.balance && <div className="followup-item-note">Balance: ${t.balance}</div>}
-                        </div>
-                      </div>
-                    ))}
-                    {overdueTenants.length > 5 && (
-                      <button className="btn-ghost" style={{ marginTop: 6 }} onClick={() => setShowAllOverdue(s => !s)}>
-                        {showAllOverdue ? "Show fewer" : `Show all ${overdueTenants.length}`}
-                      </button>
-                    )}
-                  </div>
-                  <button className="btn-ghost" style={{ marginTop: 6 }} onClick={() => setTab("rent")}>View in Rent Collection</button>
-                </div>
-              )}
-            </div>
-          )}
 
           {violationAgencyGroups.length > 0 && (
             <div className="followup-panel">
@@ -2961,7 +2933,6 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
     });
   };
   const [selectedTenantId, setSelectedTenantId] = useState(null);
-  const [inCourtSectionOpen, setInCourtSectionOpen] = useState(false);
 
   const [newTenant, setNewTenant] = useState(null);
 
@@ -2996,6 +2967,7 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
   const passesFilters = (t) => {
     if (statusFilter === "Follow-ups") { if (tenantFollowUps(t).length === 0) return false; }
     else if (statusFilter === "61+") { if (agingSeverity(t) < 3) return false; }
+    else if (statusFilter === "In Court") { if (!inCourt(t.id)) return false; }
     else if (statusFilter !== "All" && t.status !== statusFilter) return false;
     return true;
   };
@@ -3012,9 +2984,9 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
   // filter can empty a building's visible tenant list, but the building
   // itself stays put with an empty-state message inside.
   const buildingGroups = data.buildings
-    .filter(b => data.tenants.some(t => t.buildingId === b.id && !inCourt(t.id) && !t.movedOut))
+    .filter(b => data.tenants.some(t => t.buildingId === b.id && !t.movedOut))
     .map(b => {
-      const allTenantsHere = data.tenants.filter(t => t.buildingId === b.id && !inCourt(t.id) && !t.movedOut);
+      const allTenantsHere = data.tenants.filter(t => t.buildingId === b.id && !t.movedOut);
       const tenantsHere = sortTenants(allTenantsHere.filter(passesFilters));
       const totalOwed = tenantsHere.reduce((sum, t) => sum + parseBalance(t.balance), 0);
       const oldTenants = tenantsHere.filter(t => agingSeverity(t) === 3);
@@ -3024,7 +2996,6 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
 
   const totalOwedAll = buildingGroups.reduce((sum, g) => sum + g.totalOwed, 0);
   const visibleTenants = buildingGroups.flatMap(g => g.tenants);
-  const inCourtTenants = data.tenants.filter(t => inCourt(t.id) && !t.movedOut);
   const callBackTenants = rawData.tenants.filter(t => t.callBack);
   const movedOutTenants = data.tenants.filter(t => t.movedOut);
   const movedOutBuildingGroups = data.buildings
@@ -3427,6 +3398,7 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
             <button className={`chip ${statusFilter === "Call Back" ? "chip-active" : ""}`} onClick={() => setStatusFilter("Call Back")}>
               Call Back{callBackTenants.length > 0 ? ` (${callBackTenants.length})` : ""}
             </button>
+            <button className={`chip ${statusFilter === "In Court" ? "chip-active" : ""}`} onClick={() => setStatusFilter("In Court")}>In Court</button>
           </div>
           <div className="filter-row">
             <span className="row-muted" style={{ fontSize: 12, marginRight: 2 }}>Sort:</span>
@@ -3481,26 +3453,7 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
       </>
       ) : null}
 
-      {mainView === "current" && inCourtTenants.length > 0 && (
-        <div style={{ marginTop: 24 }}>
-          <button
-            className="list-card-head"
-            style={{ width: "100%", background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 8, cursor: "pointer" }}
-            onClick={() => setInCourtSectionOpen(o => !o)}
-          >
-            {inCourtSectionOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-            <div className="list-card-title">In Court ({inCourtTenants.length} tenant{inCourtTenants.length === 1 ? "" : "s"})</div>
-            <span className="pill pill-muted">excluded from the total above</span>
-          </button>
-          {inCourtSectionOpen && (
-            <div className="list-card" style={{ marginTop: 10 }}>
-              <div className="list-card-body" style={{ padding: "10px 14px 14px" }}>
-                {renderTenantTable(inCourtTenants)}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+
 
       {section === "sheet" && mainView === "movedOut" && (
         movedOutBuildingGroups.length === 0 ? (
@@ -4929,6 +4882,21 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
     update("courtCases", c.id, { checklist: (c.checklist || []).filter(i => i.id !== itemId) });
   };
 
+  // Same logic as the Dashboard's two court panels — a settled payment plan
+  // isn't chasing a court date the same way an open case is, so it only
+  // flags here if the date itself is genuinely close/overdue, not just unset.
+  const courtDateItems = data.courtCases
+    .filter(c => !c.archived && (c.result === "Stipulation (payment plan)" ? dateDueStrict(c.nextCourtDate) : dateDue(c.nextCourtDate)))
+    .sort((a, b) => (a.nextCourtDate || "9999-99-99").localeCompare(b.nextCourtDate || "9999-99-99"));
+  const stipDateItems = data.courtCases
+    .filter(c => !c.archived && c.result === "Stipulation (payment plan)" && dateDue(c.nextPaymentDue))
+    .sort((a, b) => (a.nextPaymentDue || "9999-99-99").localeCompare(b.nextPaymentDue || "9999-99-99"));
+  const jumpToCase = (c) => {
+    setView(c.archived ? "closed" : "active");
+    setDetailsFor(c.id);
+    setTimeout(() => document.getElementById(`court-case-${c.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
+  };
+
   return (
     <div className="court-page">
       <div className="page-head">
@@ -4941,6 +4909,35 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
           </button>
         </div>
       </div>
+
+      {(courtDateItems.length > 0 || stipDateItems.length > 0) && (
+        <div className="court-summary no-print">
+          {courtDateItems.length > 0 && (
+            <div className="court-summary-col">
+              <div className="court-summary-head">Court dates due or overdue <span className="row-muted">({courtDateItems.length})</span></div>
+              {courtDateItems.map(c => (
+                <button key={c.id} className="court-summary-row" onClick={() => jumpToCase(c)}>
+                  <Flag date={c.nextCourtDate} />
+                  <span className="court-summary-name">{tenantName(c.tenantId)}</span>
+                  <span className="row-muted">{buildingName(c.buildingId)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {stipDateItems.length > 0 && (
+            <div className="court-summary-col">
+              <div className="court-summary-head">Stipulation payments due <span className="row-muted">({stipDateItems.length})</span></div>
+              {stipDateItems.map(c => (
+                <button key={c.id} className="court-summary-row" onClick={() => jumpToCase(c)}>
+                  <Flag date={c.nextPaymentDue} />
+                  <span className="court-summary-name">{tenantName(c.tenantId)}</span>
+                  <span className="row-muted">{buildingName(c.buildingId)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {showCourtImport && <CourtCaseImportSection data={data} add={add} update={update} />}
 
@@ -5031,7 +5028,7 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
         const latestLog = sortedLog[0];
         const isOpen = detailsFor === c.id;
         return (
-        <div className="list-card" key={c.id}>
+        <div className="list-card" id={`court-case-${c.id}`} key={c.id}>
           <div className="list-card-head" onClick={() => setDetailsFor(isOpen ? null : c.id)} style={{ cursor: "pointer" }}>
             {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
             {c.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === c.unitId)?.unitNumber || "—"}</span>}
@@ -5590,6 +5587,21 @@ function Styles() {
       .list-card-warn { border-left: 4px solid var(--warn); }
       .list-card-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; cursor: default; flex-wrap: wrap; }
       .list-card-title { font-weight: 600; font-size: 14px; margin-right: 4px; }
+      .court-summary {
+        display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap;
+      }
+      .court-summary-col {
+        flex: 1 1 280px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+      }
+      .court-summary-head { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+      .court-summary-row {
+        display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+        background: none; border: none; border-top: 1px solid var(--border); padding: 7px 2px;
+        cursor: pointer; font-family: inherit; font-size: 13px; color: var(--ink);
+      }
+      .court-summary-row:first-of-type { border-top: none; }
+      .court-summary-row:hover { background: #F0EEE7; }
+      .court-summary-name { font-weight: 500; }
       .list-card-body { padding: 0 14px 14px 14px; border-top: 1px solid var(--border); padding-top: 10px; font-size: 13px; }
       .spacer { flex: 1; }
       .pill { font-size: 11px; padding: 3px 8px; border-radius: 20px; background: #EEEAE0; color: var(--ink-soft); white-space: nowrap; }
