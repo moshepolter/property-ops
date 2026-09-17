@@ -815,20 +815,20 @@ function parseCourtCasesText(text) {
         c.actions.push({ date: isoDate, desc });
       }
     }
-    // Only the first block encountered for a case has its true most-recent
-    // action — later blocks for the same case are older continuation
-    // pages further down in the document. Stored as ISO (YYYY-MM-DD),
-    // matching every other date field in the app, not the report's own
-    // MM/DD/YYYY — so fmtDate() and date-sorting elsewhere work on it the
-    // same as any other date without special-casing this one field.
-    if (!c.latestActionDate && actionMatches.length > 0) {
-      const [mm, dd, yyyy] = actionMatches[0][1].split("/");
-      c.latestActionDate = `${yyyy}-${mm}-${dd}`;
-      c.latestActionDesc = actionMatches[0][2].trim();
-    }
   }
   // Newest action first, matching how every other log in the app displays.
-  Object.values(casesByNumber).forEach(c => c.actions.sort((a, b) => b.date.localeCompare(a.date)));
+  // latestActionDate/Desc are derived from this actual sort, not from
+  // whichever block happened to be processed first — a case's actions
+  // aren't reliably newest-first within a single page, so trusting "the
+  // first match found" could point at an older action instead of the
+  // genuinely most recent one.
+  Object.values(casesByNumber).forEach(c => {
+    c.actions.sort((a, b) => b.date.localeCompare(a.date));
+    if (c.actions.length > 0) {
+      c.latestActionDate = c.actions[0].date;
+      c.latestActionDesc = c.actions[0].desc;
+    }
+  });
   return Object.values(casesByNumber);
 }
 
@@ -1397,7 +1397,6 @@ export default function PropertyOpsApp() {
   const remove = (col, id) => setData(d => ({ ...d, [col]: d[col].filter(x => x.id !== id) }));
 
   const buildingName = (id) => shortAddress(data.buildings.find(b => b.id === id)?.address) || "—";
-  const unitLabel = (id) => { const u = data.units.find(x => x.id === id); return u ? u.unitNumber : "—"; };
   const vendorName = (id) => data.vendors.find(v => v.id === id)?.name || "—";
   const tenantName = (id) => data.tenants.find(t => t.id === id)?.name || "—";
 
@@ -1857,7 +1856,6 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
     localLaws: (rawData.localLaws || []).filter(l => mainBuildingIds.has(l.buildingId)),
   };
   const [testEmailStatus, setTestEmailStatus] = useState(null); // null | "sending" | "sent" | "error"
-  const [confirmingCleanup, setConfirmingCleanup] = useState(false);
   const [expandedBuilding, setExpandedBuilding] = useState(null);
   const [statOpen, setStatOpen] = useState(null);
   const [quickNoteText, setQuickNoteText] = useState("");
@@ -1877,14 +1875,6 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
     : null;
   const daysSinceArrearsImport = lastArrearsImport ? daysUntil(lastArrearsImport.date) !== null ? -daysUntil(lastArrearsImport.date) : null : null;
   const showArrearsNudge = data.tenants.length > 0 && (!lastArrearsImport || (daysSinceArrearsImport !== null && daysSinceArrearsImport >= 7));
-
-  const cleanupAllEmptyUnits = () => {
-    setData(d => ({
-      ...d,
-      units: d.units.filter(u => d.tenants.some(t => t.unitId === u.id)),
-    }));
-    setConfirmingCleanup(false);
-  };
 
   // Tenants with a follow-up already scheduled show up under "to follow up" —
   // no need to also flag them under "not current on rent", that's just noise.
@@ -2126,8 +2116,13 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
       </div>
 
       <div className="print-only">
-        <h1 className="print-title">Property Overview</h1>
-        <div className="print-subtitle">As of {fmtDate(todayISO())}</div>
+        <div className="print-header">
+          <div className="print-mark">O</div>
+          <div className="print-header-text">
+            <h1 className="print-title">Property Overview</h1>
+            <div className="print-subtitle">As of {fmtDate(todayISO())}</div>
+          </div>
+        </div>
 
         <div className="print-stats-row">
           <div className="print-stat"><div className="print-stat-num">{overdueCount}</div><div>Overdue</div></div>
@@ -2194,6 +2189,10 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
               ))}
             </tbody>
           </table>
+        </div>
+        <div className="print-footer">
+          <span>Property Ops — Property Overview</span>
+          <span>Generated {fmtDate(todayISO())}</span>
         </div>
       </div>
 
@@ -2572,6 +2571,46 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
   const [section, setSection] = useState("buildings");
   const [pendingDelete, setPendingDelete] = useState(null);
   const fileRef = useRef(null);
+  const [confirmingMerge, setConfirmingMerge] = useState(false);
+
+  // Units sharing the same building + unit number are duplicates — this can
+  // happen when the same apartment appeared as two separate report entries
+  // (a departing tenant's line and a new arrival's line) before matching
+  // logic recognized they belonged to one unit, so each independently
+  // created its own unit record.
+  const duplicateUnitGroups = useMemo(() => {
+    const byKey = new Map();
+    data.units.forEach(u => {
+      const key = u.buildingId + "|" + (u.unitNumber || "").trim().toUpperCase();
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(u);
+    });
+    return [...byKey.values()].filter(group => group.length > 1);
+  }, [data.units]);
+  const duplicateUnitCount = duplicateUnitGroups.reduce((sum, g) => sum + (g.length - 1), 0);
+
+  const mergeDuplicateUnits = () => {
+    setData(d => {
+      let units = [...d.units], tenants = [...d.tenants], violations = [...d.violations],
+        workOrders = [...d.workOrders], courtCases = [...d.courtCases];
+      duplicateUnitGroups.forEach(group => {
+        // Keep whichever unit in the group has the most tenants attached —
+        // the one most likely to be the "real" one everything should have
+        // been pointing at all along. Ties keep the first.
+        const keeper = group.slice().sort((a, b) =>
+          tenants.filter(t => t.unitId === b.id).length - tenants.filter(t => t.unitId === a.id).length
+        )[0];
+        const duplicateIds = new Set(group.filter(u => u.id !== keeper.id).map(u => u.id));
+        tenants = tenants.map(t => duplicateIds.has(t.unitId) ? { ...t, unitId: keeper.id } : t);
+        violations = violations.map(v => duplicateIds.has(v.unitId) ? { ...v, unitId: keeper.id } : v);
+        workOrders = workOrders.map(w => duplicateIds.has(w.unitId) ? { ...w, unitId: keeper.id } : w);
+        courtCases = courtCases.map(c => duplicateIds.has(c.unitId) ? { ...c, unitId: keeper.id } : c);
+        units = units.filter(u => !duplicateIds.has(u.id));
+      });
+      return { ...d, units, tenants, violations, workOrders, courtCases };
+    });
+    setConfirmingMerge(false);
+  };
 
   const deleteBuilding = (buildingId) => {
     setData(d => ({
@@ -2685,6 +2724,32 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
         </div>
       </div>
       <p className="hint">CSV columns recognized: address, unit, tenant, phone, email, balance, status.</p>
+
+      {duplicateUnitGroups.length > 0 && (
+        <div className="form-panel" style={{ borderColor: "var(--danger)", marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>
+            {duplicateUnitCount} duplicate unit{duplicateUnitCount === 1 ? "" : "s"} found across {duplicateUnitGroups.length} apartment{duplicateUnitGroups.length === 1 ? "" : "s"}
+          </div>
+          <p className="hint">
+            Same unit number showing up as two separate units — usually from an import that ran before a matching fix went in.
+            Merging keeps whichever copy has more tenants attached, moves every tenant, violation, work order, and court case from the other copy onto it, then removes the duplicate.
+          </p>
+          <div style={{ marginBottom: 8 }}>
+            {duplicateUnitGroups.map((group, i) => (
+              <div key={i} className="row row-muted">{buildingName(group[0].buildingId)} — Apt {group[0].unitNumber || "—"} ({group.length} copies)</div>
+            ))}
+          </div>
+          {confirmingMerge ? (
+            <div className="form-actions">
+              <span className="row-muted" style={{ fontSize: 12 }}>Merge all {duplicateUnitCount} duplicate{duplicateUnitCount === 1 ? "" : "s"} now? This can't be undone.</span>
+              <button className="btn-primary" style={{ background: "var(--danger)", borderColor: "var(--danger)" }} onClick={mergeDuplicateUnits}>Yes, merge</button>
+              <button className="btn-ghost" onClick={() => setConfirmingMerge(false)}>Cancel</button>
+            </div>
+          ) : (
+            <button className="btn-primary" style={{ background: "var(--danger)", borderColor: "var(--danger)" }} onClick={() => setConfirmingMerge(true)}>Merge duplicate units</button>
+          )}
+        </div>
+      )}
 
       <div className="filter-row">
         <button className={`chip ${section === "buildings" ? "chip-active" : ""}`} onClick={() => setSection("buildings")}>Buildings</button>
@@ -2935,9 +3000,9 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
 
   const inCourt = (tenantId) => (data.courtCases || []).some(c => c.tenantId === tenantId && !c.archived);
   // Creates a linked court case for the tenant — the moment one exists,
-  // inCourt(t.id) becomes true, which is what actually moves them out of
-  // the main sheet and into the In Court section below; there's no
-  // separate flag to keep in sync with the case itself.
+  // inCourt(t.id) becomes true, which is what shows the red "In Court" pill
+  // on their row and makes them show up under the In Court filter; there's
+  // no separate flag to keep in sync with the case itself.
   const markInCourt = (tenantId) => {
     if (inCourt(tenantId)) return;
     const t = data.tenants.find(x => x.id === tenantId);
@@ -3194,7 +3259,11 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
                     active={!!t.callBack}
                     onClick={() => update("tenants", t.id, { callBack: !t.callBack })}
                   ><Phone size={14} /></IconBtn>
-                  <IconBtn title="Mark in court — moves to the In Court section below and creates a linked court case" onClick={() => markInCourt(t.id)}><Gavel size={14} /></IconBtn>
+                  <IconBtn
+                    title={inCourt(t.id) ? "Already in court — a case is already linked to this tenant" : "Mark in court — creates a linked court case"}
+                    active={inCourt(t.id)}
+                    onClick={() => markInCourt(t.id)}
+                  ><Gavel size={14} /></IconBtn>
                   <IconBtn title="Delete" danger onClick={() => {
                     if (inCourt(t.id) && !window.confirm(`${t.name || "This tenant"} has an open court case. Delete anyway? The case will stay but lose its link to this tenant.`)) return;
                     remove("tenants", t.id);
@@ -3299,8 +3368,18 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
       </div>
 
       <div className="print-only">
-        <h1 className="print-title">Rent Ledger</h1>
-        <div className="print-subtitle">As of {fmtDate(todayISO())}</div>
+        <div className="print-header">
+          <div className="print-mark">O</div>
+          <div className="print-header-text">
+            <h1 className="print-title">Rent Ledger</h1>
+            <div className="print-subtitle">As of {fmtDate(todayISO())}</div>
+          </div>
+        </div>
+        <div className="print-stats-row">
+          <div className="print-stat"><div className="print-stat-num">{buildingGroups.length}</div><div>Buildings</div></div>
+          <div className="print-stat"><div className="print-stat-num">{buildingGroups.reduce((sum, g) => sum + g.tenants.length, 0)}</div><div>Tenants</div></div>
+          <div className="print-stat"><div className="print-stat-num">${totalOwedAll.toLocaleString("en-US", { maximumFractionDigits: 0 })}</div><div>Total owed</div></div>
+        </div>
         {buildingGroups.map(g => (
           <div className="print-section" key={g.building.id}>
             <div className="print-section-head">
@@ -3328,6 +3407,10 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
           </div>
         ))}
         <div className="print-grand-total">Total owed across all buildings: ${totalOwedAll.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+        <div className="print-footer">
+          <span>Property Ops — Rent Ledger</span>
+          <span>Generated {fmtDate(todayISO())}</span>
+        </div>
       </div>
 
       <div className="filter-row">
@@ -4446,7 +4529,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   let list = agency === "All" ? [] : filterAndSort(agency);
 
   return (
-    <div>
+    <div className="violations-page">
       <div className="page-head">
         <h1 className="page-title">Violations</h1>
         <div className="page-actions">
@@ -4461,6 +4544,56 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           <button className="btn-primary" onClick={() => setForm(blankForm(agency === "All" ? "HPD" : agency))}>
             <Plus size={14} /> Add violation
           </button>
+        </div>
+      </div>
+
+      <div className="print-only">
+        <div className="print-header">
+          <div className="print-mark">O</div>
+          <div className="print-header-text">
+            <h1 className="print-title">Violations Report — {view === "closed" ? (agency === "DSNY" ? "Paid" : "Closed") : "Active / Due"}</h1>
+            <div className="print-subtitle">As of {fmtDate(todayISO())}</div>
+          </div>
+        </div>
+        <div className="print-stats-row">
+          <div className="print-stat"><div className="print-stat-num">{agencyTabs.filter(a => a !== "All").reduce((sum, a) => sum + filterAndSort(a).length, 0)}</div><div>Total {view === "closed" ? "resolved" : "open"}</div></div>
+          {agencyTabs.filter(a => a !== "All").map(a => (
+            <div className="print-stat" key={a}><div className="print-stat-num">{filterAndSort(a).length}</div><div>{a}</div></div>
+          ))}
+        </div>
+        {agencyTabs.filter(a => a !== "All").map(a => {
+          const items = filterAndSort(a);
+          if (items.length === 0) return null;
+          return (
+            <div className="print-section" key={a}>
+              <div className="print-section-head">
+                <span>{a}</span>
+                <span>{items.length} violation{items.length === 1 ? "" : "s"}</span>
+              </div>
+              <table className="print-table">
+                <thead>
+                  <tr><th>Building</th><th>Unit</th><th>Violation #</th><th>Class</th><th>Issued</th><th>{view === "closed" ? "Resolved" : "Cure deadline"}</th><th>Status</th></tr>
+                </thead>
+                <tbody>
+                  {items.map(v => (
+                    <tr key={v.id}>
+                      <td>{buildingName(v.buildingId)}</td>
+                      <td>{data.units.find(u => u.id === v.unitId)?.unitNumber || "—"}</td>
+                      <td>#{v.violationNumber || "—"}</td>
+                      <td>{v.class || "—"}</td>
+                      <td>{v.dateIssued ? fmtDate(v.dateIssued) : "—"}</td>
+                      <td>{v.cureDeadline ? fmtDate(v.cureDeadline) : "not set"}</td>
+                      <td>{v.status}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        })}
+        <div className="print-footer">
+          <span>Property Ops — Violations Report</span>
+          <span>Generated {fmtDate(todayISO())}</span>
         </div>
       </div>
       <p className="hint">CSV columns recognized: agency, otherAgency, violationNumber, address, class, description, dateIssued, cureDeadline, fineAmount, company, status.</p>
@@ -4695,10 +4828,17 @@ function findCourtTenantMatch(courtCase, building, tenants, units) {
   if (!building) return { tenant: null, reason: "no building match" };
   const buildingTenants = tenants.filter(t => t.buildingId === building.id);
   const naApt = normalizeAptForMatch(courtCase.apt);
-  const byApt = buildingTenants.find(t => {
+  const unitMatches = buildingTenants.filter(t => {
     const unit = units.find(u => u.id === t.unitId);
     return unit && normalizeAptForMatch(unit.unitNumber) === naApt;
   });
+  // A unit can have both an active tenant and an already-moved-out one on
+  // file — prefer whoever's actually there now, since a court case is far
+  // more often against the current occupant than someone who's already
+  // left. Only fall back to a moved-out tenant when there's no active one
+  // on that unit, since an ongoing case can genuinely still be against
+  // someone who's since moved out.
+  const byApt = unitMatches.find(t => !t.movedOut) || unitMatches[0] || null;
   if (byApt) return { tenant: byApt, reason: "matched by unit number" };
   const courtWords = normalizeNameForMatch(courtCase.name);
   if (courtWords.length === 0) return { tenant: null, reason: "no unit match, no usable name" };
@@ -4932,23 +5072,47 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
       {showCourtImport && <CourtCaseImportSection data={data} add={add} update={update} />}
 
       <div className="print-only">
-        <h1 className="print-title">Court Cases — {view === "closed" ? "Closed / Archived" : "Active"}</h1>
-        <div className="print-subtitle">As of {fmtDate(todayISO())}</div>
-        <table className="print-table">
-          <thead><tr><th>Building</th><th>Tenant</th><th>Docket #</th><th>Next court date</th><th>Stage</th><th>Result</th></tr></thead>
-          <tbody>
-            {list.map(c => (
-              <tr key={c.id}>
-                <td>{buildingName(c.buildingId)}</td>
-                <td>{tenantName(c.tenantId)}</td>
-                <td>{c.caseNumber || "—"}</td>
-                <td>{c.nextCourtDate ? fmtDate(c.nextCourtDate) : "not set"}</td>
-                <td>{c.stage || "—"}</td>
-                <td>{c.result || "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="print-header">
+          <div className="print-mark">O</div>
+          <div className="print-header-text">
+            <h1 className="print-title">Court Cases — {view === "closed" ? "Closed / Archived" : "Active"}</h1>
+            <div className="print-subtitle">As of {fmtDate(todayISO())}</div>
+          </div>
+        </div>
+        <div className="print-stats-row">
+          <div className="print-stat"><div className="print-stat-num">{list.length}</div><div>Total cases</div></div>
+          <div className="print-stat"><div className="print-stat-num">{list.filter(c => c.nextCourtDate).length}</div><div>With a court date</div></div>
+          <div className="print-stat"><div className="print-stat-num">{list.filter(c => c.result === "Stipulation (payment plan)").length}</div><div>Payment plans</div></div>
+        </div>
+        {[...new Set(list.map(c => c.buildingId))].map(bId => {
+          const items = list.filter(c => c.buildingId === bId);
+          return (
+            <div className="print-section" key={bId || "unknown"}>
+              <div className="print-section-head">
+                <span>{buildingName(bId)}</span>
+                <span>{items.length} case{items.length === 1 ? "" : "s"}</span>
+              </div>
+              <table className="print-table">
+                <thead><tr><th>Tenant</th><th>Docket #</th><th>Next court date</th><th>Stage</th><th>Result</th></tr></thead>
+                <tbody>
+                  {items.map(c => (
+                    <tr key={c.id}>
+                      <td>{tenantName(c.tenantId)}</td>
+                      <td>{c.caseNumber || "—"}</td>
+                      <td>{c.nextCourtDate ? fmtDate(c.nextCourtDate) : "not set"}</td>
+                      <td>{c.stage || "—"}</td>
+                      <td>{c.result || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        })}
+        <div className="print-footer">
+          <span>Property Ops — Court Cases</span>
+          <span>Generated {fmtDate(todayISO())}</span>
+        </div>
       </div>
       <div className="filter-row">
         <button className={`chip ${view === "active" ? "chip-active" : ""}`} onClick={() => setView("active")}>Active</button>
@@ -4978,7 +5142,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                 .sort((a, b) => compareUnits(data.units.find(u => u.id === a.unitId)?.unitNumber, data.units.find(u => u.id === b.unitId)?.unitNumber))
                 .map(t => (
                   <option key={t.id} value={t.id}>
-                    {data.units.find(u => u.id === t.unitId)?.unitNumber || "—"} — {t.name || "(no name on file)"}
+                    {data.units.find(u => u.id === t.unitId)?.unitNumber || "—"} — {t.name || "(no name on file)"}{t.movedOut ? " (moved out)" : ""}
                   </option>
                 ))}
             </select>
@@ -5877,7 +6041,7 @@ function Styles() {
            touch target, easy to mis-tap Delete instead of Edit on a real phone. */
         .icon-btn { min-width: 40px; min-height: 40px; justify-content: center; }
         .btn-primary, .btn-ghost { min-height: 40px; }
-        .page-actions, .form-actions { gap: 8px; }
+        .page-actions, .form-actions { gap: 8px; flex-wrap: wrap; }
         .stat-value { font-size: 24px; }
         .sheet-input, select.sheet-input { padding: 10px 8px; }
         /* .spacer uses flex:1 to push trailing buttons (Mark paid, edit,
@@ -5966,25 +6130,55 @@ function Styles() {
            and replaced with a plain, purpose-built table report instead. */
         .dashboard-page > :not(.print-only):not(.page-head),
         .rent-page > :not(.print-only):not(.page-head),
-        .court-page > :not(.print-only):not(.page-head) {
+        .court-page > :not(.print-only):not(.page-head),
+        .violations-page > :not(.print-only):not(.page-head) {
           display: none !important;
         }
         .print-only { display: block !important; }
-        .print-title { font-size: 22px; font-weight: 700; margin: 0 0 2px; color: #000; }
-        .print-subtitle { font-size: 12px; color: #444; margin-bottom: 16px; }
-        .print-stats-row { display: flex; gap: 16px; margin-bottom: 18px; }
-        .print-stat { border: 1px solid #999; border-radius: 6px; padding: 8px 14px; text-align: center; min-width: 90px; }
-        .print-stat-num { font-size: 20px; font-weight: 700; }
-        .print-section { margin-bottom: 18px; break-inside: avoid; }
-        .print-section-head {
-          display: flex; justify-content: space-between; font-weight: 700; font-size: 13px;
-          border-bottom: 2px solid #000; padding-bottom: 4px; margin-bottom: 6px;
+        @page { margin: 0.6in 0.55in; }
+        .print-header {
+          display: flex; align-items: center; gap: 10px; margin-bottom: 4px;
+          padding-bottom: 10px; border-bottom: 3px solid var(--brand-blue);
         }
-        .print-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-        .print-table th, .print-table td { border: 1px solid #999; padding: 5px 8px; text-align: left; }
-        .print-table th { background: #eee; }
-        .print-table-amount { text-align: right; font-variant-numeric: tabular-nums; }
-        .print-grand-total { font-weight: 700; font-size: 14px; text-align: right; border-top: 2px solid #000; padding-top: 8px; }
+        .print-mark {
+          width: 30px; height: 30px; border-radius: 50%; background: var(--brand-blue); color: #fff;
+          display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+          font-family: Georgia, "Times New Roman", serif; font-weight: 700; font-size: 15px;
+        }
+        .print-header-text { flex: 1; }
+        .print-title { font-size: 20px; font-weight: 700; margin: 0; color: #000; line-height: 1.2; }
+        .print-subtitle { font-size: 11px; color: #666; margin-top: 1px; }
+        .print-stats-row { display: flex; gap: 12px; margin: 16px 0 20px; }
+        .print-stat {
+          flex: 1; border: 1px solid #ddd; border-top: 3px solid var(--brand-blue); border-radius: 4px;
+          padding: 10px 14px; text-align: center; background: #fafafa;
+        }
+        .print-stat-num { font-size: 22px; font-weight: 700; color: #000; font-variant-numeric: tabular-nums; }
+        .print-stat div:last-child { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.03em; margin-top: 2px; }
+        .print-section { margin-bottom: 20px; break-inside: avoid; }
+        .print-section-head {
+          display: flex; justify-content: space-between; align-items: baseline; font-weight: 700; font-size: 12.5px;
+          color: #fff; background: var(--navy); padding: 6px 10px; border-radius: 3px 3px 0 0; margin-bottom: 0;
+          -webkit-print-color-adjust: exact; print-color-adjust: exact;
+        }
+        .print-section-head span:last-child { font-weight: 500; font-size: 11px; opacity: 0.85; }
+        .print-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+        .print-table th, .print-table td { border: 1px solid #ddd; padding: 6px 9px; text-align: left; }
+        .print-table th {
+          background: #eef2f8; color: #000; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.02em;
+          -webkit-print-color-adjust: exact; print-color-adjust: exact;
+        }
+        .print-table tbody tr:nth-child(even) td { background: #f7f8fa; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        .print-table-amount { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+        .print-grand-total {
+          font-weight: 700; font-size: 13.5px; text-align: right; border-top: 3px solid var(--navy);
+          padding-top: 10px; margin-top: 4px; color: #000;
+        }
+        .print-footer {
+          position: fixed; bottom: 0.3in; left: 0.55in; right: 0.55in;
+          display: flex; justify-content: space-between; font-size: 9px; color: #999;
+          border-top: 1px solid #ddd; padding-top: 4px;
+        }
       }
     `}</style>
   );
