@@ -94,7 +94,44 @@ function shortAddress(address) {
   if (!address) return "";
   let s = address.replace(/,\s*[A-Za-z .]+\s+\d{5}(-\d{4})?\s*$/, "");
   s = s.replace(/\s+(BROOKLYN|MANHATTAN|QUEENS|BRONX|STATEN ISLAND|NEW YORK)\s*$/i, "");
+  // The two steps above can strip the zip/state and the city name
+  // separately, leaving the comma that used to sit between them orphaned
+  // at the end ("333 Ovington Avenue," instead of "333 Ovington Avenue") —
+  // clean that up before trimming.
+  s = s.replace(/,\s*$/, "");
   return s.trim() || address;
+}
+
+// Shared by Violations and Work Orders for the "copy" feature — groups
+// selected items by building+unit so the same address and tenant contact
+// line isn't repeated for multiple issues at the same apartment; each
+// group lists its address once, then every issue in that group, then the
+// tenant's contact line. Different apartments get their own group,
+// separated by a divider line, so a batch spanning several units pastes as
+// one clean, readable block instead of a jumble.
+function formatItemsForCopy(items, data) {
+  const groups = [];
+  for (const item of items) {
+    let group = groups.find(g => g.buildingId === item.buildingId && g.unitId === item.unitId);
+    if (!group) {
+      group = { buildingId: item.buildingId, unitId: item.unitId, issues: [] };
+      groups.push(group);
+    }
+    group.issues.push(item.description || "(no description)");
+  }
+  const blocks = groups.map(g => {
+    const building = data.buildings.find(b => b.id === g.buildingId);
+    const addr = building ? shortAddress(building.address) : "(building not found)";
+    const unit = data.units.find(u => u.id === g.unitId);
+    const addressLine = unit && unit.unitNumber ? `${addr}, Apt ${unit.unitNumber}` : addr;
+    const issueLines = g.issues.join("\n");
+    const tenant = data.tenants.find(t => t.unitId === g.unitId);
+    const tenantLine = tenant
+      ? `"${tenant.name || "(no name on file)"}": ${tenant.phone || "(no phone on file)"}, please schedule`
+      : `(no tenant on file), please schedule`;
+    return `${addressLine}\n${issueLines}\n${tenantLine}`;
+  });
+  return blocks.join("\n-------\n");
 }
 
 // Uploads go to Firebase Storage now, not straight into Firestore as base64 —
@@ -1169,6 +1206,7 @@ export default function PropertyOpsApp() {
   // something reactive to actually show and hide with. This mirrors the
   // same "has it been stuck too long" signal in real React state instead.
   const [saveStuck, setSaveStuck] = useState(false);
+  const [docSizeWarning, setDocSizeWarning] = useState(false);
   const SAVE_STUCK_THRESHOLD_MS = 8000;
   useEffect(() => {
     const interval = setInterval(() => {
@@ -1278,6 +1316,17 @@ export default function PropertyOpsApp() {
       // strips those out automatically so a stray undefined somewhere can never
       // silently break autosave.
       const safe = JSON.parse(JSON.stringify(dataRef.current));
+      // Firestore has a hard 1MB (1,048,576 byte) limit per document, and this
+      // app keeps everything — every building, tenant, court case log, payment
+      // history — in one single document. There's real room to grow into (this
+      // is a rough character-count estimate, not Firestore's exact byte
+      // accounting, but close enough to warn meaningfully early), but as more
+      // gets logged over time this is a genuine wall the app would eventually
+      // hit. Warning here, well before the hard limit, means it surfaces as an
+      // actionable heads-up instead of every future save silently failing with
+      // no explanation the moment the document tips over 1MB.
+      const approxSize = JSON.stringify(safe).length;
+      setDocSizeWarning(approxSize > 800000);
       await setDoc(doc(db, "users", user.uid, "appData", "main"), safe);
       setSaveError(false);
       // Only a confirmed success with nothing further queued means there's
@@ -1431,6 +1480,12 @@ export default function PropertyOpsApp() {
       {saveError && (
         <div className="save-error-banner no-print">
           <AlertTriangle size={16} /> Couldn't save your last change — check your internet connection. Your edits are still here on screen, but won't be there if you close the tab until this clears.
+        </div>
+      )}
+
+      {docSizeWarning && (
+        <div className="save-error-banner no-print">
+          <AlertTriangle size={16} /> Your data is getting close to Firestore's 1MB storage limit for a single document. Saves are still working, but once that limit is hit, they'd start silently failing. Worth flagging to me soon so we can look at archiving older records or restructuring storage before it becomes a real problem.
         </div>
       )}
 
@@ -3580,7 +3635,15 @@ function ImportBlock({ type, data, setData, buildingName }) {
     // If no matching building exists yet, diff against a placeholder id so every
     // row in the report shows as "new" — the real building gets created on confirm.
     const diff = buildImportDiff(type, entries, data, existing ? existing.id : "__pending__");
-    setPreview({ ...diff, parsedCount: entries.length, header, matchedBuildingId: existing ? existing.id : null });
+    // A parsed count far lower than what's already on file for this building is a
+    // strong signal the parser only read part of the report (a page cut off, a
+    // format quirk) rather than genuinely fewer tenants — worth surfacing loudly
+    // here specifically because a low read now means the "missing from this
+    // report" tenants auto-apply straight to $0/Current on confirm; silently
+    // trusting a bad read would zero out real balances, not just miss new ones.
+    const existingTenantCount = existing ? data.tenants.filter(t => t.buildingId === existing.id).length : 0;
+    const suspiciouslyLowCount = type === "arrears" && existingTenantCount > 5 && entries.length < existingTenantCount * 0.5;
+    setPreview({ ...diff, parsedCount: entries.length, header, matchedBuildingId: existing ? existing.id : null, suspiciouslyLowCount, existingTenantCount });
   };
 
   const handlePdfUpload = async (e) => {
@@ -3719,6 +3782,11 @@ function ImportBlock({ type, data, setData, buildingName }) {
               Detected: <strong>{preview.header.address}</strong> — {preview.matchedBuildingId ? "matched to an existing building" : "will create this as a new building"}
             </div>
           )}
+          {preview.suspiciouslyLowCount && (
+            <div className="hint" style={{ color: "var(--danger)", fontWeight: 700, marginBottom: 8, padding: 8, border: "1px solid var(--danger)", borderRadius: 6 }}>
+              ⚠ This file only read {preview.parsedCount} units, but this building already has {preview.existingTenantCount} on file — that's a big enough gap it's more likely something went wrong reading the report than that this many tenants genuinely paid off at once. Anyone missing from this file gets auto-marked paid ($0/Current) on confirm unless they have a follow-up or call-back flag — double-check this parsed correctly before confirming, since a partial read would zero out real balances along with the genuine ones.
+            </div>
+          )}
           <div className="import-preview-summary">
             {preview.changes.filter(c => c.isNew).length} new · {preview.changes.filter(c => !c.isNew && !c.needsApproval).length} to update
             {preview.changes.some(c => c.needsApproval) && ` · ${preview.changes.filter(c => c.needsApproval).length} already flagged behind — needs your approval`}
@@ -3832,6 +3900,8 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
 function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) {
   const [form, setForm] = useState(null);
   const [filter, setFilter] = useState("All");
+  const [selected, setSelected] = useState(new Set());
+  const [copiedId, setCopiedId] = useState(null);
 
   const submit = () => {
     if (!form.description) return;
@@ -3845,11 +3915,35 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
     .slice()
     .sort((a, b) => (b.dateOpened || "").localeCompare(a.dateOpened || ""));
 
+  const toggleSelected = (id) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const copyOne = (w) => {
+    navigator.clipboard.writeText(formatItemsForCopy([w], data));
+    setCopiedId(w.id);
+    setTimeout(() => setCopiedId(null), 1500);
+  };
+  const copySelected = () => {
+    const items = list.filter(w => selected.has(w.id));
+    navigator.clipboard.writeText(formatItemsForCopy(items, data));
+    setCopiedId("__batch__");
+    setTimeout(() => setCopiedId(null), 1500);
+  };
+
   return (
     <div>
       <div className="page-head">
         <h1 className="page-title">Work Orders</h1>
         <div className="page-actions">
+          {selected.size > 0 && (
+            <button className="btn-ghost" onClick={copySelected}>
+              <ScrollText size={14} /> {copiedId === "__batch__" ? "Copied!" : `Copy selected (${selected.size})`}
+            </button>
+          )}
           <PrintButton label="Work Orders" />
           <button className="btn-primary" onClick={() => setForm({ buildingId: data.buildings[0]?.id || "", unitId: "", vendorId: "", description: "", status: "Open", priority: "Routine", dateOpened: todayISO() })}>
             <Plus size={14} /> Add work order
@@ -3904,6 +3998,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
       {list.map(w => (
         <div className="list-card" key={w.id}>
           <div className="list-card-head">
+            <input type="checkbox" checked={selected.has(w.id)} onChange={() => toggleSelected(w.id)} title="Select for batch copy" />
             {w.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === w.unitId)?.unitNumber || "—"}</span>}
             <div className="list-card-title">{w.description}</div>
             {w.priority !== "Routine" && <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span>}
@@ -3911,8 +4006,20 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
             <span className="pill pill-muted">{buildingName(w.buildingId)}</span>
             {w.vendorId && <span className="pill pill-muted">{vendorName(w.vendorId)}</span>}
             <div className="spacer" />
+            <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={() => copyOne(w)}><ScrollText size={14} /></IconBtn>
             <IconBtn title="Edit" onClick={() => setForm(w)}><Pencil size={14} /></IconBtn>
             <IconBtn title="Delete" danger onClick={() => remove("workOrders", w.id)}><Trash2 size={14} /></IconBtn>
+          </div>
+          <div className="list-card-body">
+            <PhotoUploader
+              photos={w.photos}
+              pathPrefix={`workOrders/${w.id}/photos`}
+              onAdd={(newPhotos) => update("workOrders", w.id, { photos: [...(w.photos || []), ...newPhotos] })}
+              onRemove={(p) => {
+                update("workOrders", w.id, { photos: (w.photos || []).filter(x => x.id !== p.id) });
+                if (p.storagePath) deleteObject(storageRef(storage, p.storagePath)).catch(() => {});
+              }}
+            />
           </div>
         </div>
       ))}
@@ -3930,7 +4037,28 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   const [noteFor, setNoteFor] = useState(null);
   const [noteText, setNoteText] = useState("");
   const [expandedRow, setExpandedRow] = useState(null);
+  const [selected, setSelected] = useState(new Set());
+  const [copiedId, setCopiedId] = useState(null);
   const fileRef = useRef(null);
+
+  const toggleSelected = (id) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const copyOne = (v) => {
+    navigator.clipboard.writeText(formatItemsForCopy([v], data));
+    setCopiedId(v.id);
+    setTimeout(() => setCopiedId(null), 1500);
+  };
+  const copySelected = () => {
+    const items = data.violations.filter(v => selected.has(v.id));
+    navigator.clipboard.writeText(formatItemsForCopy(items, data));
+    setCopiedId("__batch__");
+    setTimeout(() => setCopiedId(null), 1500);
+  };
 
   const statusesFor = (a) => a === "HPD" ? HPD_STATUSES : a === "DSNY" ? DSNY_STATUSES : OTHER_STATUSES;
   const isClosed = isViolationClosed;
@@ -4064,6 +4192,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
       <div className={`list-card ${flag === "overdue" ? "list-card-danger" : flag === "soon" ? "list-card-warn" : ""}`} key={v.id}>
         <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : v.id)} style={{ cursor: "pointer", alignItems: "flex-start" }}>
           {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          <input type="checkbox" checked={selected.has(v.id)} onChange={(e) => { e.stopPropagation(); toggleSelected(v.id); }} onClick={(e) => e.stopPropagation()} title="Select for batch copy" />
           {v.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === v.unitId)?.unitNumber || "—"}</span>}
           <div className="violation-title-group">
             <div className="list-card-title">#{v.violationNumber}</div>
@@ -4088,6 +4217,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
               Mark paid
             </button>
           )}
+          <IconBtn title={copiedId === v.id ? "Copied!" : "Copy for texting/emailing"} onClick={(e) => { e.stopPropagation(); copyOne(v); }}><ScrollText size={14} /></IconBtn>
           <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(v); }}><Pencil size={14} /></IconBtn>
           <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("violations", v.id); }}><Trash2 size={14} /></IconBtn>
         </div>
@@ -4103,7 +4233,6 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
                 </button>
               </div>
             )}
-            {v.class && <div className="row"><strong>Class:</strong> {v.class}</div>}
             {v.description && <div className="row">{v.description}</div>}
             <PhotoUploader
               photos={v.photos}
@@ -4140,6 +4269,11 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
       <div className="page-head">
         <h1 className="page-title">Violations</h1>
         <div className="page-actions">
+          {selected.size > 0 && (
+            <button className="btn-ghost" onClick={copySelected}>
+              <ScrollText size={14} /> {copiedId === "__batch__" ? "Copied!" : `Copy selected (${selected.size})`}
+            </button>
+          )}
           <PrintButton label="Violations" />
           <button className="btn-ghost" onClick={() => fileRef.current.click()}><Upload size={14} /> Import CSV</button>
           <input ref={fileRef} type="file" accept=".csv" hidden onChange={handleCSV} />
@@ -4212,7 +4346,6 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
 
           {form.agency === "HPD" && (
             <>
-              <Field label="Class"><input value={form.class} onChange={e => setForm({ ...form, class: e.target.value })} placeholder="A / B / C" /></Field>
               <Field label="Description"><textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></Field>
               <Field label="Certify / cure deadline"><input type="date" value={form.cureDeadline} onChange={e => setForm({ ...form, cureDeadline: e.target.value })} /></Field>
               <Field label="Vendor assigned">
@@ -4424,9 +4557,19 @@ function CourtCaseImportSection({ data, add, update }) {
     let created = 0, updated = 0;
     for (const row of preview) {
       if (!row.tenant) continue;
+      const existingLog = row.existingCase?.log || [];
+      // Skip adding a duplicate entry if the "latest action" pulled from
+      // this import is identical to what's already the newest thing in the
+      // log — re-importing the same report with nothing new to report
+      // shouldn't pile up repeat entries.
+      const alreadyLogged = existingLog.some(l => l.date === row.latestActionDate && l.note === row.latestActionDesc);
+      const newLog = alreadyLogged ? existingLog : [
+        ...existingLog,
+        { id: uid(), date: row.latestActionDate, note: row.latestActionDesc, source: "attorney report" },
+      ];
       const fields = {
         tenantId: row.tenant.id, buildingId: row.tenant.buildingId, unitId: row.tenant.unitId,
-        caseNumber: row.caseNumber, lastUpdateDate: row.latestActionDate, lastUpdateNote: row.latestActionDesc,
+        caseNumber: row.caseNumber, log: newLog,
       };
       if (row.existingCase) { update("courtCases", row.existingCase.id, fields); updated++; }
       else {
@@ -4486,6 +4629,15 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
   const [checklistText, setChecklistText] = useState({});
   const [detailsFor, setDetailsFor] = useState(null);
   const [showCourtImport, setShowCourtImport] = useState(false);
+  const [logForm, setLogForm] = useState({});
+
+  const addLogEntry = (c) => {
+    const entry = logForm[c.id];
+    if (!entry || !entry.note || !entry.note.trim()) return;
+    const newEntry = { id: uid(), date: entry.date || todayISO(), note: entry.note.trim(), source: "manual" };
+    update("courtCases", c.id, { log: [...(c.log || []), newEntry] });
+    setLogForm({ ...logForm, [c.id]: { date: todayISO(), note: "" } });
+  };
 
   const submit = () => {
     if (!form.tenantId) return; // a case with no tenant is a silent data-quality trap
@@ -4629,41 +4781,67 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
       {list.length === 0 && <EmptyState text={view === "active" ? "No open court cases." : "Nothing closed yet."} />}
       {list.map(c => {
         const checkedCount = (c.checklist || []).filter(i => i.checked).length;
+        const sortedLog = [...(c.log || [])].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+        const latestLog = sortedLog[0];
+        const isOpen = detailsFor === c.id;
         return (
         <div className="list-card" key={c.id}>
-          <div className="list-card-head">
+          <div className="list-card-head" onClick={() => setDetailsFor(isOpen ? null : c.id)} style={{ cursor: "pointer" }}>
+            {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
             {c.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === c.unitId)?.unitNumber || "—"}</span>}
             <div className="list-card-title">{tenantName(c.tenantId)} {c.caseNumber && `· Docket #${c.caseNumber}`}</div>
-            {c.stage && <span className="pill pill-muted">{c.stage}</span>}
-            <span className="pill pill-muted">{c.result}</span>
             <span className="pill pill-muted">{buildingName(c.buildingId)}</span>
-            {c.tenantId && (() => {
-              const t = data.tenants.find(x => x.id === c.tenantId);
-              if (!t) return null;
-              const bal = parseBalance(t.balance);
-              return <span className={`pill ${bal > 0 ? "pill-warn" : "pill-ok"}`}>${bal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} owed</span>;
-            })()}
             {c.nextCourtDate && !c.archived && <Flag date={c.nextCourtDate} label="court date" />}
-            <div className="spacer" />
-            <IconBtn title="Edit" onClick={() => openEdit(c)}><Pencil size={14} /></IconBtn>
-            {view === "closed"
-              ? <IconBtn title="Restore to active" onClick={() => update("courtCases", c.id, { archived: false })}><ArchiveIcon size={14} /></IconBtn>
-              : <IconBtn title="Move to closed" onClick={() => update("courtCases", c.id, { archived: true })}><ArchiveIcon size={14} /></IconBtn>}
-            <IconBtn title="Delete" danger onClick={() => remove("courtCases", c.id)}><Trash2 size={14} /></IconBtn>
           </div>
-          {c.lastUpdateDate && (
-            <div className="list-card-body" style={{ paddingBottom: 0 }}>
-              <div className="row"><em>Latest ({fmtDate(c.lastUpdateDate)}):</em> {c.lastUpdateNote}</div>
-            </div>
-          )}
-          {c.result === "Stipulation (payment plan)" && (
-            <div className="list-card-body">
-              {c.stipulationTerms && <div className="row"><em>Terms:</em> {c.stipulationTerms}</div>}
-              {c.nextPaymentDue && <div className="row">Next payment due: <Flag date={c.nextPaymentDue} /></div>}
-            </div>
-          )}
-          <div className="list-card-body" style={{ paddingTop: c.result === "Stipulation (payment plan)" ? 0 : undefined }}>
-            {detailsFor === c.id ? (
+          {/* Always visible even collapsed — the whole point is not having to
+              open every card just to see what's currently going on with it. */}
+          <div className="list-card-body" style={{ padding: "8px 14px" }}>
+            {latestLog
+              ? <div className="row"><em>Latest ({fmtDate(latestLog.date)}):</em> {latestLog.note}</div>
+              : <div className="hint">No log entries yet.</div>}
+          </div>
+          {isOpen && (
+            <>
+              <div className="list-card-head" style={{ paddingTop: 0 }}>
+                {c.stage && <span className="pill pill-muted">{c.stage}</span>}
+                <span className="pill pill-muted">{c.result}</span>
+                {c.tenantId && (() => {
+                  const t = data.tenants.find(x => x.id === c.tenantId);
+                  if (!t) return null;
+                  const bal = parseBalance(t.balance);
+                  return <span className={`pill ${bal > 0 ? "pill-warn" : "pill-ok"}`}>${bal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} owed</span>;
+                })()}
+                <div className="spacer" />
+                <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); openEdit(c); }}><Pencil size={14} /></IconBtn>
+                {view === "closed"
+                  ? <IconBtn title="Restore to active" onClick={(e) => { e.stopPropagation(); update("courtCases", c.id, { archived: false }); }}><ArchiveIcon size={14} /></IconBtn>
+                  : <IconBtn title="Move to closed" onClick={(e) => { e.stopPropagation(); update("courtCases", c.id, { archived: true }); }}><ArchiveIcon size={14} /></IconBtn>}
+                <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("courtCases", c.id); }}><Trash2 size={14} /></IconBtn>
+              </div>
+              <div className="list-card-body">
+                <div className="row"><strong>Log</strong></div>
+                {sortedLog.length === 0
+                  ? <div className="hint" style={{ marginBottom: 6 }}>Nothing logged yet — add the first entry below, or import from an attorney report.</div>
+                  : sortedLog.map(l => (
+                      <div className="row" key={l.id} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                        <span style={{ minWidth: 90, color: "var(--ink-soft)", fontSize: 12 }}>{fmtDate(l.date)}</span>
+                        <span style={{ flex: 1 }}>{l.note}{l.source === "attorney report" && <span className="pill pill-muted" style={{ marginLeft: 6, fontSize: 10 }}>from report</span>}</span>
+                        <button className="checklist-remove" title="Remove this entry" onClick={() => update("courtCases", c.id, { log: (c.log || []).filter(x => x.id !== l.id) })}><X size={12} /></button>
+                      </div>
+                    ))}
+                <div className="inline-form" style={{ marginTop: 8 }}>
+                  <input type="date" value={logForm[c.id]?.date || todayISO()} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], date: e.target.value } })} />
+                  <input placeholder="What happened…" value={logForm[c.id]?.note || ""} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLogEntry(c)} />
+                  <button className="btn-ghost" onClick={() => addLogEntry(c)}>Add</button>
+                </div>
+              </div>
+              {c.result === "Stipulation (payment plan)" && (
+                <div className="list-card-body">
+                  {c.stipulationTerms && <div className="row"><em>Terms:</em> {c.stipulationTerms}</div>}
+                  {c.nextPaymentDue && <div className="row">Next payment due: <Flag date={c.nextPaymentDue} /></div>}
+                </div>
+              )}
+              <div className="list-card-body" style={{ paddingTop: c.result === "Stipulation (payment plan)" ? 0 : undefined }}>
               <>
                 <div className="row"><strong>To send attorney</strong></div>
                 <div className="checklist">
@@ -4689,14 +4867,10 @@ function CourtTab({ data, add, update, remove, tenantName, buildingName }) {
                     if (d.storagePath) deleteObject(storageRef(storage, d.storagePath)).catch(() => {});
                   }}
                 />
-                <button className="btn-primary" style={{ marginTop: 10 }} onClick={() => setDetailsFor(null)}>Done</button>
               </>
-            ) : (
-              <button className="btn-ghost" onClick={() => setDetailsFor(c.id)}>
-                Checklist & documents {checkedCount > 0 && `(${checkedCount}/${(c.checklist || []).length} sent)`} {(c.documents || []).length > 0 && `· ${c.documents.length} doc${c.documents.length === 1 ? "" : "s"}`}
-              </button>
-            )}
-          </div>
+              </div>
+            </>
+          )}
         </div>
       );})}
     </div>
@@ -5158,7 +5332,7 @@ function Styles() {
       .form-actions { grid-column: 1 / -1; display: flex; gap: 8px; }
       .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-soft); }
       .hearing-checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); cursor: pointer; padding: 7px 0; }
-      .hearing-checkbox-row input { width: auto; }
+      .hearing-checkbox-row input[type="checkbox"] { width: auto; flex-shrink: 0; }
       .field input, .field select, .field textarea {
         font-size: 13px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 5px;
         background: #fff; color: var(--ink); font-family: inherit; width: 100%; box-sizing: border-box;
