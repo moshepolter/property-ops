@@ -3604,7 +3604,20 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
       const tenant = tenantByUnit(unit.id) || (entry.movedOut ? movedOutTenantByUnitAndName(unit.id, entry.name) : null);
       if (tenant) {
         const diffFields = {};
-        Object.entries(fields).forEach(([k, v]) => { if (v && tenant[k] !== v) diffFields[k] = v; });
+        // Compare by actual meaning, not raw string equality — "1500" and
+        // "1500.00" are the same balance, and "JANE DOE" and "JANE DOE "
+        // are the same name; treating them as different would make a
+        // re-import of literally the same report keep surfacing "changes"
+        // that aren't real changes, just formatting drift from an older
+        // import, a manual edit, or trailing whitespace.
+        Object.entries(fields).forEach(([k, v]) => {
+          if (!v) return;
+          const current = tenant[k];
+          const same = k === "balance"
+            ? Math.abs(parseBalance(current) - parseBalance(v)) < 0.005
+            : (current || "").toString().trim() === v.toString().trim();
+          if (!same) diffFields[k] = v;
+        });
         // A tenant whose only "change" is newly qualifying as moved-out
         // (report shows the asterisk, they're not flagged that way yet)
         // still needs to surface here even with zero field-level diffs —
