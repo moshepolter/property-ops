@@ -4946,6 +4946,7 @@ function CourtCaseImportSection({ data, add, update }) {
   const runImport = () => {
     if (!preview) return;
     let created = 0, updated = 0;
+    const today = todayISO();
     for (const row of preview) {
       // Even without a matched tenant (a housing-department case like one
       // filed against "DHPD" rather than a person, or a name that doesn't
@@ -4963,6 +4964,16 @@ function CourtCaseImportSection({ data, add, update }) {
         .filter(a => !existingLog.some(l => l.date === a.date && l.note === a.desc))
         .map(a => ({ id: uid(), date: a.date, note: a.desc, source: "attorney report" }));
       const newLog = [...existingLog, ...newEntries];
+      // The report's own action history often already names a scheduled
+      // future court date ("Court Appearance" dated ahead of today) — pull
+      // the earliest one as the case's next court date instead of leaving
+      // it blank and making the person re-enter a date the report already
+      // gave. Picking the EARLIEST future one, not just any, since that's
+      // the next thing actually coming up.
+      const futureAppearances = (row.actions || [])
+        .filter(a => a.date > today && /Court Appearance/i.test(a.desc))
+        .sort((a, b) => a.date.localeCompare(b.date));
+      const parsedNextCourtDate = futureAppearances.length > 0 ? futureAppearances[0].date : "";
       const fields = {
         tenantId: row.tenant ? row.tenant.id : "",
         buildingId: row.tenant ? row.tenant.buildingId : row.building.id,
@@ -4972,10 +4983,16 @@ function CourtCaseImportSection({ data, add, update }) {
         rawName: row.tenant ? "" : row.name,
         caseNumber: row.caseNumber, log: newLog,
       };
-      if (row.existingCase) { update("courtCases", row.existingCase.id, fields); updated++; }
-      else {
+      if (row.existingCase) {
+        // Never overwrite a date already on file — it may have been set or
+        // corrected by hand since the last import, and this report's own
+        // "future" date could by now be in the past relative to it.
+        if (!row.existingCase.nextCourtDate && parsedNextCourtDate) fields.nextCourtDate = parsedNextCourtDate;
+        update("courtCases", row.existingCase.id, fields);
+        updated++;
+      } else {
         add("courtCases", {
-          ...fields, stage: CASE_STAGES[0], nextCourtDate: "", result: "Pending",
+          ...fields, stage: CASE_STAGES[0], nextCourtDate: parsedNextCourtDate, result: "Pending",
           stipulationTerms: "", nextPaymentDue: "", archived: false, documents: [],
           checklist: DEFAULT_ATTORNEY_CHECKLIST.map(label => ({ id: uid(), label, checked: false })),
         });
@@ -5043,6 +5060,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
   const [detailsFor, setDetailsFor] = useState(null);
   const [section, setSection] = useState("cases"); // cases | import
   const [buildingFilter, setBuildingFilter] = useState("All");
+  const [dueOnlyFilter, setDueOnlyFilter] = useState(null); // null | "court" | "stip"
   const [logForm, setLogForm] = useState({});
   const [confirmingDeleteAll, setConfirmingDeleteAll] = useState(false);
 
@@ -5086,6 +5104,11 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
   const list = data.courtCases
     .filter(c => view === "closed" ? c.archived : !c.archived)
     .filter(c => buildingFilter === "All" || c.buildingId === buildingFilter)
+    .filter(c => {
+      if (dueOnlyFilter === "court") return c.result === "Stipulation (payment plan)" ? dateDueStrict(c.nextCourtDate) : dateDue(c.nextCourtDate);
+      if (dueOnlyFilter === "stip") return c.result === "Stipulation (payment plan)" && dateDue(c.nextPaymentDue);
+      return true;
+    })
     .slice()
     .sort((a, b) => (a.nextCourtDate || "9999-99-99").localeCompare(b.nextCourtDate || "9999-99-99"));
 
@@ -5139,14 +5162,22 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
           <div className="dash-stat-num">{data.courtCases.filter(c => !c.archived).length}</div>
           <div className="dash-stat-label">Active cases</div>
         </div>
-        <div className="dash-stat-card" style={{ flex: 1, cursor: "default" }}>
+        <button
+          className="dash-stat-card"
+          style={{ flex: 1, borderColor: dueOnlyFilter === "court" ? "var(--navy)" : undefined }}
+          onClick={() => { setSection("cases"); setDueOnlyFilter(f => f === "court" ? null : "court"); }}
+        >
           <div className="dash-stat-num" style={{ color: courtDatesDueCount > 0 ? "var(--danger)" : undefined }}>{courtDatesDueCount}</div>
           <div className="dash-stat-label">Court dates coming up</div>
-        </div>
-        <div className="dash-stat-card" style={{ flex: 1, cursor: "default" }}>
+        </button>
+        <button
+          className="dash-stat-card"
+          style={{ flex: 1, borderColor: dueOnlyFilter === "stip" ? "var(--navy)" : undefined }}
+          onClick={() => { setSection("cases"); setDueOnlyFilter(f => f === "stip" ? null : "stip"); }}
+        >
           <div className="dash-stat-num" style={{ color: stipDueCount > 0 ? "var(--warn)" : undefined }}>{stipDueCount}</div>
           <div className="dash-stat-label">Payments coming up</div>
-        </div>
+        </button>
       </div>
 
       <div className="filter-row">
@@ -5208,6 +5239,13 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
           <span>Generated {fmtDate(todayISO())}</span>
         </div>
       </div>
+      {section === "cases" && dueOnlyFilter && (
+        <div className="hint" style={{ marginBottom: 10 }}>
+          Showing only {dueOnlyFilter === "court" ? "cases with a court date coming up or overdue" : "cases with a payment coming up or overdue"}.{" "}
+          <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => setDueOnlyFilter(null)}>Clear</button>
+        </div>
+      )}
+
       {section === "cases" && (
       <div className="filter-row">
         <button className={`chip ${view === "active" ? "chip-active" : ""}`} onClick={() => setView("active")}>Active</button>
