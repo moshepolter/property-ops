@@ -1907,10 +1907,19 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
     .sort((a, b) => (a.followUp.date || "").localeCompare(b.followUp.date || ""));
   const overdueShown = showAllOverdue ? overdueTenants : overdueTenants.slice(0, 5);
   const vacantUnits = data.units.filter(u => !data.tenants.some(t => t.unitId === u.id && !t.movedOut));
+  // A new tenant created from an arrears import only ever has a name and
+  // balance — never phone or email, since the report doesn't carry that.
+  // Flagging specifically the ones sharing a unit with a moved-out tenant
+  // (a real turnover, not just a data gap) is what's actually actionable:
+  // go get this person's contact info.
+  const newTenantsNeedingContact = data.tenants.filter(t =>
+    !t.movedOut && !t.phone && !t.email &&
+    data.tenants.some(other => other.unitId === t.unitId && other.movedOut)
+  );
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
   const totalViolationsDue = violationAgencyGroups.reduce((sum, g) => sum + g.items.length, 0);
-  const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + vacantUnits.length + totalViolationsDue + bossReminderItems.length + hearingItems.length;
+  const totalAttention = rentPanelCount + courtItems.length + stipItems.length + recurringItems.length + appointmentItems.length + quickNoteItems.length + totalViolationsDue + bossReminderItems.length + hearingItems.length;
 
   // Top stat row + follow-up roster
   const allDated = allDatedItems(data, tenantName, buildingName);
@@ -2436,24 +2445,13 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
 
           <AttentionPanel
             icon={<Home size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label={<>Units with no tenant on file <span className="dash-panel-sub">(vacant or a data gap)</span></>} items={vacantUnits} tab="buildings" setTab={setTab}
-            itemKey={u => u.id}
-            renderItem={u => (
+            label={<>New tenants missing contact info <span className="dash-panel-sub">(replaced a moved-out tenant)</span></>} items={newTenantsNeedingContact} tab="rent" setTab={setTab}
+            itemKey={t => t.id}
+            renderItem={t => (
               <div className="followup-item-main">
-                <div className="followup-item-name">Unit {u.unitNumber || "—"} <span className="row-muted">— {buildingName(u.buildingId)}</span></div>
+                <div className="followup-item-name">{t.name || "(no name on file)"} <span className="row-muted">— Unit {data.units.find(u => u.id === t.unitId)?.unitNumber || "—"} {buildingName(t.buildingId)}</span></div>
               </div>
             )}
-            extraAction={
-              confirmingCleanup ? (
-                <>
-                  <span className="row-muted" style={{ fontSize: 12 }}>Remove all {vacantUnits.length} empty units, across every building?</span>
-                  <button className="btn-primary" style={{ background: "var(--danger)", borderColor: "var(--danger)" }} onClick={cleanupAllEmptyUnits}>Yes, clean up</button>
-                  <button className="btn-ghost" onClick={() => setConfirmingCleanup(false)}>Cancel</button>
-                </>
-              ) : (
-                <button className="btn-primary" onClick={() => setConfirmingCleanup(true)}>Clean up all empty units</button>
-              )
-            }
           />
         </>
       )}
@@ -2797,7 +2795,9 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                       <button className="unit-row" onClick={() => setExpandedUnit(isOpen ? null : u.id)}>
                         {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                         <span className="unit-row-number">Unit {u.unitNumber}</span>
-                        <span className="unit-row-name">{tenants.map(t => t.name).filter(Boolean).join(", ") || "no tenant on file"}</span>
+                        <span className="unit-row-name">
+                          {tenants.map(t => t.name + (t.movedOut ? " (moved out)" : "")).filter(Boolean).join(", ") || "no tenant on file"}
+                        </span>
                         {tenants[0]?.status && tenants[0].status !== "Current" && (
                           <span className={`pill ${tenants[0].status === "Late" ? "pill-warn" : "pill-danger"}`}>{tenants[0].status}</span>
                         )}
@@ -2834,7 +2834,7 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                           {tenants.length === 0 && <div className="hint">No tenant on file for this unit yet.</div>}
                           {tenants.map(t => (
                             <div key={t.id} className="unit-detail-tenant">
-                              <div className="unit-detail-row"><strong>{t.name || "(no name on file)"}</strong></div>
+                              <div className="unit-detail-row"><strong>{t.name || "(no name on file)"}</strong>{t.movedOut && <span className="pill pill-warn" style={{ marginLeft: 6 }}>Moved Out</span>}</div>
                               {t.phone && <div className="unit-detail-row">Phone: {t.phone}</div>}
                               {t.email && <div className="unit-detail-row">Email: {t.email}</div>}
                               <div className="unit-detail-row">Balance: {t.balance ? `$${t.balance}` : "—"} · Status: <span className={`pill ${t.status === "Current" ? "pill-ok" : t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status || "Current"}</span></div>
@@ -3585,6 +3585,14 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
   );
   const hasActiveCourtCase = tenantId => (data.courtCases || []).some(c => c.tenantId === tenantId && !c.archived);
   const changes = [];
+  // Two entries can share the same apt when a unit turned over mid-report
+  // (one line for who's leaving, one for who's now there) — if the unit
+  // doesn't exist yet, both would otherwise independently decide to create
+  // it, producing two separate duplicate unit records instead of one
+  // shared unit. This tracks a placeholder token per apt the first time
+  // it's needed in this batch, so a second entry for the same not-yet-
+  // existing apt reuses that same pending unit instead of creating another.
+  const pendingNewUnits = new Map();
 
   parsedEntries.forEach(entry => {
     const unit = unitsForBuilding.find(u => (u.unitNumber || "").trim().toUpperCase() === (entry.apt || "").trim().toUpperCase());
@@ -3601,7 +3609,9 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
     // Object]". aging gets applied straight through on confirm instead.
     const aging = type === "arrears" ? entry.aging : undefined;
     if (unit) {
-      const tenant = tenantByUnit(unit.id) || (entry.movedOut ? movedOutTenantByUnitAndName(unit.id, entry.name) : null);
+      const tenant = entry.movedOut
+        ? (movedOutTenantByUnitAndName(unit.id, entry.name) || tenantByUnit(unit.id))
+        : tenantByUnit(unit.id);
       if (tenant) {
         const diffFields = {};
         // Compare by actual meaning, not raw string equality — "1500" and
@@ -3667,7 +3677,15 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
         changes.push({ apt: entry.apt, unitId: unit.id, tenantId: null, isNew: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false, aging });
       }
     } else {
-      changes.push({ apt: entry.apt, unitId: null, tenantId: null, isNew: true, newUnit: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false, aging });
+      const aptKey = (entry.apt || "").trim().toUpperCase();
+      const existingToken = pendingNewUnits.get(aptKey);
+      if (existingToken) {
+        changes.push({ apt: entry.apt, unitId: existingToken, tenantId: null, isNew: true, newUnit: false, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false, aging });
+      } else {
+        const token = "__pending_" + uid();
+        pendingNewUnits.set(aptKey, token);
+        changes.push({ apt: entry.apt, unitId: token, tenantId: null, isNew: true, newUnit: true, fields: { ...fields, name: fields.name || entry.name || "" }, name: entry.name, movedOut: entry.movedOut, needsReview: entry.needsReview, needsApproval: false, approved: true, inCourt: false, aging });
+      }
     }
   });
 
@@ -3777,12 +3795,20 @@ function ImportBlock({ type, data, setData, buildingName }) {
         buildingId = newBuilding.id;
       }
       const applied = preview.changes.filter(ch => !ch.needsApproval || ch.approved);
+      // Resolves a shared "__pending_" placeholder token (see buildImportDiff)
+      // to the real unit id once that unit's own change has been processed —
+      // so a second entry for the same not-yet-existing apt attaches to the
+      // one real unit that gets created, not a second duplicate.
+      const resolvedUnitTokens = new Map();
       applied.forEach(ch => {
         let unitId = ch.unitId;
         if (ch.newUnit) {
           const unit = { id: uid(), buildingId, unitNumber: ch.apt };
           next.units.push(unit);
           unitId = unit.id;
+          resolvedUnitTokens.set(ch.unitId, unit.id);
+        } else if (typeof unitId === "string" && unitId.startsWith("__pending_")) {
+          unitId = resolvedUnitTokens.get(unitId) || unitId;
         }
         if (ch.isNew) {
           next.tenants.push({
@@ -3790,6 +3816,7 @@ function ImportBlock({ type, data, setData, buildingName }) {
             phone: ch.fields.phone || "", email: ch.fields.email || "",
             balance: ch.fields.balance || "", status: ch.fields.status || "Current",
             notes: [], messageLog: [], payments: [],
+            ...(ch.movedOut ? { movedOut: true } : {}),
             ...(ch.aging ? { aging: ch.aging } : {}),
           });
         } else if (ch.movedOut && ch.nameActuallyChanged) {
