@@ -755,11 +755,11 @@ function parseCourtCasesText(text) {
     return true;
   });
   const cleaned = lines.join("\n");
-  const blocks = cleaned.split(/(?=Case#:\d+)/).filter(b => b.includes("Case#:"));
+  const blocks = cleaned.split(/(?=Case#:\s*\d+)/).filter(b => b.includes("Case#:"));
 
   const casesByNumber = {};
   for (const block of blocks) {
-    const caseNumMatch = block.match(/Case#:(\d+)/);
+    const caseNumMatch = block.match(/Case#:\s*(\d+)/);
     if (!caseNumMatch) continue;
     const caseNum = caseNumMatch[1];
 
