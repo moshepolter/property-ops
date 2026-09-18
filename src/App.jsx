@@ -4965,13 +4965,26 @@ function CourtCaseImportSection({ data, add, update }) {
       // link it to.
       if (!row.tenant && !row.building) continue;
       const existingLog = row.existingCase?.log || [];
-      // Add every action from this import that isn't already in the log —
-      // re-importing the same report shouldn't pile up repeat entries, but
-      // a newer report with additional actions since the last import
-      // should add all of the new ones, not just the single latest one.
+      // A future-dated action (like a scheduled "Court Appearance") hasn't
+      // happened yet — logging it under its own future date would put it
+      // at the top of the log once sorted newest-first, making it look
+      // like the most recent thing that already occurred. Instead, it's
+      // logged under TODAY's date (when this was actually learned from
+      // the report) with the real date spelled out in the note itself —
+      // "Court Appearance — scheduled for 09/27/2026" rather than dating
+      // the entry itself as 09/27. A genuinely past action still gets
+      // logged under its own real date as usual.
       const newEntries = (row.actions || [])
-        .filter(a => !existingLog.some(l => l.date === a.date && l.note === a.desc))
-        .map(a => ({ id: uid(), date: a.date, note: a.desc, source: "attorney report" }));
+        .map(a => a.date > today
+          ? { ...a, note: `${a.desc} — scheduled for ${fmtDate(a.date)}`, isRescheduleNote: true }
+          : { ...a, note: a.desc, isRescheduleNote: false })
+        .filter(a => a.isRescheduleNote
+          // Rescheduled notes get re-dated to today on every import while
+          // still upcoming, so dedup by the note text itself (which
+          // embeds the real date) rather than by date.
+          ? !existingLog.some(l => l.note === a.note)
+          : !existingLog.some(l => l.date === a.date && l.note === a.note))
+        .map(a => ({ id: uid(), date: a.isRescheduleNote ? today : a.date, note: a.note, source: "attorney report" }));
       const newLog = [...existingLog, ...newEntries];
       // The report's own action history often already names a scheduled
       // future court date ("Court Appearance" dated ahead of today) — pull
