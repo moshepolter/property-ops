@@ -3756,7 +3756,25 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
           // still needs to surface here even with zero field-level diffs —
           // the status flip itself is the meaningful change, not something
           // diffFields tracks.
-          if (Object.keys(diffFields).length > 0 || (entry.movedOut && !tenant.movedOut)) {
+          // The report's own legend says "* - MOVED OUT", and balances on
+          // asterisk-marked units stay completely frozen across separate
+          // report snapshots weeks apart — the signature of a departed
+          // tenant's unpaid debt just sitting there, not someone still
+          // accruing rent. Trust the asterisk directly for a tenant seen
+          // for the first time, or when a new, different name shows up.
+          // But a tenant already confirmed as the current occupant through
+          // an earlier genuine turnover split is a different case — the
+          // same "sticky" asterisk that correctly stays on a departed
+          // tenant's frozen debt for months can also linger on the unit
+          // itself even after someone new has moved in, and re-flipping
+          // that confirmed-active person moved-out just because the same
+          // asterisk showed up again (with no name change this time) would
+          // permanently and incorrectly hide them from the rent sheet —
+          // this only trusts the asterisk alone for someone not already
+          // confirmed active that way.
+          const nameActuallyChanged = entry.name && tenant.name && normalizeName(entry.name) !== normalizeName(tenant.name);
+          const genuineMoveOutSignal = entry.movedOut && !tenant.movedOut && (!tenant.fromTurnover || nameActuallyChanged);
+          if (Object.keys(diffFields).length > 0 || genuineMoveOutSignal) {
             const priorStatus = tenant.status || "Current";
             // Auto-apply by default now — only pause for approval if this
             // tenant is actively being worked: an open follow-up reminder, or
@@ -3778,19 +3796,10 @@ function buildImportDiff(type, parsedEntries, data, buildingId) {
               balanceDelta = parseBalance(tenant.balance) - parseBalance(diffFields.balance);
             }
             const existingFollowUps = tenantFollowUps(tenant);
-            // The report's own legend says "* - MOVED OUT", and balances on
-            // asterisk-marked units stay completely frozen across separate
-            // report snapshots weeks apart — the signature of a departed
-            // tenant's unpaid debt just sitting there, not someone still
-            // accruing rent. Trust the asterisk directly rather than
-            // requiring a name change too: a unit can sit vacant for months
-            // with the same departed name still listed, well before anyone
-            // new moves in to replace them.
-            const nameActuallyChanged = entry.name && tenant.name && normalizeName(entry.name) !== normalizeName(tenant.name);
             changes.push({
               apt: entry.apt, unitId: unit.id, tenantId: tenant.id, isNew: false,
               fields: diffFields, before: Object.fromEntries(Object.keys(diffFields).map(k => [k, tenant[k] || "—"])),
-              name: tenant.name || entry.name, movedOut: entry.movedOut, nameActuallyChanged, needsReview: entry.needsReview,
+              name: tenant.name || entry.name, movedOut: genuineMoveOutSignal, nameActuallyChanged, needsReview: entry.needsReview,
               priorStatus, needsApproval, approved: !needsApproval, aging, balanceDelta,
               existingFollowUps, clearFollowUps: false, callBackFlag: tenant.callBack === true,
               inCourt: hasActiveCourtCase(tenant.id),
@@ -3957,7 +3966,7 @@ function ImportBlock({ type, data, setData, buildingName }) {
             id: uid(), buildingId, unitId: ch.unitId,
             name: ch.fields.name || ch.name || "", phone: "", email: "",
             balance: ch.fields.balance || "0.00", status: ch.fields.status || "Current",
-            notes: [], messageLog: [], payments: [], followUps: [],
+            notes: [], messageLog: [], payments: [], followUps: [], fromTurnover: true,
             ...(ch.aging ? { aging: ch.aging } : {}),
           });
         } else if (ch.movedOut) {
@@ -5328,7 +5337,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
               open every card just to see what's currently going on with it. */}
           <div className="list-card-body" style={{ padding: "8px 14px" }}>
             {latestLog
-              ? <div className="row"><em>Latest ({fmtDate(latestLog.date)}):</em> {latestLog.note}</div>
+              ? <div className="row"><em>{latestLog.date > todayISO() ? "Scheduled" : "Latest"} ({fmtDate(latestLog.date)}):</em> {latestLog.note}</div>
               : <div className="hint">No log entries yet.</div>}
           </div>
           {isOpen && (
@@ -5353,13 +5362,19 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                 <div className="row"><strong>Log</strong></div>
                 {sortedLog.length === 0
                   ? <div className="hint" style={{ marginBottom: 6 }}>Nothing logged yet — add the first entry below, or import from an attorney report.</div>
-                  : sortedLog.map(l => (
+                  : sortedLog.map(l => {
+                      const isFuture = l.date > todayISO();
+                      return (
                       <div className="row" key={l.id} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                         <span style={{ minWidth: 90, color: "var(--ink-soft)", fontSize: 12 }}>{fmtDate(l.date)}</span>
-                        <span style={{ flex: 1 }}>{l.note}{l.source === "attorney report" && <span className="pill pill-muted" style={{ marginLeft: 6, fontSize: 10 }}>from report</span>}</span>
+                        <span style={{ flex: 1 }}>
+                          {isFuture && <span className="pill pill-warn" style={{ marginRight: 6, fontSize: 10 }}>Scheduled — hasn't happened yet</span>}
+                          {l.note}{l.source === "attorney report" && <span className="pill pill-muted" style={{ marginLeft: 6, fontSize: 10 }}>from report</span>}
+                        </span>
                         <button className="checklist-remove" title="Remove this entry" onClick={() => update("courtCases", c.id, { log: (c.log || []).filter(x => x.id !== l.id) })}><X size={12} /></button>
                       </div>
-                    ))}
+                      );
+                    })}
                 <div className="inline-form" style={{ marginTop: 8 }}>
                   <input type="date" value={logForm[c.id]?.date || todayISO()} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], date: e.target.value } })} />
                   <input placeholder="What happened…" value={logForm[c.id]?.note || ""} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLogEntry(c)} />
