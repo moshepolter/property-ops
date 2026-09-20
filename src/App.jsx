@@ -2198,7 +2198,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
 
   // Top stat row + follow-up roster
   const allDated = allDatedItems(data, tenantName, buildingName);
-  const overdueCount = allDated.filter(i => i.date < today).length;
+  const overdueCount = allDated.filter(i => i.date < today && i.type !== "Follow-up").length;
   const openWorkOrders = data.workOrders.filter(w => w.status !== "Done");
   const openCourtCases = data.courtCases.filter(c => !c.archived);
   const clearBuildingIds = new Set(data.buildings.filter(b => {
@@ -2479,9 +2479,9 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
       {statOpen && (
         <div className="dash-stat-detail">
           {statOpen === "overdue" && (
-            allDated.filter(i => i.date < today).length === 0
+            allDated.filter(i => i.date < today && i.type !== "Follow-up").length === 0
               ? <div className="hint">Nothing overdue.</div>
-              : allDated.filter(i => i.date < today).sort((a, b) => a.date.localeCompare(b.date)).map(item => (
+              : allDated.filter(i => i.date < today && i.type !== "Follow-up").sort((a, b) => a.date.localeCompare(b.date)).map(item => (
                 <button key={item.key} className="dash-detail-item" onClick={() => setTab(item.tab)}>
                   <span className="pill pill-danger">{item.type}</span>
                   <div className="followup-item-main">
@@ -2792,6 +2792,15 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
 
 function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
   const [form, setForm] = useState(null);
+  // The form panel renders once, near the top of the page — not inline with
+  // whichever building card was clicked. With a full list of buildings,
+  // clicking Edit on one further down opens the form off-screen above the
+  // current scroll position, which looks exactly like the button doing
+  // nothing at all. Scroll it into view the moment it opens instead.
+  const formRef = useRef(null);
+  useEffect(() => {
+    if (form && formRef.current) formRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [form]);
   // Buildings default to collapsed — track which ones have been explicitly
   // expanded instead of which are closed, so opening the tab always starts
   // clean with nothing open until you choose to look inside one.
@@ -2998,7 +3007,7 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
       ) : (
       <>
       {form && (
-        <div className="form-panel">
+        <div className="form-panel" ref={formRef}>
           <Field label="Address"><input value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} /></Field>
           <Field label="Also known as (optional)">
             <input
