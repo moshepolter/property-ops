@@ -2049,17 +2049,16 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
   // cure date further out, creating a confusing "it's open, why isn't it
   // here" gap. Showing everything open means this always matches that
   // count exactly, and the panel is still sorted soonest-due-first so
-  // urgency isn't lost.
-  const violationDue = (v) => !isViolationClosed(v);
+  // urgency isn't lost. Lead violations are excluded entirely — they're
+  // always kept even past their deadline (see the HPD import), which would
+  // otherwise clog this panel with mostly-overdue lead items that are
+  // already being worked on separately; they're still fully visible on the
+  // Violations page itself, just not competing for space here.
+  const violationDue = (v) => !isViolationClosed(v) && !v.isLead;
   // Soonest cure deadline first; missing deadlines sort to the end — same
   // convention the Violations page itself already uses, so the order here
-  // matches what you'd see over there too. Lead violations sort to the
-  // very bottom regardless of deadline — they're always included even
-  // past due (see the HPD import), which would otherwise push them to the
-  // top of every list since they're usually the most overdue; already
-  // being worked separately, so no need for them to dominate this view.
+  // matches what you'd see over there too.
   const byCureDeadline = (a, b) => {
-    if (!!a.isLead !== !!b.isLead) return a.isLead ? 1 : -1;
     const da = daysUntil(a.cureDeadline), db = daysUntil(b.cureDeadline);
     if (da === null && db === null) return 0;
     if (da === null) return 1;
@@ -2131,7 +2130,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
   const openWorkOrders = data.workOrders.filter(w => w.status !== "Done");
   const openCourtCases = data.courtCases.filter(c => !c.archived);
   const clearBuildingIds = new Set(data.buildings.filter(b => {
-    const hasViolation = data.violations.some(v => v.buildingId === b.id && !isViolationClosed(v));
+    const hasViolation = data.violations.some(v => v.buildingId === b.id && !isViolationClosed(v) && !v.isLead);
     const hasLateTenant = data.tenants.some(t => t.buildingId === b.id && t.status !== "Current");
     const hasOpenWO = data.workOrders.some(w => w.buildingId === b.id && w.status !== "Done");
     const hasOpenCourt = data.courtCases.some(c => c.buildingId === b.id && !c.archived);
@@ -4474,7 +4473,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   const [buildingFilter, setBuildingFilter] = useState("All");
   const [search, setSearch] = useState("");
   const [confirmingDeleteAllHpd, setConfirmingDeleteAllHpd] = useState(false);
-  const [collapsedGroups, setCollapsedGroups] = useState(new Set());
+  const [expandedGroups, setExpandedGroups] = useState(new Set());
   const fileRef = useRef(null);
 
   // Scoped to HPD only — a generic "delete all violations" would also wipe
@@ -4933,8 +4932,10 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
         (() => {
           const groups = ["HPD", "DSNY", ...dynamicOtherAgencies, "Other"].map(a => ({ agency: a, items: filterAndSort(a) })).filter(g => g.items.length > 0);
           if (groups.length === 0) return <EmptyState text="No violations here." />;
-          const allCollapsed = groups.every(g => collapsedGroups.has(g.agency));
-          const toggleGroup = (a) => setCollapsedGroups(prev => {
+          // Collapsed by default on page load (nothing in expandedGroups
+          // yet) — clicking a group heading, or "Expand all", opts it in.
+          const allExpanded = groups.every(g => expandedGroups.has(g.agency));
+          const toggleGroup = (a) => setExpandedGroups(prev => {
             const next = new Set(prev);
             if (next.has(a)) next.delete(a); else next.add(a);
             return next;
@@ -4942,12 +4943,12 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           return (
             <>
               <div className="row" style={{ marginBottom: 8 }}>
-                <button className="btn-ghost" onClick={() => setCollapsedGroups(allCollapsed ? new Set() : new Set(groups.map(g => g.agency)))}>
-                  {allCollapsed ? "Expand all" : "Collapse all"}
+                <button className="btn-ghost" onClick={() => setExpandedGroups(allExpanded ? new Set() : new Set(groups.map(g => g.agency)))}>
+                  {allExpanded ? "Collapse all" : "Expand all"}
                 </button>
               </div>
               {groups.map((g, gi) => {
-                const isCollapsed = collapsedGroups.has(g.agency);
+                const isCollapsed = !expandedGroups.has(g.agency);
                 return (
                   <div key={g.agency} style={{ marginTop: gi === 0 ? 0 : 20 }}>
                     <div className="violations-group-heading" style={{ cursor: "pointer" }} onClick={() => toggleGroup(g.agency)}>
@@ -5174,9 +5175,14 @@ function HpdViolationsImportSection({ data, add, update, onImported }) {
       const unit = (building && v.apt)
         ? data.units.find(u => u.buildingId === building.id && normalizeAptForMatch(u.unitNumber) === normalizeAptForMatch(v.apt))
         : null;
-      // Already certified (HPD's "NOV CERT" status) — include, but marked
-      // resolved so it lands in the closed/certified view, not the active
-      // one. Lead violations are always included regardless of deadline —
+      // Already certified (HPD's "NOV CERT" status), or a certification was
+      // already submitted and HPD is in its verification process (CIV14
+      // MAILED — tenant is being asked to confirm the correction; CIV10
+      // MAILED — the tenant disputed it) — confirmed via HPD's own support
+      // materials that both CIV14 and CIV10 only ever occur after an owner
+      // has already certified. None of these are "still awaiting a first
+      // certification", so all three map to Certified rather than Open.
+      // Lead violations are always included regardless of deadline —
       // they're notoriously slow to resolve (special testing requirements,
       // can't be certified through the fast online process), so an overdue
       // lead hazard is exactly the kind of thing that needs to stay
@@ -5186,12 +5192,13 @@ function HpdViolationsImportSection({ data, add, update, onImported }) {
       // to track for a deadline that's already passed. Otherwise it's
       // still open and needs attention before its deadline.
       let include, mappedStatus;
-      if (/CERT/i.test(v.status) && !/INVALID/i.test(v.status)) { include = true; mappedStatus = "Certified"; }
+      if ((/CERT/i.test(v.status) && !/INVALID/i.test(v.status)) || /^CIV1[04] MAILED$/i.test(v.status)) { include = true; mappedStatus = "Certified"; }
       else if (v.isLead) { include = true; mappedStatus = "Open"; }
       else if (v.certByDate !== "-" && isoFromMDY(v.certByDate) < today) { include = false; mappedStatus = null; }
       else { include = true; mappedStatus = "Open"; }
       const existing = data.violations.find(ev => ev.agency === "HPD" && ev.violationNumber === v.violationId);
-      return { ...v, unit, include, mappedStatus, existing };
+      const pastDeadline = v.certByDate !== "-" && isoFromMDY(v.certByDate) < today;
+      return { ...v, unit, include, mappedStatus, existing, pastDeadline };
     });
     setPreview({ buildingAddress, building, rows });
   };
@@ -5274,7 +5281,8 @@ function HpdViolationsImportSection({ data, add, update, onImported }) {
               : <span className="pill pill-danger" style={{ marginLeft: 8 }}>No matching building — add this building first</span>}
           </div>
           <div className="print-stats-row no-print" style={{ margin: "10px 0" }}>
-            <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.mappedStatus === "Open").length}</div><div>Open — needs certifying</div></div>
+            <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.mappedStatus === "Open" && !r.pastDeadline).length}</div><div>Open — within deadline</div></div>
+            <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.mappedStatus === "Open" && r.pastDeadline).length}</div><div>Lead, past deadline (still tracked)</div></div>
             <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.mappedStatus === "Certified").length}</div><div>Already certified</div></div>
             <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.include && r.existing).length}</div><div>Already on file</div></div>
             <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => !r.include).length}</div><div>Skipped — deadline passed</div></div>
