@@ -2053,8 +2053,13 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
   const violationDue = (v) => !isViolationClosed(v);
   // Soonest cure deadline first; missing deadlines sort to the end — same
   // convention the Violations page itself already uses, so the order here
-  // matches what you'd see over there too.
+  // matches what you'd see over there too. Lead violations sort to the
+  // very bottom regardless of deadline — they're always included even
+  // past due (see the HPD import), which would otherwise push them to the
+  // top of every list since they're usually the most overdue; already
+  // being worked separately, so no need for them to dominate this view.
   const byCureDeadline = (a, b) => {
+    if (!!a.isLead !== !!b.isLead) return a.isLead ? 1 : -1;
     const da = daysUntil(a.cureDeadline), db = daysUntil(b.cureDeadline);
     if (da === null && db === null) return 0;
     if (da === null) return 1;
@@ -4627,6 +4632,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
         l = l.filter(v => { const d = daysUntil(v.cureDeadline); return d !== null && d <= maxDays; });
       }
       l = [...l].sort((a2, b2) => {
+        if (!!a2.isLead !== !!b2.isLead) return a2.isLead ? 1 : -1;
         const da = daysUntil(a2.cureDeadline); const db = daysUntil(b2.cureDeadline);
         if (da === null && db === null) return 0;
         if (da === null) return 1;
@@ -4746,8 +4752,6 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
               <button className="btn-ghost" style={{ color: "var(--danger)" }} onClick={() => setConfirmingDeleteAllHpd(true)}><Trash2 size={14} /> Delete all HPD</button>
             )
           )}
-          <button className="btn-ghost" onClick={() => fileRef.current.click()}><Upload size={14} /> Import CSV</button>
-          <input ref={fileRef} type="file" accept=".csv" hidden onChange={handleCSV} />
           <button className="btn-primary" onClick={() => setForm(blankForm(agency === "All" ? "HPD" : agency))}>
             <Plus size={14} /> Add violation
           </button>
@@ -5072,7 +5076,13 @@ function isGenericAddressFragment(normFrag) {
 // Ovington Avenue"), and only the street name is reliably shared between
 // them.
 function streetNameOnly(addr) {
-  let s = normalizeAddrForMatch((addr || "").split(",")[0].replace(/^[\d-]+\s*/, ""));
+  let raw = (addr || "").split(",")[0].replace(/^[\d-]+\s*/, "");
+  // Word-level abbreviations within the name itself (not a trailing street
+  // type) — expanded here, before spaces are stripped, since they need
+  // real word boundaries to match safely ("Ft" as a whole word, not as a
+  // substring buried inside "Fort" once everything's run together).
+  raw = raw.replace(/\bft\b/gi, "fort").replace(/\bmt\b/gi, "mount");
+  let s = normalizeAddrForMatch(raw);
   // Common street-suffix abbreviations vary between sources ("Avenue" vs
   // "Ave", "Street" vs "St") — normalized to the same short form so those
   // don't cause an otherwise-identical street name to miss.
@@ -5207,9 +5217,14 @@ function HpdViolationsImportSection({ data, add, update, onImported }) {
 
   const runImport = () => {
     if (!preview) return;
-    let created = 0, updated = 0, skipped = 0;
+    let created = 0, alreadyOnFile = 0, skipped = 0;
     for (const row of preview.rows) {
       if (!row.include) { skipped++; continue; }
+      // Already on file — left completely untouched. This runs weekly, and
+      // an existing violation is likely already being worked (a vendor
+      // called, a note added, status moved along) — re-importing shouldn't
+      // reset any of that. Only a genuinely new violation gets added.
+      if (row.existing) { alreadyOnFile++; continue; }
       const fields = {
         agency: "HPD", buildingId: preview.building ? preview.building.id : "",
         unitId: row.unit ? row.unit.id : "",
@@ -5218,10 +5233,10 @@ function HpdViolationsImportSection({ data, add, update, onImported }) {
         cureDeadline: isoFromMDY(row.certByDate) || "",
         status: row.mappedStatus, isLead: row.isLead, isMoldOver10: row.isMoldOver10,
       };
-      if (row.existing) { update("violations", row.existing.id, fields); updated++; }
-      else { add("violations", { ...fields, id: uid(), fineAmount: "", company: "", otherAgency: "", vendorId: "", notes: [] }); created++; }
+      add("violations", { ...fields, id: uid(), fineAmount: "", company: "", otherAgency: "", vendorId: "", notes: [] });
+      created++;
     }
-    setResult({ created, updated, skipped });
+    setResult({ created, alreadyOnFile, skipped });
     if (onImported) setTimeout(onImported, 2500);
     setPreview(null); setRawText("");
   };
@@ -5261,6 +5276,7 @@ function HpdViolationsImportSection({ data, add, update, onImported }) {
           <div className="print-stats-row no-print" style={{ margin: "10px 0" }}>
             <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.mappedStatus === "Open").length}</div><div>Open — needs certifying</div></div>
             <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.mappedStatus === "Certified").length}</div><div>Already certified</div></div>
+            <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.include && r.existing).length}</div><div>Already on file</div></div>
             <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => !r.include).length}</div><div>Skipped — deadline passed</div></div>
             <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.isLead).length}</div><div>Lead flagged</div></div>
             <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.isMoldOver10).length}</div><div>Mold ≥10 sq ft</div></div>
@@ -5275,7 +5291,7 @@ function HpdViolationsImportSection({ data, add, update, onImported }) {
                 {r.isLead && <span className="pill pill-danger" style={{ marginLeft: 6 }}>Lead</span>}
                 {r.isMoldOver10 && <span className="pill pill-warn" style={{ marginLeft: 6 }}>Mold ≥10 sq ft</span>}
                 {!r.unit && r.apt && <span className="pill pill-muted" style={{ marginLeft: 6 }}>Unit not on file</span>}
-                {r.existing && <span className="pill pill-muted" style={{ marginLeft: 6 }}>Updates existing</span>}
+                {r.existing && <span className="pill pill-muted" style={{ marginLeft: 6 }}>Already on file — won't be touched</span>}
               </div>
             ))}
           </div>
@@ -5287,7 +5303,7 @@ function HpdViolationsImportSection({ data, add, update, onImported }) {
       )}
       {result && (
         <div className="hint" style={{ marginTop: 8 }}>
-          Done — {result.created} created, {result.updated} updated, {result.skipped} skipped (past deadline, not certified).
+          Done — {result.created} new violation{result.created === 1 ? "" : "s"} added, {result.alreadyOnFile} already on file (left untouched), {result.skipped} skipped (past deadline, not certified).
         </div>
       )}
     </div>
