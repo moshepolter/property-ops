@@ -2957,7 +2957,7 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
           <PrintButton label="Buildings" />
           <button className="btn-ghost" onClick={() => fileRef.current.click()}><Upload size={14} /> Import CSV</button>
           <input ref={fileRef} type="file" accept=".csv" hidden onChange={handleCSV} />
-          <button className="btn-primary" onClick={() => setForm({ address: "", notes: "" })}><Plus size={14} /> Add building</button>
+          <button className="btn-primary" onClick={() => setForm({ address: "", alsoKnownAs: "", notes: "" })}><Plus size={14} /> Add building</button>
         </div>
       </div>
       <p className="hint">CSV columns recognized: address, unit, tenant, phone, email, balance, status.</p>
@@ -3000,6 +3000,12 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
       {form && (
         <div className="form-panel">
           <Field label="Address"><input value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} /></Field>
+          <Field label="Also known as (optional)">
+            <input
+              value={form.alsoKnownAs || ""} onChange={e => setForm({ ...form, alsoKnownAs: e.target.value })}
+              placeholder="e.g. a cross-street address HPD lists this corner building under, comma-separated if more than one"
+            />
+          </Field>
           <Field label="Notes"><textarea value={form.notes || ""} onChange={e => setForm({ ...form, notes: e.target.value })} /></Field>
           <div className="form-actions">
             <button className="btn-primary" onClick={submit}>Save</button>
@@ -3312,7 +3318,12 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
       const oldTenants = tenantsHere.filter(t => agingSeverity(t) === 3);
       const oldTotal = oldTenants.reduce((sum, t) => sum + parseBalance(t.balance), 0);
       return { building: b, tenants: tenantsHere, totalCount: allTenantsHere.length, totalOwed, oldCount: oldTenants.length, oldTotal };
-    });
+    })
+    // A building with tenants overall but none matching the active filter
+    // shouldn't still get a card — that's an empty building header for
+    // nothing, exactly the noise a filter like "Follow-ups" is meant to
+    // cut through.
+    .filter(g => g.tenants.length > 0);
 
   const totalOwedAll = buildingGroups.reduce((sum, g) => sum + g.totalOwed, 0);
   const visibleTenants = buildingGroups.flatMap(g => g.tenants);
@@ -5163,6 +5174,16 @@ function streetNameOnly(addr) {
        .replace(/place$/, "pl").replace(/road$/, "rd").replace(/parkway$/, "pkwy");
   return s;
 }
+// A building's primary address plus any alternate ones stored for it — a
+// corner-lot building can genuinely have two valid addresses (one per
+// intersecting street), and HPD or another agency may register it under
+// whichever one isn't the building's usual/primary address. No amount of
+// abbreviation normalization can bridge two genuinely different street
+// names, so this is explicit, stored knowledge rather than inferred.
+function buildingAddressCandidates(b) {
+  const extra = (b.alsoKnownAs || "").split(",").map(s => s.trim()).filter(Boolean);
+  return [b.address, ...extra];
+}
 function findCourtBuildingMatch(courtAddress, buildings) {
   const rawFragments = (courtAddress || "").split(/,|\bAKA\b/i).map(f => f.trim()).filter(Boolean);
   // A bare city name or zip code matches nearly every building in the
@@ -5178,10 +5199,10 @@ function findCourtBuildingMatch(courtAddress, buildings) {
   for (const frag of realFragments) {
     const nf = normalizeAddrForMatch(frag);
     if (!nf) continue;
-    const match = buildings.find(b => {
-      const nb = normalizeAddrForMatch(b.address);
+    const match = buildings.find(b => buildingAddressCandidates(b).some(addr => {
+      const nb = normalizeAddrForMatch(addr);
       return nb.includes(nf) || nf.includes(nb);
-    });
+    }));
     if (match) return match;
   }
   // Pass 2: street name only, ignoring the leading number — containment
@@ -5190,10 +5211,10 @@ function findCourtBuildingMatch(courtAddress, buildings) {
   for (const frag of realFragments) {
     const streetOnly = streetNameOnly(frag);
     if (!streetOnly) continue;
-    const match = buildings.find(b => {
-      const bStreet = streetNameOnly(b.address);
+    const match = buildings.find(b => buildingAddressCandidates(b).some(addr => {
+      const bStreet = streetNameOnly(addr);
       return bStreet && (bStreet.includes(streetOnly) || streetOnly.includes(bStreet));
-    });
+    }));
     if (match) return match;
   }
   return null;
