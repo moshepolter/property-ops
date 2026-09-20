@@ -2550,6 +2550,15 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
                   <div className="dash-roster-meta">
                     {t.phone && <a href={`tel:${t.phone}`} className="dash-roster-phone" onClick={(e) => e.stopPropagation()} title={t.phone}><Phone size={14} /></a>}
                     <span className="pill pill-muted">{fmtDate(f.date)}</span>
+                    <IconBtn
+                      title="Done — remove this follow-up"
+                      onClick={() => setData(d => ({
+                        ...d,
+                        tenants: d.tenants.map(t2 => t2.id === t.id ? { ...t2, followUps: tenantFollowUps(t2).filter(f2 => f2.id !== f.id) } : t2),
+                      }))}
+                    >
+                      <CheckCircle2 size={14} />
+                    </IconBtn>
                   </div>
                 </div>
               ))}
@@ -4718,7 +4727,9 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
       });
     }
     if (view === "active") {
-      if (dueFilter !== "all") {
+      if (dueFilter === "lead") {
+        l = l.filter(v => v.isLead);
+      } else if (dueFilter !== "all") {
         const maxDays = dueFilter === "24h" ? 1 : dueFilter === "1w" ? 7 : 10;
         l = l.filter(v => { const d = daysUntil(v.cureDeadline); return d !== null && d <= maxDays && !v.isLead; });
       }
@@ -4933,6 +4944,9 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           <button className={`chip ${dueFilter === "24h" ? "chip-active" : ""}`} onClick={() => setDueFilter("24h")}>Cure due ≤ 24 hrs</button>
           <button className={`chip ${dueFilter === "1w" ? "chip-active" : ""}`} onClick={() => setDueFilter("1w")}>Cure due ≤ 1 week</button>
           <button className={`chip ${dueFilter === "10d" ? "chip-active" : ""}`} onClick={() => setDueFilter("10d")}>Cure due ≤ 10 days</button>
+          {(agency === "HPD" || agency === "All") && (
+            <button className={`chip ${dueFilter === "lead" ? "chip-active" : ""}`} onClick={() => setDueFilter("lead")}>Lead</button>
+          )}
         </div>
       )}
 
