@@ -273,6 +273,30 @@ const emptyData = () => ({
   customOtherAgencies: [], quickNotes: [], importHistory: [],
 });
 
+// Every field in emptyData() is an array of records with an id. When a
+// remote update arrives on this device while a local edit is still
+// pending save, blindly ignoring the remote update entirely would let this
+// device's own save (a full document replace) later overwrite it — the
+// other device's just-saved work would silently vanish the moment this
+// device's pending save fires. Blindly applying the remote update instead
+// would discard whatever's being edited locally right now. This splits
+// the difference safely: keep every local record as-is (so an in-progress
+// edit is never discarded), but fold in any record that exists ONLY in
+// the remote version — something the other device added or already has —
+// so it isn't lost either. Not a perfect same-record conflict resolution,
+// but it guarantees neither side's distinct records disappear.
+function mergeRemoteWhilePending(localData, remoteData) {
+  const merged = { ...localData };
+  Object.keys(emptyData()).forEach(k => {
+    const local = Array.isArray(localData[k]) ? localData[k] : [];
+    const remote = Array.isArray(remoteData[k]) ? remoteData[k] : [];
+    const localIds = new Set(local.map(x => x && x.id));
+    const remoteOnly = remote.filter(x => x && !localIds.has(x.id));
+    if (remoteOnly.length > 0) merged[k] = [...local, ...remoteOnly];
+  });
+  return merged;
+}
+
 function violationClosedStatuses(agency) {
   return agency === "HPD" ? ["Certified", "Dismissed"] : agency === "DSNY" ? ["Paid"] : ["Resolved", "Dismissed"];
 }
@@ -1445,10 +1469,20 @@ export default function PropertyOpsApp() {
         // of that echo, so there's nothing new to apply — skip it.
         if (snap.metadata.hasPendingWrites) { setLoaded(true); return; }
         // If this device has a local edit queued but not saved yet, don't
-        // let an update arriving from the other device stomp on it —
-        // that's the one case where applying a remote update immediately
-        // would actively discard something the user just typed here.
-        if (hasPendingSave.current) { setLoaded(true); return; }
+        // apply the remote update wholesale — that would discard whatever
+        // is being edited here right now. But don't ignore it outright
+        // either: this device's own save is a full document replace, and
+        // would otherwise silently erase anything the other device just
+        // saved. Fold in only the records that exist solely in the remote
+        // version, leaving every local record exactly as it is.
+        if (hasPendingSave.current) {
+          if (snap.exists()) {
+            const loaded = snap.data();
+            setData(d => mergeRemoteWhilePending(d, loaded));
+          }
+          setLoaded(true);
+          return;
+        }
         if (snap.exists()) {
           // A plain {...emptyData(), ...snap.data()} spread would let an
           // explicit null in any field (a stray manual edit in the Firestore
@@ -4650,7 +4684,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
     if (view === "active") {
       if (dueFilter !== "all") {
         const maxDays = dueFilter === "24h" ? 1 : dueFilter === "1w" ? 7 : 10;
-        l = l.filter(v => { const d = daysUntil(v.cureDeadline); return d !== null && d <= maxDays; });
+        l = l.filter(v => { const d = daysUntil(v.cureDeadline); return d !== null && d <= maxDays && !v.isLead; });
       }
       l = [...l].sort((a2, b2) => {
         if (!!a2.isLead !== !!b2.isLead) return a2.isLead ? 1 : -1;
