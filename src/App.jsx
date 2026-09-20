@@ -233,6 +233,15 @@ function isViolationClosed(v) {
 
 /* ============================== date helpers ============================== */
 
+// Converts the HPD report's MM/DD/YYYY dates to the ISO (YYYY-MM-DD) format
+// every other date field in the app uses — "-" or empty means no date, same
+// convention as the rest of the app's blank date fields.
+function isoFromMDY(mdy) {
+  if (!mdy || mdy === "-") return "";
+  const [mm, dd, yyyy] = mdy.split("/");
+  if (!mm || !dd || !yyyy) return "";
+  return `${yyyy}-${mm}-${dd}`;
+}
 function daysUntil(dateStr) {
   if (!dateStr) return null;
   const d = new Date(dateStr + "T00:00:00");
@@ -747,6 +756,65 @@ function parseContactsText(text) {
 // MOST RECENT action listed first. This pulls out one record per unique
 // case number, using whichever page first supplied each field, and takes
 // the very first dated action line as "the latest on the case."
+// Parses an HPD "Open Violations" building report (the PDF export from HPD's
+// online violation lookup) into individual violation records. Each
+// violation is a 3-line block: a header line (violation ID, class, order #,
+// apt, story, reported date, NOV issued date), a second line (NOV ID, NOV
+// type, correction-by date, certification-by date, status, status date,
+// actual certification date), and a wrapped description.
+function parseHpdViolationsText(text) {
+  const addrMatch = text.match(/^(.+?,\s*(?:Brooklyn|Queens|Bronx|Manhattan|Staten Island),\s*\d{5})\s*$/m);
+  const buildingAddress = addrMatch ? addrMatch[1].trim() : "";
+
+  // The "story" field isn't always a number — it can be "Not Applicable",
+  // "Fire Escape", "Yards / Courts", "All Stories", etc., so it's captured
+  // non-greedy up to the first recognizable date (or "-") that follows.
+  const line1Re = /^(\d{6,9})\s+([A-Z])\s+(\S+)\s+(\S+)\s+(.+?)\s+(\d{2}\/\d{2}\/\d{4}|-)\s+(\d{2}\/\d{2}\/\d{4}|-)\s*$/;
+  const line2Re = /^(\S+)\s+(\S+(?:\s\S+)?)\s+(\d{2}\/\d{2}\/\d{4}|-)\s+(\d{2}\/\d{2}\/\d{4}|-)\s+(.+?)\s+(\d{2}\/\d{2}\/\d{4})\s+(-|\d{2}\/\d{2}\/\d{4})\s*$/;
+  // Lines that are page headers/footers/column labels repeated on every
+  // page — stripped out of the description rather than left to contaminate
+  // the wrapped text, the same problem solved for the court cases parser.
+  const skipLineRe = new RegExp(
+    "^(Page \\d+ of \\d+|Generated on|VIOLATION ID|NOV ID|VIOLATION DESCRIPTION" +
+    (buildingAddress ? "|" + buildingAddress.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "") + ")",
+    "i"
+  );
+
+  const blocks = text.split(new RegExp("(?=^" + line1Re.source.slice(1) + ")", "m")).filter(b => /^\d{6,9}\s+[A-Z]/.test(b.trim()));
+
+  const violations = [];
+  for (const block of blocks) {
+    const lines = block.split("\n").map(l => l.trim()).filter(Boolean);
+    if (lines.length < 2) continue;
+    const m1 = lines[0].match(line1Re);
+    if (!m1) continue;
+    const m2 = lines[1].match(line2Re);
+    const descLines = lines.slice(2).filter(l => !skipLineRe.test(l));
+    const description = descLines.join(" ").replace(/\s+/g, " ").trim();
+
+    const v = {
+      violationId: m1[1], class: m1[2], orderNum: m1[3].replace(/\*$/, ""),
+      apt: m1[4] === "-" ? "" : m1[4], story: m1[5],
+      reportedDate: m1[6], novIssuedDate: m1[7], description,
+      novId: "", novType: "", correctionByDate: "", certByDate: "", status: "", statusDate: "", actualCertDate: "",
+    };
+    if (m2) {
+      v.novId = m2[1]; v.novType = m2[2]; v.correctionByDate = m2[3];
+      v.certByDate = m2[4]; v.status = m2[5]; v.statusDate = m2[6]; v.actualCertDate = m2[7];
+    }
+    // Lead: word-boundary match so "lead-based paint" is caught without
+    // "leading to" or "leads" false-triggering.
+    v.isLead = /\blead\b/i.test(description);
+    // Mold at or above the 10 sq ft threshold HPD uses under Local Law 55
+    // to require licensed remediation (Class B/C) — flagged whenever mold
+    // is mentioned and the description doesn't explicitly say "less than
+    // 10", since an unspecified size is safer to flag than to miss.
+    v.isMoldOver10 = /\bmold\b/i.test(description) && !/less than 10/i.test(description);
+    violations.push(v);
+  }
+  return { buildingAddress, violations };
+}
+
 function parseCourtCasesText(text) {
   const lines = text.split("\n").filter(line => {
     const t = line.trim();
@@ -4348,6 +4416,8 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   const [expandedRow, setExpandedRow] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [copiedId, setCopiedId] = useState(null);
+  const [showHpdImport, setShowHpdImport] = useState(false);
+  const [buildingFilter, setBuildingFilter] = useState("All");
   const fileRef = useRef(null);
 
   const toggleSelected = (id) => {
@@ -4481,6 +4551,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   };
   const filterAndSort = (a) => {
     let l = data.violations.filter(v => matchesAgency(v, a) && (view === "active" ? !isClosed(v) : isClosed(v)));
+    if (buildingFilter !== "All") l = l.filter(v => v.buildingId === buildingFilter);
     if (view === "active") {
       if (dueFilter !== "all") {
         const maxDays = dueFilter === "24h" ? 1 : dueFilter === "1w" ? 7 : 10;
@@ -4521,6 +4592,8 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           {rowAgency === "DSNY" && v.fineAmount && <span className="pill pill-muted">{v.fineAmount}</span>}
           {rowAgency === "Other" && v.otherAgency && <span className="pill pill-muted">{v.otherAgency}</span>}
           {v.hasHearing && <span className="pill pill-warn"><Gavel size={11} /> Hearing{v.hearingDate ? ` ${fmtDate(v.hearingDate)}` : ""}</span>}
+          {v.isLead && <span className="pill pill-danger">Lead</span>}
+          {v.isMoldOver10 && <span className="pill pill-warn">Mold ≥10 sq ft</span>}
           {rowAgency !== "HPD" && rowAgency !== "DSNY" && v.company && <span className="pill pill-muted">{v.company}</span>}
           {rowAgency !== "DSNY" && view === "active" && <Flag date={v.cureDeadline} />}
           <div className="spacer" />
@@ -4592,6 +4665,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
             </button>
           )}
           <PrintButton label="Violations" />
+          <button className="btn-ghost" onClick={() => setShowHpdImport(s => !s)}><Upload size={14} /> Import HPD violations</button>
           <button className="btn-ghost" onClick={() => fileRef.current.click()}><Upload size={14} /> Import CSV</button>
           <input ref={fileRef} type="file" accept=".csv" hidden onChange={handleCSV} />
           <button className="btn-primary" onClick={() => setForm(blankForm(agency === "All" ? "HPD" : agency))}>
@@ -4599,6 +4673,17 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           </button>
         </div>
       </div>
+
+      {showHpdImport && <HpdViolationsImportSection data={data} add={add} update={update} />}
+
+      {data.buildings.length > 1 && (
+        <div className="filter-row">
+          <button className={`chip ${buildingFilter === "All" ? "chip-active" : ""}`} onClick={() => setBuildingFilter("All")}>All buildings</button>
+          {data.buildings.filter(b => data.violations.some(v => v.buildingId === b.id)).map(b => (
+            <button key={b.id} className={`chip ${buildingFilter === b.id ? "chip-active" : ""}`} onClick={() => setBuildingFilter(b.id)}>{shortAddress(b.address)}</button>
+          ))}
+        </div>
+      )}
 
       <div className="print-only">
         <div className="print-header">
@@ -4902,6 +4987,151 @@ function findCourtTenantMatch(courtCase, building, tenants, units) {
   }
   if (best && bestScore >= 1) return { tenant: best, reason: `matched by name (${bestScore} word${bestScore === 1 ? "" : "s"} in common)` };
   return { tenant: null, reason: "no unit or name match found" };
+}
+
+function HpdViolationsImportSection({ data, add, update }) {
+  const [rawText, setRawText] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const [pdfStatus, setPdfStatus] = useState(null);
+  const [pdfError, setPdfError] = useState("");
+  const [showPaste, setShowPaste] = useState(false);
+  const pdfInputRef = useRef(null);
+
+  const runPreview = (text = undefined) => {
+    const source = text !== undefined ? text : rawText;
+    setError(""); setResult(null);
+    if (!source.trim()) { setError("Paste the report text first."); return; }
+    const { buildingAddress, violations } = parseHpdViolationsText(source);
+    if (violations.length === 0) { setError("No violations found — make sure this is the full HPD \"Open Violations\" report text."); return; }
+    const building = findCourtBuildingMatch(buildingAddress, data.buildings);
+    const today = todayISO();
+    const rows = violations.map(v => {
+      const unit = (building && v.apt)
+        ? data.units.find(u => u.buildingId === building.id && normalizeAptForMatch(u.unitNumber) === normalizeAptForMatch(v.apt))
+        : null;
+      // Already certified (HPD's "NOV CERT" status) — include, but marked
+      // resolved so it lands in the closed/certified view, not the active
+      // one. Not yet certified but the certify-by deadline has already
+      // gone by — skip it entirely, since there's nothing actionable left
+      // to track for a deadline that's already passed. Otherwise it's
+      // still open and needs attention before its deadline.
+      let include, mappedStatus;
+      if (/CERT/i.test(v.status) && !/INVALID/i.test(v.status)) { include = true; mappedStatus = "Certified"; }
+      else if (v.certByDate !== "-" && isoFromMDY(v.certByDate) < today) { include = false; mappedStatus = null; }
+      else { include = true; mappedStatus = "Open"; }
+      const existing = data.violations.find(ev => ev.agency === "HPD" && ev.violationNumber === v.violationId);
+      return { ...v, unit, include, mappedStatus, existing };
+    });
+    setPreview({ buildingAddress, building, rows });
+  };
+
+  const handlePdfUpload = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setPdfStatus("reading");
+    setPdfError("");
+    setPreview(null);
+    try {
+      const text = await extractPdfText(file);
+      setRawText(text);
+      setPdfStatus(null);
+      runPreview(text);
+    } catch (err) {
+      setPdfStatus("error");
+      setPdfError("Couldn't read that PDF automatically — use \"paste the text instead\" below (open the PDF, Ctrl/Cmd+A, Ctrl/Cmd+C, then paste).");
+      setShowPaste(true);
+    }
+  };
+
+  const runImport = () => {
+    if (!preview) return;
+    let created = 0, updated = 0, skipped = 0;
+    for (const row of preview.rows) {
+      if (!row.include) { skipped++; continue; }
+      const fields = {
+        agency: "HPD", buildingId: preview.building ? preview.building.id : "",
+        unitId: row.unit ? row.unit.id : "",
+        violationNumber: row.violationId, class: row.class, description: row.description,
+        dateIssued: isoFromMDY(row.novIssuedDate) || isoFromMDY(row.reportedDate) || "",
+        cureDeadline: isoFromMDY(row.certByDate) || "",
+        status: row.mappedStatus, isLead: row.isLead, isMoldOver10: row.isMoldOver10,
+      };
+      if (row.existing) { update("violations", row.existing.id, fields); updated++; }
+      else { add("violations", { ...fields, id: uid(), fineAmount: "", company: "", otherAgency: "", vendorId: "", notes: [] }); created++; }
+    }
+    setResult({ created, updated, skipped });
+    setPreview(null); setRawText("");
+  };
+
+  return (
+    <div className="form-panel" style={{ marginBottom: 16 }}>
+      <div style={{ fontWeight: 700, marginBottom: 4 }}>Import HPD violations</div>
+      <p className="hint">
+        Upload the HPD "Open Violations" building report PDF directly, or paste its text. Matches to a building by address and to units by apartment number.
+        Violations past their certification deadline without being certified are skipped; already-certified ones are imported marked as closed.
+      </p>
+      <div className="form-actions" style={{ marginTop: 4, marginBottom: 8 }}>
+        <button className="btn-primary" type="button" onClick={() => pdfInputRef.current.click()} disabled={pdfStatus === "reading"}>
+          <Upload size={14} /> {pdfStatus === "reading" ? "Reading PDF…" : "Upload HPD violations PDF"}
+        </button>
+        <input ref={pdfInputRef} type="file" accept="application/pdf" hidden onChange={handlePdfUpload} />
+        <button className="btn-ghost" type="button" onClick={() => setShowPaste(s => !s)}>{showPaste ? "Hide" : "Or paste the text instead"}</button>
+      </div>
+      {pdfStatus === "error" && <div className="hint" style={{ color: "var(--danger)" }}>{pdfError}</div>}
+      {showPaste && (
+        <textarea rows={8} value={rawText} onChange={e => { setRawText(e.target.value); setPreview(null); setResult(null); }} placeholder="Paste the full report text here…" />
+      )}
+      {error && <div className="hint" style={{ color: "var(--danger)" }}>{error}</div>}
+      {showPaste && (
+        <div className="form-actions" style={{ marginTop: 8 }}>
+          <button className="btn-primary" onClick={() => runPreview()} disabled={!rawText.trim()}>Preview</button>
+        </div>
+      )}
+      {preview && (
+        <div style={{ marginTop: 12 }}>
+          <div className="row">
+            <strong>{preview.buildingAddress || "Address not found"}</strong>
+            {preview.building
+              ? <span className="pill pill-ok" style={{ marginLeft: 8 }}>Matched to {shortAddress(preview.building.address)}</span>
+              : <span className="pill pill-danger" style={{ marginLeft: 8 }}>No matching building — add this building first</span>}
+          </div>
+          <div className="print-stats-row no-print" style={{ margin: "10px 0" }}>
+            <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.mappedStatus === "Open").length}</div><div>Open — needs certifying</div></div>
+            <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.mappedStatus === "Certified").length}</div><div>Already certified</div></div>
+            <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => !r.include).length}</div><div>Skipped — deadline passed</div></div>
+            <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.isLead).length}</div><div>Lead flagged</div></div>
+            <div className="print-stat"><div className="print-stat-num">{preview.rows.filter(r => r.isMoldOver10).length}</div><div>Mold ≥10 sq ft</div></div>
+          </div>
+          <div style={{ maxHeight: 400, overflowY: "auto" }}>
+            {preview.rows.filter(r => r.include).sort((a, b) => (isoFromMDY(a.certByDate) || "9999").localeCompare(isoFromMDY(b.certByDate) || "9999")).map(r => (
+              <div className="row row-muted" key={r.violationId}>
+                <span className="pill pill-accent">{r.class}</span>{" "}
+                {r.apt ? `Apt ${r.apt}` : "Building-wide"} — #{r.violationId}
+                {r.mappedStatus === "Certified" && <span className="pill pill-ok" style={{ marginLeft: 6 }}>Certified</span>}
+                {r.certByDate !== "-" && <span className="pill pill-muted" style={{ marginLeft: 6 }}>Cert by {fmtDate(isoFromMDY(r.certByDate))}</span>}
+                {r.isLead && <span className="pill pill-danger" style={{ marginLeft: 6 }}>Lead</span>}
+                {r.isMoldOver10 && <span className="pill pill-warn" style={{ marginLeft: 6 }}>Mold ≥10 sq ft</span>}
+                {!r.unit && r.apt && <span className="pill pill-muted" style={{ marginLeft: 6 }}>Unit not on file</span>}
+                {r.existing && <span className="pill pill-muted" style={{ marginLeft: 6 }}>Updates existing</span>}
+              </div>
+            ))}
+          </div>
+          <div className="form-actions" style={{ marginTop: 10 }}>
+            <button className="btn-primary" onClick={runImport} disabled={!preview.building}>Confirm import</button>
+            <button className="btn-ghost" onClick={() => setPreview(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {result && (
+        <div className="hint" style={{ marginTop: 8 }}>
+          Done — {result.created} created, {result.updated} updated, {result.skipped} skipped (past deadline, not certified).
+        </div>
+      )}
+    </div>
+  );
 }
 
 function CourtCaseImportSection({ data, add, update }) {
