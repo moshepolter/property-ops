@@ -1366,6 +1366,15 @@ export default function PropertyOpsApp() {
   // suspiciously claims the document vanished after real data was already
   // showing (almost certainly a transient glitch, not an actual deletion).
   const hasLoadedRealDataOnce = useRef(false);
+  // The save-effect below depends on `loaded`, so it re-fires the instant
+  // `loaded` flips from false to true after the initial snapshot settles —
+  // even though nothing was actually edited. Left unguarded, that fires a
+  // real save of whatever `data` happens to be at that exact moment,
+  // including — in the worst case — a misdiagnosed "document missing, so
+  // start empty" state for an existing account with real data on the
+  // server, silently overwriting it. This ref skips exactly that one,
+  // load-driven save; only a genuine subsequent edit schedules one.
+  const justLoaded = useRef(true);
   // A write to Firestore fully replaces the document rather than merging —
   // so if two saves ever end up in flight at once and the earlier-started
   // one happens to take longer (a slow connection, a brief hiccup — exactly
@@ -1418,6 +1427,7 @@ export default function PropertyOpsApp() {
     hasPendingSave.current = false;
     pendingSince.current = null;
     setSaveStuck(false);
+    justLoaded.current = true;
     if (!user) return;
     setLoadError(false);
     hasLoadedRealDataOnce.current = false;
@@ -1454,11 +1464,22 @@ export default function PropertyOpsApp() {
           });
           setData(merged);
           hasLoadedRealDataOnce.current = true;
-        } else if (!hasLoadedRealDataOnce.current) {
+        } else if (!hasLoadedRealDataOnce.current && !snap.metadata.fromCache) {
           // Genuinely a brand-new account with nothing saved yet — this is
           // the only situation where treating "no document" as "start
-          // empty" is actually safe.
+          // empty" is actually safe. Requires a server-confirmed read, not
+          // a cached one: a snapshot served from local cache before the
+          // network round-trip completes could plausibly report "not
+          // found" for a document that actually exists on the server, and
+          // this determination is irreversible enough that an unconfirmed
+          // signal isn't good enough grounds for it.
           setData(emptyData());
+        } else if (!hasLoadedRealDataOnce.current) {
+          // First read said "missing" but came from cache, not the server —
+          // wait for the server-confirmed snapshot instead of acting on this
+          // one. Leave data as-is (still emptyData() from the reset above)
+          // and don't mark loaded yet, so nothing saves in the meantime.
+          return;
         } else {
           // Real data was already loaded once this session, so a later
           // snapshot claiming the document is gone doesn't add up — that's
@@ -1531,6 +1552,7 @@ export default function PropertyOpsApp() {
 
   useEffect(() => {
     if (!loaded || !user) return;
+    if (justLoaded.current) { justLoaded.current = false; return; }
     if (!hasPendingSave.current) pendingSince.current = Date.now();
     hasPendingSave.current = true;
     clearTimeout(saveTimer.current);
