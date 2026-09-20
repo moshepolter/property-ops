@@ -4944,7 +4944,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           <button className={`chip ${dueFilter === "24h" ? "chip-active" : ""}`} onClick={() => setDueFilter("24h")}>Cure due ≤ 24 hrs</button>
           <button className={`chip ${dueFilter === "1w" ? "chip-active" : ""}`} onClick={() => setDueFilter("1w")}>Cure due ≤ 1 week</button>
           <button className={`chip ${dueFilter === "10d" ? "chip-active" : ""}`} onClick={() => setDueFilter("10d")}>Cure due ≤ 10 days</button>
-          {(agency === "HPD" || agency === "All") && (
+          {agency === "HPD" && (
             <button className={`chip ${dueFilter === "lead" ? "chip-active" : ""}`} onClick={() => setDueFilter("lead")}>Lead</button>
           )}
         </div>
