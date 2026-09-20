@@ -1360,7 +1360,7 @@ function PinLockScreen({ onUnlock, onForgot }) {
 
 /* ============================== app ============================== */
 
-export default function PropertyOpsApp() {
+function PropertyOpsAppInner() {
   const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
   const [data, setData] = useState(emptyData());
   // Always mirrors the latest `data` — needed so a save that gets queued
@@ -1452,6 +1452,8 @@ export default function PropertyOpsApp() {
     pendingSince.current = null;
     setSaveStuck(false);
     justLoaded.current = true;
+    clearTimeout(saveRetryTimer.current);
+    saveRetryCount.current = 0;
     if (!user) return;
     setLoadError(false);
     hasLoadedRealDataOnce.current = false;
@@ -1537,6 +1539,8 @@ export default function PropertyOpsApp() {
     return () => unsub();
   }, [user]);
 
+  const saveRetryTimer = useRef(null);
+  const saveRetryCount = useRef(0);
   const runSave = useCallback(async () => {
     if (saveInFlight.current) {
       // Something is already saving — don't start a second write
@@ -1567,6 +1571,8 @@ export default function PropertyOpsApp() {
       setDocSizeWarning(approxSize > 800000);
       await setDoc(doc(db, "users", user.uid, "appData", "main"), safe);
       setSaveError(false);
+      saveRetryCount.current = 0;
+      clearTimeout(saveRetryTimer.current);
       // Only a confirmed success with nothing further queued means there's
       // truly nothing left owed — a failed save, or one where a newer
       // change already arrived while this one was running, needs to keep
@@ -1575,6 +1581,16 @@ export default function PropertyOpsApp() {
     } catch (e) {
       console.error("save failed", e);
       setSaveError(true);
+      // A failed save otherwise just sits there — nothing re-triggers
+      // runSave unless the user happens to make another edit, which a
+      // transient network blip gives no reason to expect. Retry on its own
+      // instead, with backoff (2s, 4s, 8s... capped at 30s) so a real
+      // outage doesn't hammer Firestore, but a brief hiccup recovers
+      // without depending on the user noticing anything or acting on it.
+      clearTimeout(saveRetryTimer.current);
+      const delay = Math.min(30000, 2000 * Math.pow(2, saveRetryCount.current));
+      saveRetryCount.current += 1;
+      saveRetryTimer.current = setTimeout(() => { if (hasPendingSave.current) runSave(); }, delay);
     } finally {
       saveInFlight.current = false;
       if (saveQueued.current) {
@@ -1893,7 +1909,7 @@ function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, 
 function allDatedItems(data, tenantName, buildingName) {
   const items = [];
   data.violations.forEach(v => {
-    if (v.cureDeadline && !isViolationClosed(v)) {
+    if (v.cureDeadline && !isViolationClosed(v) && !v.isLead) {
       items.push({ key: `v-${v.id}`, date: v.cureDeadline, type: `${v.agency} cure deadline`, label: `#${v.violationNumber}`, sub: buildingName(v.buildingId), tab: "violations" });
     }
     if (v.hasHearing && v.hearingDate && !isViolationClosed(v)) {
@@ -6816,5 +6832,60 @@ function Styles() {
         }
       }
     `}</style>
+  );
+}
+
+// A crash anywhere in the render tree (a malformed field, an unexpected
+// data shape, any unhandled exception) would otherwise take down the
+// entire app to a blank white screen with zero explanation — which looks
+// exactly like "all my data is gone" even though nothing on the server
+// was touched; the data this app saves lives in Firestore, entirely
+// independent of whether this specific render happened to succeed. This
+// boundary catches that instead of letting it go to a blank screen, and
+// says plainly that the data itself is safe, since a panicked reaction to
+// what looks like total data loss is itself a risk — someone might delete
+// the account, wipe local storage, or take some other drastic step trying
+// to "fix" what is actually just a display crash.
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error, info) {
+    console.error("Render crash caught by ErrorBoundary:", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          minHeight: "100vh", padding: 24, textAlign: "center", fontFamily: "system-ui, sans-serif",
+        }}>
+          <h2 style={{ marginBottom: 8 }}>Something went wrong displaying this page</h2>
+          <p style={{ maxWidth: 480, color: "#555", marginBottom: 16 }}>
+            Your data is safe — it's saved on the server, not in this screen. This is just a display
+            problem. Try reloading the page below.
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            style={{ padding: "10px 20px", borderRadius: 8, border: "none", background: "#2F6FE0", color: "white", fontSize: 15, cursor: "pointer" }}
+          >
+            Reload the page
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export default function PropertyOpsApp() {
+  return (
+    <ErrorBoundary>
+      <PropertyOpsAppInner />
+    </ErrorBoundary>
   );
 }
