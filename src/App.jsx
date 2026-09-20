@@ -4469,6 +4469,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   const [buildingFilter, setBuildingFilter] = useState("All");
   const [search, setSearch] = useState("");
   const [confirmingDeleteAllHpd, setConfirmingDeleteAllHpd] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState(new Set());
   const fileRef = useRef(null);
 
   // Scoped to HPD only — a generic "delete all violations" would also wipe
@@ -4928,12 +4929,32 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
         (() => {
           const groups = ["HPD", "DSNY", ...dynamicOtherAgencies, "Other"].map(a => ({ agency: a, items: filterAndSort(a) })).filter(g => g.items.length > 0);
           if (groups.length === 0) return <EmptyState text="No violations here." />;
-          return groups.map((g, gi) => (
-            <div key={g.agency} style={{ marginTop: gi === 0 ? 0 : 20 }}>
-              <div className="violations-group-heading">{g.agency} <span className="dash-panel-sub">({g.items.length})</span></div>
-              {g.items.map(v => renderRow(v, g.agency))}
-            </div>
-          ));
+          const allCollapsed = groups.every(g => collapsedGroups.has(g.agency));
+          const toggleGroup = (a) => setCollapsedGroups(prev => {
+            const next = new Set(prev);
+            if (next.has(a)) next.delete(a); else next.add(a);
+            return next;
+          });
+          return (
+            <>
+              <div className="row" style={{ marginBottom: 8 }}>
+                <button className="btn-ghost" onClick={() => setCollapsedGroups(allCollapsed ? new Set() : new Set(groups.map(g => g.agency)))}>
+                  {allCollapsed ? "Expand all" : "Collapse all"}
+                </button>
+              </div>
+              {groups.map((g, gi) => {
+                const isCollapsed = collapsedGroups.has(g.agency);
+                return (
+                  <div key={g.agency} style={{ marginTop: gi === 0 ? 0 : 20 }}>
+                    <div className="violations-group-heading" style={{ cursor: "pointer" }} onClick={() => toggleGroup(g.agency)}>
+                      {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />} {g.agency} <span className="dash-panel-sub">({g.items.length})</span>
+                    </div>
+                    {!isCollapsed && g.items.map(v => renderRow(v, g.agency))}
+                  </div>
+                );
+              })}
+            </>
+          );
         })()
       ) : (
         <>
@@ -5145,12 +5166,18 @@ function HpdViolationsImportSection({ data, add, update, onImported }) {
         : null;
       // Already certified (HPD's "NOV CERT" status) — include, but marked
       // resolved so it lands in the closed/certified view, not the active
-      // one. Not yet certified but the certify-by deadline has already
-      // gone by — skip it entirely, since there's nothing actionable left
+      // one. Lead violations are always included regardless of deadline —
+      // they're notoriously slow to resolve (special testing requirements,
+      // can't be certified through the fast online process), so an overdue
+      // lead hazard is exactly the kind of thing that needs to stay
+      // visible, not disappear because the paperwork deadline passed.
+      // Everything else: not yet certified but the certify-by deadline has
+      // already gone by — skip it, since there's nothing actionable left
       // to track for a deadline that's already passed. Otherwise it's
       // still open and needs attention before its deadline.
       let include, mappedStatus;
       if (/CERT/i.test(v.status) && !/INVALID/i.test(v.status)) { include = true; mappedStatus = "Certified"; }
+      else if (v.isLead) { include = true; mappedStatus = "Open"; }
       else if (v.certByDate !== "-" && isoFromMDY(v.certByDate) < today) { include = false; mappedStatus = null; }
       else { include = true; mappedStatus = "Open"; }
       const existing = data.violations.find(ev => ev.agency === "HPD" && ev.violationNumber === v.violationId);
@@ -6228,7 +6255,7 @@ function Styles() {
       .content { flex: 1; padding: 24px 28px; padding-bottom: max(24px, env(safe-area-inset-bottom)); min-width: 0; }
       .page-title { font-family: Georgia, "Times New Roman", serif; font-size: 24px; margin: 0 0 14px; }
       .section-heading { font-family: Georgia, "Times New Roman", serif; font-size: 18px; margin: 28px 0 10px; }
-      .violations-group-heading { font-size: 13px; font-weight: 700; color: var(--ink); text-transform: uppercase; letter-spacing: 0.03em; padding-bottom: 6px; margin-bottom: 8px; border-bottom: 2px solid var(--border); }
+      .violations-group-heading { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: var(--ink); text-transform: uppercase; letter-spacing: 0.03em; padding-bottom: 6px; margin-bottom: 8px; border-bottom: 2px solid var(--border); }
       .page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; flex-wrap: wrap; gap: 8px; }
       .page-actions { display: flex; gap: 8px; }
       .hint { color: var(--ink-soft); font-size: 12px; margin: 4px 0 16px; }
