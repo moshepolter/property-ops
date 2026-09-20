@@ -90,6 +90,55 @@ function unitOptionLabel(unit, allTenants) {
 // Full addresses ("333 OVINGTON AVENUE BROOKLYN, NEW YORK 11209") are useful in
 // the Buildings tab itself, but everywhere else a short form ("333 OVINGTON
 // AVENUE") is plenty and keeps rows/pills from getting cluttered.
+// Turns a full HPD/DSNY-style legal violation description into a short,
+// readable label for the collapsed view — e.g. "self-closing doors that is
+// missing or defective latch in the entrance located at apt b10..." becomes
+// "Self-closing door". The full text is still shown once expanded; this is
+// only for quickly scanning a list.
+const VIOLATION_KEYWORDS = [
+  [/self[\s-]?closing\s+doors?/i, "Self-closing door"],
+  [/window\s+guards?/i, "Window guard"],
+  [/lead[\s-]?based\s+paint|\blead\b.*\bpaint\b/i, "Lead paint"],
+  [/\bmold\b/i, "Mold"],
+  [/infestation.*roach|roach.*infestation/i, "Roach infestation"],
+  [/infestation.*mice|mice.*infestation|\brodent/i, "Mice/rodent infestation"],
+  [/infestation.*bed\s?bug|bed\s?bug/i, "Bed bugs"],
+  [/water\s+leak/i, "Water leak"],
+  [/smoke\s+detector/i, "Smoke detector"],
+  [/carbon\s+monoxide/i, "CO detector"],
+  [/\bheat\b.*(insufficient|inadequate|lack)|lack.*\bheat\b/i, "Heat"],
+  [/hot\s+water/i, "Hot water"],
+  [/plaster|paint\b.*ceiling|paint\b.*wall/i, "Plaster/paint"],
+  [/masonry/i, "Masonry"],
+  [/electrical|wiring/i, "Electrical"],
+  [/gas\s+(leak|piping|meter)/i, "Gas"],
+  [/elevator/i, "Elevator"],
+  [/fire\s+escape/i, "Fire escape"],
+  [/floor.*defective|defective.*floor/i, "Flooring"],
+  [/ceiling.*collapse|collapse.*ceiling/i, "Ceiling collapse"],
+  [/sink|faucet|plumbing/i, "Plumbing"],
+  [/toilet/i, "Toilet"],
+  [/bathtub|shower/i, "Bathtub/shower"],
+  [/window\b.*(broken|defective|missing)/i, "Window"],
+  [/lock|latch/i, "Lock/latch"],
+  [/lighting|light\s+fixture/i, "Lighting"],
+  [/garbage|refuse|trash/i, "Refuse/garbage"],
+  [/pest\s+control|extermination/i, "Pest control"],
+];
+function summarizeViolationDescription(description) {
+  if (!description) return "";
+  // Strip the leading legal-citation clause (everything up to and
+  // including the first colon), which is boilerplate, not the issue.
+  const afterCitation = description.replace(/^[^:]*:\s*/, "");
+  for (const [pattern, label] of VIOLATION_KEYWORDS) {
+    if (pattern.test(afterCitation)) return label;
+  }
+  // No known keyword matched — fall back to a trimmed excerpt, cut at the
+  // "located at" / "in the" clause that usually starts the location detail.
+  const trimmed = afterCitation.split(/\s+located at\s+|\s+in the \d/i)[0];
+  return trimmed.length > 60 ? trimmed.slice(0, 60).trim() + "…" : trimmed.trim();
+}
+
 function shortAddress(address) {
   if (!address) return "";
   let s = address.replace(/,\s*[A-Za-z .]+\s+\d{5}(-\d{4})?\s*$/, "");
@@ -4418,7 +4467,18 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   const [copiedId, setCopiedId] = useState(null);
   const [showHpdImport, setShowHpdImport] = useState(false);
   const [buildingFilter, setBuildingFilter] = useState("All");
+  const [search, setSearch] = useState("");
+  const [confirmingDeleteAllHpd, setConfirmingDeleteAllHpd] = useState(false);
   const fileRef = useRef(null);
+
+  // Scoped to HPD only — a generic "delete all violations" would also wipe
+  // DSNY and other agencies' data, which has nothing to do with re-testing
+  // an HPD import.
+  const hpdViolationCount = data.violations.filter(v => v.agency === "HPD").length;
+  const deleteAllHpdViolations = () => {
+    setData(d => ({ ...d, violations: d.violations.filter(v => v.agency !== "HPD") }));
+    setConfirmingDeleteAllHpd(false);
+  };
 
   const toggleSelected = (id) => {
     setSelected(prev => {
@@ -4552,6 +4612,14 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   const filterAndSort = (a) => {
     let l = data.violations.filter(v => matchesAgency(v, a) && (view === "active" ? !isClosed(v) : isClosed(v)));
     if (buildingFilter !== "All") l = l.filter(v => v.buildingId === buildingFilter);
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      l = l.filter(v => {
+        const unitNum = v.unitId ? (data.units.find(u => u.id === v.unitId)?.unitNumber || "") : "";
+        return [v.violationNumber, unitNum, v.class, v.description, v.status, v.company, buildingName(v.buildingId)]
+          .some(f => (f || "").toString().toLowerCase().includes(q));
+      });
+    }
     if (view === "active") {
       if (dueFilter !== "all") {
         const maxDays = dueFilter === "24h" ? 1 : dueFilter === "1w" ? 7 : 10;
@@ -4577,14 +4645,14 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
     const flag = view === "active" ? flagFor(v.cureDeadline) : null;
     const isOpen = expandedRow === v.id;
     return (
-      <div className={`list-card ${flag === "overdue" ? "list-card-danger" : flag === "soon" ? "list-card-warn" : ""}`} key={v.id}>
+      <div className={`list-card list-card-compact ${flag === "overdue" ? "list-card-danger" : flag === "soon" ? "list-card-warn" : ""}`} key={v.id}>
         <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : v.id)} style={{ cursor: "pointer", alignItems: "flex-start" }}>
           {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           <input type="checkbox" checked={selected.has(v.id)} onChange={(e) => { e.stopPropagation(); toggleSelected(v.id); }} onClick={(e) => e.stopPropagation()} title="Select for batch copy" />
           {v.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === v.unitId)?.unitNumber || "—"}</span>}
           <div className="violation-title-group">
             <div className="list-card-title">#{v.violationNumber}</div>
-            {v.description && <div className="violation-desc-preview">{v.description}</div>}
+            {v.description && <div className="violation-desc-preview">{summarizeViolationDescription(v.description)}</div>}
           </div>
           <span className={`pill ${isClosed(v) ? "pill-ok" : "pill-muted"}`}>{v.status}</span>
           <span className="pill pill-muted">{buildingName(v.buildingId)}</span>
@@ -4666,6 +4734,17 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
           )}
           <PrintButton label="Violations" />
           <button className="btn-ghost" onClick={() => setShowHpdImport(s => !s)}><Upload size={14} /> Import HPD violations</button>
+          {hpdViolationCount > 0 && (
+            confirmingDeleteAllHpd ? (
+              <>
+                <span className="row-muted" style={{ fontSize: 12 }}>Delete all {hpdViolationCount} HPD violation{hpdViolationCount === 1 ? "" : "s"}? This can't be undone.</span>
+                <button className="btn-ghost" style={{ color: "var(--danger)" }} onClick={deleteAllHpdViolations}>Yes, delete all</button>
+                <button className="btn-ghost" onClick={() => setConfirmingDeleteAllHpd(false)}>Cancel</button>
+              </>
+            ) : (
+              <button className="btn-ghost" style={{ color: "var(--danger)" }} onClick={() => setConfirmingDeleteAllHpd(true)}><Trash2 size={14} /> Delete all HPD</button>
+            )
+          )}
           <button className="btn-ghost" onClick={() => fileRef.current.click()}><Upload size={14} /> Import CSV</button>
           <input ref={fileRef} type="file" accept=".csv" hidden onChange={handleCSV} />
           <button className="btn-primary" onClick={() => setForm(blankForm(agency === "All" ? "HPD" : agency))}>
@@ -4674,7 +4753,15 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
         </div>
       </div>
 
-      {showHpdImport && <HpdViolationsImportSection data={data} add={add} update={update} />}
+      {showHpdImport && <HpdViolationsImportSection data={data} add={add} update={update} onImported={() => setShowHpdImport(false)} />}
+
+      <div className="row" style={{ marginBottom: 10 }}>
+        <input
+          type="text" placeholder="Search violation #, apt, keyword…" value={search}
+          onChange={e => setSearch(e.target.value)}
+          style={{ width: "100%", maxWidth: 360 }}
+        />
+      </div>
 
       {data.buildings.length > 1 && (
         <div className="filter-row">
@@ -4954,13 +5041,58 @@ function normalizeAddrForMatch(s) { return (s || "").toLowerCase().replace(/[^a-
 function normalizeAptForMatch(s) { return (s || "").toUpperCase().replace(/[^A-Z0-9]/g, ""); }
 function normalizeNameForMatch(s) { return (s || "").toLowerCase().replace(/[^a-z\s]/g, "").split(/\s+/).filter(w => w.length > 2); }
 
+const GENERIC_ADDRESS_FRAGMENTS = new Set(["brooklyn", "queens", "bronx", "manhattan", "statenisland", "newyork", "ny", "nyc"]);
+function isGenericAddressFragment(normFrag) {
+  return /^\d{5}(-?\d{4})?$/.test(normFrag) || GENERIC_ADDRESS_FRAGMENTS.has(normFrag);
+}
+// Street name alone, stripping the leading house number — needed because a
+// report can show a different number within the same building's known
+// range (e.g. "321 Ovington Avenue" vs. the building's stored "333
+// Ovington Avenue"), and only the street name is reliably shared between
+// them.
+function streetNameOnly(addr) {
+  let s = normalizeAddrForMatch((addr || "").split(",")[0].replace(/^[\d-]+\s*/, ""));
+  // Common street-suffix abbreviations vary between sources ("Avenue" vs
+  // "Ave", "Street" vs "St") — normalized to the same short form so those
+  // don't cause an otherwise-identical street name to miss.
+  s = s.replace(/avenue$/, "ave").replace(/street$/, "st").replace(/boulevard$/, "blvd")
+       .replace(/place$/, "pl").replace(/road$/, "rd").replace(/parkway$/, "pkwy");
+  return s;
+}
 function findCourtBuildingMatch(courtAddress, buildings) {
-  const fragments = (courtAddress || "").split(/,|\bAKA\b/i).map(normalizeAddrForMatch).filter(Boolean);
-  if (fragments.length === 0) return null;
-  return buildings.find(b => {
-    const nb = normalizeAddrForMatch(b.address);
-    return fragments.some(f => nb.includes(f));
-  }) || null;
+  const rawFragments = (courtAddress || "").split(/,|\bAKA\b/i).map(f => f.trim()).filter(Boolean);
+  // A bare city name or zip code matches nearly every building in the
+  // portfolio equally — keeping those in the fragment list let a genuinely
+  // different address (like a house number outside any known range) fall
+  // through to a false match on "Brooklyn" alone, landing on whichever
+  // building happened to be first, rather than correctly matching nothing.
+  const realFragments = rawFragments.filter(f => !isGenericAddressFragment(normalizeAddrForMatch(f)));
+  if (realFragments.length === 0) return null;
+  // Pass 1: the full number+street fragment, most specific — either
+  // direction of substring containment, since the stored address and the
+  // report's address aren't always the same length or order.
+  for (const frag of realFragments) {
+    const nf = normalizeAddrForMatch(frag);
+    if (!nf) continue;
+    const match = buildings.find(b => {
+      const nb = normalizeAddrForMatch(b.address);
+      return nb.includes(nf) || nf.includes(nb);
+    });
+    if (match) return match;
+  }
+  // Pass 2: street name only, ignoring the leading number — containment
+  // rather than strict equality, since one side may include more of the
+  // name than the other even after suffix normalization.
+  for (const frag of realFragments) {
+    const streetOnly = streetNameOnly(frag);
+    if (!streetOnly) continue;
+    const match = buildings.find(b => {
+      const bStreet = streetNameOnly(b.address);
+      return bStreet && (bStreet.includes(streetOnly) || streetOnly.includes(bStreet));
+    });
+    if (match) return match;
+  }
+  return null;
 }
 function findCourtTenantMatch(courtCase, building, tenants, units) {
   if (!building) return { tenant: null, reason: "no building match" };
@@ -4989,7 +5121,7 @@ function findCourtTenantMatch(courtCase, building, tenants, units) {
   return { tenant: null, reason: "no unit or name match found" };
 }
 
-function HpdViolationsImportSection({ data, add, update }) {
+function HpdViolationsImportSection({ data, add, update, onImported }) {
   const [rawText, setRawText] = useState("");
   const [preview, setPreview] = useState(null);
   const [error, setError] = useState("");
@@ -5063,6 +5195,7 @@ function HpdViolationsImportSection({ data, add, update }) {
       else { add("violations", { ...fields, id: uid(), fineAmount: "", company: "", otherAgency: "", vendorId: "", notes: [] }); created++; }
     }
     setResult({ created, updated, skipped });
+    if (onImported) setTimeout(onImported, 2500);
     setPreview(null); setRawText("");
   };
 
@@ -6129,6 +6262,9 @@ function Styles() {
       }
       .field textarea { min-height: 60px; resize: vertical; }
       .list-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+      .list-card-compact { margin-bottom: 4px; }
+      .list-card-compact .list-card-head { padding: 6px 12px; gap: 6px; font-size: 13px; }
+      .list-card-compact .violation-desc-preview { font-size: 12px; }
       .list-card-danger { border-left: 4px solid var(--danger); }
       .list-card-warn { border-left: 4px solid var(--warn); }
       .list-card-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; cursor: default; flex-wrap: wrap; }
