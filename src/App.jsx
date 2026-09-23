@@ -2080,11 +2080,12 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
     buildings: rawData.buildings.filter(b => mainBuildingIds.has(b.id)),
     units: rawData.units.filter(u => mainBuildingIds.has(u.buildingId)),
     tenants: rawData.tenants.filter(t => mainBuildingIds.has(t.buildingId)),
-    violations: rawData.violations.filter(v => mainBuildingIds.has(v.buildingId)),
     workOrders: rawData.workOrders.filter(w => mainBuildingIds.has(w.buildingId)),
-    // Court cases are never excluded by building owner — for court
-    // purposes, every building is treated as a regular one.
+    // Court cases and violations are never excluded by building owner —
+    // for those two, every building is treated as a regular one, since
+    // both are actively managed regardless of which owner's building it is.
     courtCases: rawData.courtCases,
+    violations: rawData.violations,
     appointments: rawData.appointments.filter(a => mainBuildingIds.has(a.buildingId)),
     localLaws: (rawData.localLaws || []).filter(l => mainBuildingIds.has(l.buildingId)),
   };
