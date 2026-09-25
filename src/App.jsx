@@ -40,7 +40,7 @@ import {
   Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat, Home, Phone, Mail,
   CalendarClock, ScrollText, MessageSquare, Archive as ArchiveIcon, DollarSign, StickyNote,
   Plus, X, Camera, Download, LayoutDashboard, ChevronDown, ChevronRight, ChevronLeft,
-  Trash2, Pencil, Upload, Menu, Printer, CheckCircle2
+  Trash2, Pencil, Upload, Menu, Printer, CheckCircle2, Ticket
 } from "lucide-react";
 
 /* ============================== constants ============================== */
@@ -2291,7 +2291,9 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, u
       Description: w.description || "",
       Priority: w.priority || "",
       Status: w.status || "",
-      Vendor: vendorMap[w.vendorId] || "",
+      Vendor: (w.items && w.items.length > 0)
+        ? w.items.map(it => vendorMap[it.vendorId]).filter(Boolean).join(", ")
+        : (vendorMap[w.vendorId] || ""),
       "Date Opened": w.dateOpened ? fmtDate(w.dateOpened) : "",
     })));
 
@@ -3559,6 +3561,11 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
                     onClick={() => update("tenants", t.id, { callBack: !t.callBack })}
                   ><Phone size={14} /></IconBtn>
                   <IconBtn
+                    title={t.voucherProgram ? "On a voucher program (e.g. Section 8) — click to clear" : "Mark as on a voucher program (e.g. Section 8)"}
+                    active={!!t.voucherProgram}
+                    onClick={() => update("tenants", t.id, { voucherProgram: !t.voucherProgram })}
+                  ><Ticket size={14} /></IconBtn>
+                  <IconBtn
                     title={inCourt(t.id) ? "Already in court — a case is already linked to this tenant" : "Mark in court — creates a linked court case"}
                     active={inCourt(t.id)}
                     onClick={() => markInCourt(t.id)}
@@ -4168,6 +4175,22 @@ function ImportBlock({ type, data, setData, buildingName }) {
 
   const confirm = () => {
     if (!preview) return;
+    // A row needing approval (an active follow-up or call-back flag) is
+    // silently excluded from what actually gets applied below unless its
+    // checkbox was checked — easy to miss among many other rows, and the
+    // exact scenario that looks like "the balance just didn't update" when
+    // it's really "this specific change was never approved." Surfacing it
+    // as an explicit, unmissable choice here instead of leaving it to a
+    // small checkbox and a line of summary text further up the page.
+    const stillPending = preview.changes.filter(c => c.needsApproval && !c.approved);
+    if (stillPending.length > 0) {
+      const names = stillPending.slice(0, 5).map(c => c.name).join(", ");
+      const more = stillPending.length > 5 ? ` and ${stillPending.length - 5} more` : "";
+      const proceed = window.confirm(
+        `${stillPending.length} change${stillPending.length === 1 ? "" : "s"} still need${stillPending.length === 1 ? "s" : ""} approval and won't be applied: ${names}${more}.\n\nContinue and skip those, or Cancel to go back and check their approval boxes first?`
+      );
+      if (!proceed) return;
+    }
     setData(d => {
       const next = { ...d, buildings: [...d.buildings], units: [...d.units], tenants: [...d.tenants], importHistory: [...d.importHistory] };
       let buildingId = preview.matchedBuildingId;
@@ -4460,13 +4483,18 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
       return next;
     });
   };
+  // A work order's own description can go stale relative to its items once
+  // they've been individually edited post-split (see the list-card-title
+  // fix above) — same correction applied here before handing off to the
+  // shared copy-formatting function, which just reads .description as-is.
+  const withCurrentDescription = (w) => ({ ...w, description: w.items && w.items.length > 0 ? w.items.map(it => it.description).join(", ") : w.description });
   const copyOne = (w) => {
-    navigator.clipboard.writeText(formatItemsForCopy([w], data));
+    navigator.clipboard.writeText(formatItemsForCopy([withCurrentDescription(w)], data));
     setCopiedId(w.id);
     setTimeout(() => setCopiedId(null), 1500);
   };
   const copySelected = () => {
-    const items = list.filter(w => selected.has(w.id));
+    const items = list.filter(w => selected.has(w.id)).map(withCurrentDescription);
     navigator.clipboard.writeText(formatItemsForCopy(items, data));
     setCopiedId("__batch__");
     setTimeout(() => setCopiedId(null), 1500);
@@ -4638,7 +4666,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
             {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             <input type="checkbox" checked={selected.has(w.id)} onChange={(e) => { e.stopPropagation(); toggleSelected(w.id); }} onClick={(e) => e.stopPropagation()} title="Select for batch copy" />
             {w.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === w.unitId)?.unitNumber || "—"}</span>}
-            <div className="list-card-title">{w.description}</div>
+            <div className="list-card-title">{w.items && w.items.length > 0 ? w.items.map(it => it.description).join(", ") : w.description}</div>
             {w.priority !== "Routine" && <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span>}
             <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>
             <span className="pill pill-muted">{buildingName(w.buildingId)}</span>
@@ -5217,7 +5245,7 @@ function VendorsTab({ data, add, update, remove, buildingName }) {
     setForm(null);
   };
 
-  const openWO = (vid) => data.workOrders.filter(w => w.vendorId === vid && w.status !== "Done");
+  const openWO = (vid) => data.workOrders.filter(w => (w.vendorId === vid || (w.items && w.items.some(it => it.vendorId === vid))) && w.status !== "Done");
   const openViol = (vid) => data.violations.filter(v => v.vendorId === vid && !isViolationClosed(v));
 
   return (
@@ -5750,9 +5778,18 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
   const addLogEntry = (c) => {
     const entry = logForm[c.id];
     if (!entry || !entry.note || !entry.note.trim()) return;
-    const newEntry = { id: uid(), date: entry.date || todayISO(), note: entry.note.trim(), source: "manual" };
-    update("courtCases", c.id, { log: [...(c.log || []), newEntry] });
-    setLogForm({ ...logForm, [c.id]: { date: todayISO(), note: "" } });
+    // A new court date typed alongside the note updates the case's actual
+    // court date (the field the calendar and "coming up" stats read from)
+    // in the same action — otherwise recording an adjournment would take
+    // two separate steps: writing the note here, then editing the case
+    // itself to change the date, with nothing tying the two together.
+    const newDate = entry.newCourtDate;
+    const noteText = newDate ? `${entry.note.trim()} — adjourned to ${fmtDate(newDate)}` : entry.note.trim();
+    const newEntry = { id: uid(), date: entry.date || todayISO(), note: noteText, source: "manual" };
+    const fields = { log: [...(c.log || []), newEntry] };
+    if (newDate) fields.nextCourtDate = newDate;
+    update("courtCases", c.id, fields);
+    setLogForm({ ...logForm, [c.id]: { date: todayISO(), note: "", newCourtDate: "" } });
   };
 
   const submit = () => {
@@ -6044,10 +6081,20 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                       </div>
                       );
                     })}
-                <div className="inline-form" style={{ marginTop: 8 }}>
+                <div className="inline-form" style={{ marginTop: 8, flexWrap: "wrap" }}>
                   <input type="date" value={logForm[c.id]?.date || todayISO()} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], date: e.target.value } })} />
                   <input placeholder="What happened…" value={logForm[c.id]?.note || ""} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLogEntry(c)} />
                   <button className="btn-ghost" onClick={() => addLogEntry(c)}>Add</button>
+                </div>
+                <div className="inline-form" style={{ marginTop: 4 }}>
+                  <label className="hint" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    Adjourned to:
+                    <input
+                      type="date" value={logForm[c.id]?.newCourtDate || ""}
+                      onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], newCourtDate: e.target.value } })}
+                    />
+                  </label>
+                  <span className="hint">(optional — updates the case's court date along with the note above)</span>
                 </div>
               </div>
               {c.result === "Stipulation (payment plan)" && (
