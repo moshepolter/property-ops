@@ -5777,19 +5777,39 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
 
   const addLogEntry = (c) => {
     const entry = logForm[c.id];
-    if (!entry || !entry.note || !entry.note.trim()) return;
-    // A new court date typed alongside the note updates the case's actual
-    // court date (the field the calendar and "coming up" stats read from)
-    // in the same action — otherwise recording an adjournment would take
-    // two separate steps: writing the note here, then editing the case
-    // itself to change the date, with nothing tying the two together.
-    const newDate = entry.newCourtDate;
-    const noteText = newDate ? `${entry.note.trim()} — adjourned to ${fmtDate(newDate)}` : entry.note.trim();
+    if (!entry || !entry.quickType) return;
+    // "Other note" is the one type with no built-in label of its own — it
+    // needs actual text typed in, since there's nothing else to log.
+    if (entry.quickType === "other" && !(entry.note || "").trim()) return;
+
+    const extra = (entry.note || "").trim();
+    const fields = {};
+    let noteText;
+    if (entry.quickType === "adjourned") {
+      noteText = "Adjourned" + (entry.newCourtDate ? ` — adjourned to ${fmtDate(entry.newCourtDate)}` : "");
+      if (entry.newCourtDate) { fields.nextCourtDate = entry.newCourtDate; fields.result = "Adjourned / next date set"; }
+    } else if (entry.quickType === "stipulation") {
+      noteText = "Stipulation agreed" + (entry.stipTerms ? ` — ${entry.stipTerms}` : "");
+      fields.result = "Stipulation (payment plan)";
+      if (entry.stipTerms) fields.stipulationTerms = entry.stipTerms;
+      if (entry.stipNextDue) fields.nextPaymentDue = entry.stipNextDue;
+    } else if (entry.quickType === "dismissed") {
+      noteText = "Case dismissed"; fields.result = "Case dismissed";
+    } else if (entry.quickType === "judgmentLandlord") {
+      noteText = "Judgment for landlord"; fields.result = "Judgment for landlord";
+    } else if (entry.quickType === "judgmentTenant") {
+      noteText = "Judgment for tenant"; fields.result = "Judgment for tenant";
+    } else if (entry.quickType === "settled") {
+      noteText = "Settled / withdrawn"; fields.result = "Settled / withdrawn";
+    } else {
+      noteText = extra;
+    }
+    if (extra && entry.quickType !== "other") noteText += ` — ${extra}`;
+
     const newEntry = { id: uid(), date: entry.date || todayISO(), note: noteText, source: "manual" };
-    const fields = { log: [...(c.log || []), newEntry] };
-    if (newDate) fields.nextCourtDate = newDate;
+    fields.log = [...(c.log || []), newEntry];
     update("courtCases", c.id, fields);
-    setLogForm({ ...logForm, [c.id]: { date: todayISO(), note: "", newCourtDate: "" } });
+    setLogForm({ ...logForm, [c.id]: { date: todayISO(), note: "", newCourtDate: "", quickType: null, stipTerms: "", stipNextDue: "" } });
   };
 
   const submit = () => {
@@ -6082,20 +6102,58 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                       );
                     })}
                 <div className="inline-form" style={{ marginTop: 8, flexWrap: "wrap" }}>
-                  <input type="date" value={logForm[c.id]?.date || todayISO()} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], date: e.target.value } })} />
-                  <input placeholder="What happened…" value={logForm[c.id]?.note || ""} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLogEntry(c)} />
-                  <button className="btn-ghost" onClick={() => addLogEntry(c)}>Add</button>
+                  {[
+                    { key: "adjourned", label: "Adjourned" },
+                    { key: "stipulation", label: "Stipulation" },
+                    { key: "dismissed", label: "Case dismissed" },
+                    { key: "judgmentLandlord", label: "Judgment (landlord)" },
+                    { key: "judgmentTenant", label: "Judgment (tenant)" },
+                    { key: "settled", label: "Settled / withdrawn" },
+                    { key: "other", label: "Other note" },
+                  ].map(opt => (
+                    <button
+                      key={opt.key} type="button"
+                      className={`chip ${logForm[c.id]?.quickType === opt.key ? "chip-active" : ""}`}
+                      onClick={() => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], quickType: opt.key } })}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
                 </div>
-                <div className="inline-form" style={{ marginTop: 4 }}>
-                  <label className="hint" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    Adjourned to:
-                    <input
-                      type="date" value={logForm[c.id]?.newCourtDate || ""}
-                      onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], newCourtDate: e.target.value } })}
-                    />
-                  </label>
-                  <span className="hint">(optional — updates the case's court date along with the note above)</span>
-                </div>
+                {logForm[c.id]?.quickType && (
+                  <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+                    {logForm[c.id].quickType === "adjourned" && (
+                      <label className="hint" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        Adjourned to:
+                        <input
+                          type="date" value={logForm[c.id]?.newCourtDate || ""}
+                          onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], newCourtDate: e.target.value } })}
+                        />
+                      </label>
+                    )}
+                    {logForm[c.id].quickType === "stipulation" && (
+                      <>
+                        <textarea
+                          placeholder="Terms — e.g. $200/month starting 10/1 on top of current rent, for 6 months"
+                          value={logForm[c.id]?.stipTerms || ""}
+                          onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], stipTerms: e.target.value } })}
+                        />
+                        <label className="hint" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          Next payment due:
+                          <input
+                            type="date" value={logForm[c.id]?.stipNextDue || ""}
+                            onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], stipNextDue: e.target.value } })}
+                          />
+                        </label>
+                      </>
+                    )}
+                    <div className="inline-form" style={{ flexWrap: "wrap" }}>
+                      <input type="date" value={logForm[c.id]?.date || todayISO()} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], date: e.target.value } })} />
+                      <input placeholder="Any extra detail (optional)…" value={logForm[c.id]?.note || ""} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLogEntry(c)} />
+                      <button className="btn-ghost" onClick={() => addLogEntry(c)}>Add</button>
+                    </div>
+                  </div>
+                )}
               </div>
               {c.result === "Stipulation (payment plan)" && (
                 <div className="list-card-body">
