@@ -1763,10 +1763,10 @@ function PropertyOpsAppInner() {
             ))}
           </nav>
           <main className="content">
-            {tab === "dashboard" && <Dashboard data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} setData={setData} saveStuck={saveStuck} />}
+            {tab === "dashboard" && <Dashboard data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} setData={setData} update={update} saveStuck={saveStuck} />}
             {tab === "buildings" && <BuildingsTab data={data} add={add} update={update} remove={remove} setData={setData} buildingName={buildingName} />}
             {tab === "rent" && <RentTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} />}
-            {tab === "workorders" && <WorkOrdersTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} />}
+            {tab === "workorders" && <WorkOrdersTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} tenantName={tenantName} />}
             {tab === "violations" && <ViolationsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} setData={setData} />}
             {tab === "vendors" && <VendorsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
             {tab === "court" && <CourtTab data={data} add={add} update={update} remove={remove} setData={setData} tenantName={tenantName} buildingName={buildingName} />}
@@ -1921,6 +1921,11 @@ function allDatedItems(data, tenantName, buildingName) {
     if (c.nextCourtDate) items.push({ key: `c-${c.id}`, date: c.nextCourtDate, type: "Court date", label: tenantName(c.tenantId), sub: buildingName(c.buildingId), tab: "court" });
     if (c.result === "Stipulation (payment plan)" && c.nextPaymentDue) items.push({ key: `p-${c.id}`, date: c.nextPaymentDue, type: "Payment due", label: tenantName(c.tenantId), sub: buildingName(c.buildingId), tab: "court" });
   });
+  data.workOrders.forEach(w => {
+    if (w.courtCaseId && w.dueByDate && w.status !== "Done") {
+      items.push({ key: `wo-${w.id}`, date: w.dueByDate, type: "Work order due", label: w.description, sub: buildingName(w.buildingId), tab: "workorders" });
+    }
+  });
   data.appointments.forEach(a => {
     if (!a.completed && a.date) {
       items.push({ key: `a-${a.id}`, date: a.date, type: a.recurring ? "Recurring appointment" : "Appointment", label: a.type, sub: buildingName(a.buildingId), tab: "inspections" });
@@ -2064,7 +2069,7 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
   );
 }
 
-function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, saveStuck }) {
+function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, update, saveStuck }) {
   const [violationsPanelOpen, setViolationsPanelOpen] = useState(false);
   const [excludedSectionOpen, setExcludedSectionOpen] = useState(false);
   // Buildings marked "Mitch's father" are excluded from every main
@@ -2200,6 +2205,32 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
   // Top stat row + follow-up roster
   const allDated = allDatedItems(data, tenantName, buildingName);
   const overdueCount = allDated.filter(i => i.date < today && i.type !== "Follow-up").length;
+  // Each item type in the Overdue list is a different kind of record with
+  // its own notion of "done" — a violation's cure deadline is cleared by
+  // marking it certified/resolved, a hearing by clearing the hearing flag,
+  // a court date or stipulation payment by clearing that date (the next
+  // one gets set once it's actually scheduled), an appointment or a quick
+  // note reminder by their own existing completed/done field. The item's
+  // key prefix (set in allDatedItems) says which kind it is.
+  const completeDatedItem = (item) => {
+    const id = item.key.slice(item.key.indexOf("-") + 1);
+    if (item.key.startsWith("v-")) {
+      const v = rawData.violations.find(x => x.id === id);
+      if (v) update("violations", id, { status: violationClosedStatuses(v.agency)[0] });
+    } else if (item.key.startsWith("vh-")) {
+      update("violations", id, { hasHearing: false });
+    } else if (item.key.startsWith("c-")) {
+      update("courtCases", id, { nextCourtDate: "" });
+    } else if (item.key.startsWith("p-")) {
+      update("courtCases", id, { nextPaymentDue: "" });
+    } else if (item.key.startsWith("a-")) {
+      update("appointments", id, { completed: true });
+    } else if (item.key.startsWith("n-")) {
+      update("quickNotes", id, { done: true });
+    } else if (item.key.startsWith("wo-")) {
+      update("workOrders", id, { status: "Done" });
+    }
+  };
   const openWorkOrders = data.workOrders.filter(w => w.status !== "Done");
   const openCourtCases = data.courtCases.filter(c => !c.archived);
   const clearBuildingIds = new Set(data.buildings.filter(b => {
@@ -2483,13 +2514,14 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, s
             allDated.filter(i => i.date < today && i.type !== "Follow-up").length === 0
               ? <div className="hint">Nothing overdue.</div>
               : allDated.filter(i => i.date < today && i.type !== "Follow-up").sort((a, b) => a.date.localeCompare(b.date)).map(item => (
-                <button key={item.key} className="dash-detail-item" onClick={() => setTab(item.tab)}>
+                <div key={item.key} className="dash-detail-item" onClick={() => setTab(item.tab)}>
                   <span className="pill pill-danger">{item.type}</span>
                   <div className="followup-item-main">
                     <div className="followup-item-name">{item.label}{item.sub ? <span className="row-muted"> — {item.sub}</span> : null}</div>
                   </div>
                   <span className="pill pill-muted">{fmtDate(item.date)}</span>
-                </button>
+                  <IconBtn title="Mark completed" onClick={(e) => { e.stopPropagation(); completeDatedItem(item); }}><CheckCircle2 size={14} /></IconBtn>
+                </div>
               ))
           )}
           {statOpen === "workorders" && (
@@ -4394,9 +4426,10 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
 
 /* ============================== work orders ============================== */
 
-function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) {
+function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, tenantName }) {
   const [form, setForm] = useState(null);
   const [filter, setFilter] = useState("All");
+  const [courtOnly, setCourtOnly] = useState(false);
   const [selected, setSelected] = useState(new Set());
   const [copiedId, setCopiedId] = useState(null);
   const [expandedRow, setExpandedRow] = useState(null);
@@ -4416,6 +4449,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
 
   const list = data.workOrders
     .filter(w => filter === "All" || w.status === filter)
+    .filter(w => !courtOnly || w.isCourtConnected || w.courtCaseId)
     .slice()
     .sort((a, b) => (b.dateOpened || "").localeCompare(a.dateOpened || ""));
 
@@ -4458,7 +4492,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
             </button>
           )}
           <PrintButton label="Work Orders" />
-          <button className="btn-primary" onClick={() => setForm({ id: uid(), buildingId: data.buildings[0]?.id || "", unitId: "", vendorId: "", description: "", status: "Open", priority: "Routine", dateOpened: todayISO() })}>
+          <button className="btn-primary" onClick={() => setForm({ id: uid(), buildingId: data.buildings[0]?.id || "", unitId: "", vendorId: "", description: "", status: "Open", priority: "Routine", dateOpened: todayISO(), isCourtConnected: false, courtCaseId: "", dueByDate: "", accessDate: "", accessGranted: null, items: [] })}>
             <Plus size={14} /> Add work order
           </button>
         </div>
@@ -4467,6 +4501,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
         {["All", ...WO_STATUSES].map(s => (
           <button key={s} className={`chip ${filter === s ? "chip-active" : ""}`} onClick={() => setFilter(s)}>{s}</button>
         ))}
+        <button className={`chip ${courtOnly ? "chip-active" : ""}`} onClick={() => setCourtOnly(o => !o)}>Court-linked only</button>
       </div>
 
       {form && (
@@ -4489,7 +4524,54 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
               {data.vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
             </select>
           </Field>
-          <Field label="Description"><textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></Field>
+          <Field label="Description">
+            <textarea
+              value={form.description}
+              onChange={e => setForm({ ...form, description: e.target.value })}
+              onBlur={() => {
+                // Auto-split into separate items once the person is done
+                // typing (on blur, not on every keystroke, so a comma mid-
+                // sentence doesn't fragment things before they've finished
+                // writing) — each item gets its own vendor assignment
+                // below, carrying forward whatever vendor was already set
+                // as a starting point for all of them.
+                const parts = form.description.split(",").map(s => s.trim()).filter(Boolean);
+                if (parts.length > 1) {
+                  setForm({ ...form, items: parts.map(p => ({ id: uid(), description: p, vendorId: form.vendorId || "" })) });
+                }
+              }}
+            />
+          </Field>
+          {form.items && form.items.length > 0 ? (
+            <Field label="Vendor per item">
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {form.items.map((it, i) => (
+                  <div key={it.id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <input
+                      style={{ flex: 1 }} value={it.description}
+                      onChange={e => setForm({ ...form, items: form.items.map((x, xi) => xi === i ? { ...x, description: e.target.value } : x) })}
+                    />
+                    <select
+                      value={it.vendorId} style={{ flex: 1 }}
+                      onChange={e => setForm({ ...form, items: form.items.map((x, xi) => xi === i ? { ...x, vendorId: e.target.value } : x) })}
+                    >
+                      <option value="">Unassigned</option>
+                      {data.vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                    </select>
+                    <button type="button" className="checklist-remove" title="Remove this item" onClick={() => setForm({ ...form, items: form.items.filter((_, xi) => xi !== i) })}><X size={12} /></button>
+                  </div>
+                ))}
+                <button type="button" className="btn-ghost" onClick={() => setForm({ ...form, items: [] })}>Merge back into one item</button>
+              </div>
+            </Field>
+          ) : (
+            <Field label="Vendor">
+              <select value={form.vendorId} onChange={e => setForm({ ...form, vendorId: e.target.value })}>
+                <option value="">Unassigned</option>
+                {data.vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+              </select>
+            </Field>
+          )}
           <Field label="Priority">
             <select value={form.priority} onChange={e => setForm({ ...form, priority: e.target.value })}>
               {WO_PRIORITIES.map(p => <option key={p}>{p}</option>)}
@@ -4500,6 +4582,45 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
               {WO_STATUSES.map(s => <option key={s}>{s}</option>)}
             </select>
           </Field>
+          <Field label="Connected to a court case?">
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input
+                type="checkbox" checked={!!form.isCourtConnected}
+                onChange={e => setForm({
+                  ...form, isCourtConnected: e.target.checked,
+                  // Unchecking clears the link and anything that only makes sense
+                  // alongside it, rather than leaving stale court data behind on
+                  // a work order that's no longer marked as court-connected.
+                  ...(e.target.checked ? {} : { courtCaseId: "", dueByDate: "", accessDate: "", accessGranted: null }),
+                })}
+              />
+              Yes, this is connected to a court case
+            </label>
+          </Field>
+          {form.isCourtConnected && (
+            <>
+              <Field label="Linked case">
+                <select value={form.courtCaseId || ""} onChange={e => setForm({ ...form, courtCaseId: e.target.value })}>
+                  <option value="">Select a case…</option>
+                  {data.courtCases.filter(c => !c.archived && c.buildingId === form.buildingId).map(c => (
+                    <option key={c.id} value={c.id}>{c.tenantId ? tenantName(c.tenantId) : (c.rawName || "Case")} {c.caseNumber ? `#${c.caseNumber}` : ""}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Needs to be completed by"><input type="date" value={form.dueByDate || ""} onChange={e => setForm({ ...form, dueByDate: e.target.value })} /></Field>
+              <Field label="Access date (optional)"><input type="date" value={form.accessDate || ""} onChange={e => setForm({ ...form, accessDate: e.target.value })} /></Field>
+              <Field label="Do we have access on that date?">
+                <select
+                  value={form.accessGranted === true ? "yes" : form.accessGranted === false ? "no" : ""}
+                  onChange={e => setForm({ ...form, accessGranted: e.target.value === "yes" ? true : e.target.value === "no" ? false : null })}
+                >
+                  <option value="">Not yet confirmed</option>
+                  <option value="yes">Yes — access confirmed</option>
+                  <option value="no">No — access denied/unclear</option>
+                </select>
+              </Field>
+            </>
+          )}
           <div className="form-actions">
             <button className="btn-primary" onClick={submit}>Save</button>
             <button className="btn-ghost" onClick={() => setForm(null)}>Cancel</button>
@@ -4521,10 +4642,14 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName }) 
             {w.priority !== "Routine" && <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span>}
             <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>
             <span className="pill pill-muted">{buildingName(w.buildingId)}</span>
-            {w.vendorId && <span className="pill pill-muted">{vendorName(w.vendorId)}</span>}
+            {w.items && w.items.length > 0
+              ? w.items.filter(it => it.vendorId).map(it => <span key={it.id} className="pill pill-muted">{vendorName(it.vendorId)}</span>)
+              : (w.vendorId && <span className="pill pill-muted">{vendorName(w.vendorId)}</span>)}
+            {w.courtCaseId && <span className="pill pill-accent"><Gavel size={11} /> Court-linked</span>}
+            {w.courtCaseId && w.dueByDate && w.status !== "Done" && <Flag date={w.dueByDate} label="due by" />}
             <div className="spacer" />
             <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={(e) => { e.stopPropagation(); copyOne(w); }}><ScrollText size={14} /></IconBtn>
-            <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(w); }}><Pencil size={14} /></IconBtn>
+            <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm({ ...w, isCourtConnected: w.isCourtConnected || !!w.courtCaseId }); }}><Pencil size={14} /></IconBtn>
             <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("workOrders", w.id); }}><Trash2 size={14} /></IconBtn>
           </div>
           {isOpen && (
