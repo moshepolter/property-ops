@@ -4660,25 +4660,35 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
       {list.map(w => {
         const isOpen = expandedRow === w.id;
         const sortedNotes = [...(w.notes || [])].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        const unit = w.unitId ? data.units.find(u => u.id === w.unitId) : null;
+        const unitTenant = w.unitId ? data.tenants.find(t => t.unitId === w.unitId && !t.movedOut) : null;
         return (
-        <div className="list-card" key={w.id}>
-          <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : w.id)} style={{ cursor: "pointer" }}>
-            {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            <input type="checkbox" checked={selected.has(w.id)} onChange={(e) => { e.stopPropagation(); toggleSelected(w.id); }} onClick={(e) => e.stopPropagation()} title="Select for batch copy" />
-            {w.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === w.unitId)?.unitNumber || "—"}</span>}
+        <div className="list-card wo-card" key={w.id}>
+          <div className="wo-card-top" onClick={() => setExpandedRow(isOpen ? null : w.id)} style={{ cursor: "pointer" }}>
+            <div className="wo-card-identity">
+              {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              <input type="checkbox" checked={selected.has(w.id)} onChange={(e) => { e.stopPropagation(); toggleSelected(w.id); }} onClick={(e) => e.stopPropagation()} title="Select for batch copy" />
+              <span className="pill pill-muted">{buildingName(w.buildingId)}</span>
+              {unit && <span className="pill pill-accent">Apt {unit.unitNumber || "—"}</span>}
+              {unitTenant && <span className="pill pill-muted">{unitTenant.name}</span>}
+            </div>
+            <div className="wo-card-actions">
+              <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={(e) => { e.stopPropagation(); copyOne(w); }}><ScrollText size={14} /></IconBtn>
+              <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm({ ...w, isCourtConnected: w.isCourtConnected || !!w.courtCaseId }); }}><Pencil size={14} /></IconBtn>
+              <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("workOrders", w.id); }}><Trash2 size={14} /></IconBtn>
+            </div>
+          </div>
+          <div className="wo-card-title-row" onClick={() => setExpandedRow(isOpen ? null : w.id)} style={{ cursor: "pointer" }}>
             <div className="list-card-title">{w.items && w.items.length > 0 ? w.items.map(it => it.description).join(", ") : w.description}</div>
+          </div>
+          <div className="wo-card-tags" onClick={() => setExpandedRow(isOpen ? null : w.id)} style={{ cursor: "pointer" }}>
             {w.priority !== "Routine" && <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span>}
             <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>
-            <span className="pill pill-muted">{buildingName(w.buildingId)}</span>
             {w.items && w.items.length > 0
               ? w.items.filter(it => it.vendorId).map(it => <span key={it.id} className="pill pill-muted">{vendorName(it.vendorId)}</span>)
               : (w.vendorId && <span className="pill pill-muted">{vendorName(w.vendorId)}</span>)}
             {w.courtCaseId && <span className="pill pill-accent"><Gavel size={11} /> Court-linked</span>}
             {w.courtCaseId && w.dueByDate && w.status !== "Done" && <Flag date={w.dueByDate} label="due by" />}
-            <div className="spacer" />
-            <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={(e) => { e.stopPropagation(); copyOne(w); }}><ScrollText size={14} /></IconBtn>
-            <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm({ ...w, isCourtConnected: w.isCourtConnected || !!w.courtCaseId }); }}><Pencil size={14} /></IconBtn>
-            <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("workOrders", w.id); }}><Trash2 size={14} /></IconBtn>
           </div>
           {isOpen && (
             <div className="list-card-body">
@@ -6666,6 +6676,14 @@ function Styles() {
       .list-card-danger { border-left: 4px solid var(--danger); }
       .list-card-warn { border-left: 4px solid var(--warn); }
       .list-card-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; cursor: default; flex-wrap: wrap; }
+      .wo-card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px 6px; }
+      .wo-card-identity { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+      .wo-card-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+      .wo-card-title-row { padding: 0 14px; }
+      .wo-card-title-row .list-card-title {
+        overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      }
+      .wo-card-tags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 14px 12px; }
       .list-card-title { font-weight: 600; font-size: 14px; margin-right: 4px; }
       .list-card-body { padding: 0 14px 14px 14px; border-top: 1px solid var(--border); padding-top: 10px; font-size: 13px; }
       .spacer { flex: 1; }
