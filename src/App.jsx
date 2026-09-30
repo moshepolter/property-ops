@@ -3075,6 +3075,16 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
       )}
 
       {data.buildings.length === 0 && <EmptyState text="No buildings yet — import a CSV or add one manually." />}
+      {(() => {
+        const q = unitSearch.trim().toLowerCase();
+        if (q && data.buildings.length > 0) {
+          const anyMatch = data.buildings.some(b =>
+            data.units.some(u => u.buildingId === b.id && ((u.unitNumber || "").toLowerCase().includes(q) || data.tenants.some(t => t.unitId === u.id && (t.name || "").toLowerCase().includes(q))))
+          );
+          if (!anyMatch) return <EmptyState text="No unit or tenant matches that search." />;
+        }
+        return null;
+      })()}
       {data.buildings.map(b => {
         const q = unitSearch.trim().toLowerCase();
         const allUnits = data.units.filter(u => u.buildingId === b.id);
@@ -3832,6 +3842,8 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
                   : renderTenantTable(callBackTenants)}
               </div>
             </div>
+          ) : buildingGroups.length === 0 ? (
+            <EmptyState text="Nothing matches this filter right now." />
           ) : buildingGroups.map(g => {
             const isOpen = expandedBuildings.has(g.building.id);
             return (
@@ -4408,6 +4420,17 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
   const availableTypes = IMPORT_TYPES.filter(t => !allowedTypes || allowedTypes.includes(t.key));
   const [expandedEntry, setExpandedEntry] = useState(null);
   const history = (data.importHistory || []).filter(h => !allowedTypes || allowedTypes.includes(h.type));
+  // This only ever removes the historical log entry — a record of what an
+  // import did at the time — never the actual tenants/buildings/units it
+  // created or updated, which live in their own separate collections and
+  // are completely untouched by any of this.
+  const deleteHistoryEntry = (id) => setData(d => ({ ...d, importHistory: (d.importHistory || []).filter(h => h.id !== id) }));
+  const oldCutoff = new Date(); oldCutoff.setDate(oldCutoff.getDate() - 30);
+  const oldCount = history.filter(h => h.date && h.date < toLocalISO(oldCutoff)).length;
+  const deleteOldHistory = () => {
+    const cutoffIso = toLocalISO(oldCutoff);
+    setData(d => ({ ...d, importHistory: (d.importHistory || []).filter(h => !(h.date && h.date < cutoffIso)) }));
+  };
 
   return (
     <div>
@@ -4415,7 +4438,14 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
         <ImportBlock key={t.key} type={t.key} data={data} setData={setData} buildingName={buildingName} />
       ))}
 
-      <h2 className="section-heading">Last Imported</h2>
+      <div className="row" style={{ marginTop: 20, marginBottom: 4 }}>
+        <h2 className="section-heading" style={{ margin: 0 }}>Last Imported</h2>
+        {oldCount > 0 && (
+          <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={deleteOldHistory}>
+            <Trash2 size={14} /> Clear {oldCount} older than 30 days
+          </button>
+        )}
+      </div>
       {history.length === 0 && <EmptyState text="No imports yet." />}
       {history.slice(0, 20).map(h => (
         <div className="list-card" key={h.id}>
@@ -4428,6 +4458,8 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
             <span className="pill pill-warn">{h.updated} updated</span>
             {h.missing > 0 && <span className="pill pill-danger">{h.missing} missing</span>}
             {h.skipped > 0 && <span className="pill pill-muted">{h.skipped} not approved</span>}
+            <div className="spacer" />
+            <IconBtn title="Delete this import record (doesn't undo the import itself)" danger onClick={(e) => { e.stopPropagation(); deleteHistoryEntry(h.id); }}><Trash2 size={14} /></IconBtn>
           </div>
           {expandedEntry === h.id && (
             <div className="list-card-body">
@@ -4529,7 +4561,8 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
         {["All", ...WO_STATUSES].map(s => (
           <button key={s} className={`chip ${filter === s ? "chip-active" : ""}`} onClick={() => setFilter(s)}>{s}</button>
         ))}
-        <button className={`chip ${courtOnly ? "chip-active" : ""}`} onClick={() => setCourtOnly(o => !o)}>Court-linked only</button>
+        <span className="wo-filter-divider" />
+        <button className={`chip ${courtOnly ? "chip-active" : ""}`} onClick={() => setCourtOnly(o => !o)}><Gavel size={11} /> Court-linked only</button>
       </div>
 
       {form && (
@@ -4673,6 +4706,11 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
               {unitTenant && <span className="pill pill-muted">{unitTenant.name}</span>}
             </div>
             <div className="wo-card-actions">
+              <IconBtn
+                title={w.status === "Done" ? "Done — click to reopen" : "Mark done"}
+                active={w.status === "Done"}
+                onClick={(e) => { e.stopPropagation(); update("workOrders", w.id, { status: w.status === "Done" ? "Open" : "Done" }); }}
+              ><CheckCircle2 size={14} /></IconBtn>
               <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={(e) => { e.stopPropagation(); copyOne(w); }}><ScrollText size={14} /></IconBtn>
               <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm({ ...w, isCourtConnected: w.isCourtConnected || !!w.courtCaseId }); }}><Pencil size={14} /></IconBtn>
               <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("workOrders", w.id); }}><Trash2 size={14} /></IconBtn>
@@ -4683,7 +4721,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
           </div>
           <div className="wo-card-tags" onClick={() => setExpandedRow(isOpen ? null : w.id)} style={{ cursor: "pointer" }}>
             {w.priority !== "Routine" && <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span>}
-            <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>
+            {w.status !== "Open" && <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>}
             {w.items && w.items.length > 0
               ? w.items.filter(it => it.vendorId).map(it => <span key={it.id} className="pill pill-muted">{vendorName(it.vendorId)}</span>)
               : (w.vendorId && <span className="pill pill-muted">{vendorName(w.vendorId)}</span>)}
@@ -6215,10 +6253,12 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
   const [expandedRow, setExpandedRow] = useState(null);
   const allTypes = [...APPOINTMENT_TYPES, ...(data.customAppointmentTypes || [])];
 
+  const [lastUsedType, setLastUsedType] = useState(null);
   const submit = () => {
     if (!form.type) return;
     if (form.id) update("appointments", form.id, form);
     else add("appointments", { ...form, completed: false });
+    setLastUsedType(form.type);
     setForm(null);
   };
 
@@ -6230,7 +6270,7 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
 
   // Defaults to 9am-11am so the time picker opens near a normal workday start
   // instead of midnight — still fully editable to anything earlier or later.
-  const blank = () => ({ buildingId: data.buildings[0]?.id || "", unitId: "", type: allTypes[0] || "Other", date: "", timeFrom: "09:00", timeTo: "11:00", notes: "", recurring: false, completed: false });
+  const blank = () => ({ buildingId: data.buildings[0]?.id || "", unitId: "", type: lastUsedType || allTypes[0] || "Other", date: "", timeFrom: "09:00", timeTo: "11:00", notes: "", recurring: false, completed: false });
 
   const list = data.appointments
     .filter(a => view === "upcoming" ? !a.completed : a.completed)
@@ -6400,6 +6440,7 @@ function LocalLawsTab({ data, add, update, remove, buildingName }) {
 /* ============================== boss reminders ============================== */
 
 function RemindersTab({ data, add, update, remove }) {
+  const [view, setView] = useState("active");
   const [text, setText] = useState("");
   const [editingId, setEditingId] = useState(null);
   const [editText, setEditText] = useState("");
@@ -6426,8 +6467,15 @@ function RemindersTab({ data, add, update, remove }) {
         <input placeholder="Something to bring up with your boss…" value={text} onChange={e => setText(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} />
         <button className="btn-primary" onClick={submit}>Add</button>
       </div>
-      {data.bossReminders.length === 0 && <EmptyState text="Nothing on the list right now." />}
-      {data.bossReminders.slice().sort((a, b) => (b.dateRaised || "").localeCompare(a.dateRaised || "")).map(r => (
+      <div className="filter-row">
+        <button className={`chip ${view === "active" ? "chip-active" : ""}`} onClick={() => setView("active")}>Active</button>
+        <button className={`chip ${view === "done" ? "chip-active" : ""}`} onClick={() => setView("done")}>Done</button>
+      </div>
+      {(() => {
+        const filtered = data.bossReminders.filter(r => view === "active" ? r.status !== "Done" : r.status === "Done");
+        return filtered.length === 0 && <EmptyState text={view === "active" ? "Nothing on the list right now." : "Nothing marked done yet."} />;
+      })()}
+      {data.bossReminders.filter(r => view === "active" ? r.status !== "Done" : r.status === "Done").slice().sort((a, b) => (b.dateRaised || "").localeCompare(a.dateRaised || "")).map(r => (
         <div className="list-card" key={r.id}>
           <div className="list-card-head">
             <input type="checkbox" checked={r.status === "Done"} onChange={e => update("bossReminders", r.id, { status: e.target.checked ? "Done" : "Open" })} />
@@ -6684,6 +6732,7 @@ function Styles() {
         overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       }
       .wo-card-tags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 14px 12px; }
+      .wo-filter-divider { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
       .list-card-title { font-weight: 600; font-size: 14px; margin-right: 4px; }
       .list-card-body { padding: 0 14px 14px 14px; border-top: 1px solid var(--border); padding-top: 10px; font-size: 13px; }
       .spacer { flex: 1; }
