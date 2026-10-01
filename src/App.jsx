@@ -4765,77 +4765,100 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
       )}
 
       {list.length === 0 && <EmptyState text={view === "active" ? "No open work orders here." : "Nothing marked done yet."} />}
-      {list.map(w => {
-        const isOpen = expandedRow === w.id;
-        const sortedNotes = [...(w.notes || [])].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-        const unit = w.unitId ? data.units.find(u => u.id === w.unitId) : null;
-        const unitTenant = w.unitId ? data.tenants.find(t => t.unitId === w.unitId && !t.movedOut) : null;
-        return (
-        <div className="list-card wo-card" key={w.id}>
-          <div className="wo-card-top" onClick={() => setExpandedRow(isOpen ? null : w.id)} style={{ cursor: "pointer" }}>
-            <div className="wo-card-identity">
-              {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              <input type="checkbox" checked={selected.has(w.id)} onChange={(e) => { e.stopPropagation(); toggleSelected(w.id); }} onClick={(e) => e.stopPropagation()} title="Select for batch copy" />
-              <span className="pill pill-muted">{buildingName(w.buildingId)}</span>
-              {unit && <span className="pill pill-accent">Apt {unit.unitNumber || "—"}</span>}
-              {unitTenant && <span className="pill pill-muted">{unitTenant.name}</span>}
-            </div>
-            <div className="wo-card-actions">
-              <IconBtn
-                title={w.status === "Done" ? "Done — click to reopen" : "Mark done"}
-                active={w.status === "Done"}
-                onClick={(e) => { e.stopPropagation(); update("workOrders", w.id, { status: w.status === "Done" ? "Open" : "Done" }); }}
-              ><CheckCircle2 size={14} /></IconBtn>
-              <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={(e) => { e.stopPropagation(); copyOne(w); }}><ScrollText size={14} /></IconBtn>
-              <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm({ ...w, isCourtConnected: w.isCourtConnected || !!w.courtCaseId }); }}><Pencil size={14} /></IconBtn>
-              <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("workOrders", w.id); }}><Trash2 size={14} /></IconBtn>
-            </div>
-          </div>
-          <div className="wo-card-title-row" onClick={() => setExpandedRow(isOpen ? null : w.id)} style={{ cursor: "pointer" }}>
-            <div className="list-card-title">{w.items && w.items.length > 0 ? w.items.map(it => it.description).join(", ") : w.description}</div>
-          </div>
-          <div className="wo-card-tags" onClick={() => setExpandedRow(isOpen ? null : w.id)} style={{ cursor: "pointer" }}>
-            {w.priority !== "Routine" && <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span>}
-            {view === "active" && w.status !== "Open" && <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>}
-            {w.items && w.items.length > 0
-              ? w.items.filter(it => it.vendorId).map(it => <span key={it.id} className="pill pill-muted">{vendorName(it.vendorId)}</span>)
-              : (w.vendorId && <span className="pill pill-muted">{vendorName(w.vendorId)}</span>)}
-            {w.courtCaseId && <span className="pill pill-accent"><Gavel size={11} /> Court-linked</span>}
-            {w.courtCaseId && w.dueByDate && w.status !== "Done" && <Flag date={w.dueByDate} label="due by" />}
-          </div>
-          {isOpen && (
-            <div className="list-card-body">
-              <div className="wo-full-description">
-                {w.items && w.items.length > 0
-                  ? w.items.map(it => <div key={it.id}>{it.description}{it.vendorId ? ` — ${vendorName(it.vendorId)}` : ""}</div>)
-                  : w.description}
-              </div>
-              <PhotoUploader
-                photos={w.photos}
-                pathPrefix={`workOrders/${w.id}/photos`}
-                onAdd={(newPhotos) => update("workOrders", w.id, { photos: [...(w.photos || []), ...newPhotos] })}
-                onRemove={(p) => {
-                  update("workOrders", w.id, { photos: (w.photos || []).filter(x => x.id !== p.id) });
-                  if (p.storagePath) deleteObject(storageRef(storage, p.storagePath)).catch(() => {});
-                }}
-              />
-              <div className="row" style={{ marginTop: 8 }}>
-                <strong>Notes</strong>
-                <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => setNoteFor(noteFor === w.id ? null : w.id)}><Plus size={14} /> Add note</button>
-              </div>
-              {noteFor === w.id && (
-                <div className="inline-form">
-                  <input placeholder="Update…" value={noteText} onChange={e => setNoteText(e.target.value)} onKeyDown={e => e.key === "Enter" && addNote(w)} />
-                  <button className="btn-primary" onClick={() => addNote(w)}>Save</button>
-                </div>
-              )}
-              {sortedNotes.map((n, i) => (
-                <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
-              ))}
-            </div>
-          )}
+      {list.length > 0 && (
+        <div className="sheet-wrap">
+          <table className="sheet wo-sheet">
+            <thead>
+              <tr>
+                <th style={{ width: 28 }}></th>
+                <th>Apt</th>
+                <th>Building</th>
+                <th>Description</th>
+                <th>Vendor</th>
+                <th>Priority / Status</th>
+                <th style={{ width: 120 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map(w => {
+                const isOpen = expandedRow === w.id;
+                const sortedNotes = [...(w.notes || [])].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+                const unit = w.unitId ? data.units.find(u => u.id === w.unitId) : null;
+                const unitTenant = w.unitId ? data.tenants.find(t => t.unitId === w.unitId && !t.movedOut) : null;
+                const shortDesc = w.items && w.items.length > 0 ? w.items.map(it => it.description).join(", ") : w.description;
+                return (
+                  <React.Fragment key={w.id}>
+                    <tr className="wo-sheet-row" onClick={() => setExpandedRow(isOpen ? null : w.id)}>
+                      <td className="wo-sheet-expand">{isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</td>
+                      <td className="wo-sheet-apt">{unit ? (unit.unitNumber || "—") : <span className="row-muted">—</span>}</td>
+                      <td className="wo-sheet-building">{buildingName(w.buildingId)}</td>
+                      <td className="wo-sheet-desc">
+                        <div className="wo-sheet-desc-text">{shortDesc}</div>
+                        {unitTenant && <div className="wo-sheet-tenant">{unitTenant.name}</div>}
+                      </td>
+                      <td className="wo-sheet-vendor">
+                        {w.items && w.items.length > 0
+                          ? w.items.filter(it => it.vendorId).map(it => <div key={it.id}>{vendorName(it.vendorId)}</div>)
+                          : (w.vendorId ? vendorName(w.vendorId) : <span className="row-muted">Unassigned</span>)}
+                      </td>
+                      <td className="wo-sheet-status">
+                        {w.priority !== "Routine" && <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span>}
+                        {view === "active" && w.status !== "Open" && <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>}
+                        {w.courtCaseId && <span className="pill pill-accent"><Gavel size={11} /> Court</span>}
+                        {w.courtCaseId && w.dueByDate && w.status !== "Done" && <Flag date={w.dueByDate} label="due by" />}
+                      </td>
+                      <td className="wo-sheet-actions" onClick={(e) => e.stopPropagation()}>
+                        <input type="checkbox" checked={selected.has(w.id)} onChange={() => toggleSelected(w.id)} title="Select for batch copy" />
+                        <IconBtn
+                          title={w.status === "Done" ? "Done — click to reopen" : "Mark done"}
+                          active={w.status === "Done"}
+                          onClick={() => update("workOrders", w.id, { status: w.status === "Done" ? "Open" : "Done" })}
+                        ><CheckCircle2 size={14} /></IconBtn>
+                        <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={() => copyOne(w)}><ScrollText size={14} /></IconBtn>
+                        <IconBtn title="Edit" onClick={() => setForm({ ...w, isCourtConnected: w.isCourtConnected || !!w.courtCaseId })}><Pencil size={14} /></IconBtn>
+                        <IconBtn title="Delete" danger onClick={() => remove("workOrders", w.id)}><Trash2 size={14} /></IconBtn>
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr className="wo-sheet-detail-row">
+                        <td colSpan={7}>
+                          <div className="wo-full-description">
+                            {w.items && w.items.length > 0
+                              ? w.items.map(it => <div key={it.id}>{it.description}{it.vendorId ? ` — ${vendorName(it.vendorId)}` : ""}</div>)
+                              : w.description}
+                          </div>
+                          <PhotoUploader
+                            photos={w.photos}
+                            pathPrefix={`workOrders/${w.id}/photos`}
+                            onAdd={(newPhotos) => update("workOrders", w.id, { photos: [...(w.photos || []), ...newPhotos] })}
+                            onRemove={(p) => {
+                              update("workOrders", w.id, { photos: (w.photos || []).filter(x => x.id !== p.id) });
+                              if (p.storagePath) deleteObject(storageRef(storage, p.storagePath)).catch(() => {});
+                            }}
+                          />
+                          <div className="row" style={{ marginTop: 8 }}>
+                            <strong>Notes</strong>
+                            <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => setNoteFor(noteFor === w.id ? null : w.id)}><Plus size={14} /> Add note</button>
+                          </div>
+                          {noteFor === w.id && (
+                            <div className="inline-form">
+                              <input placeholder="Update…" value={noteText} onChange={e => setNoteText(e.target.value)} onKeyDown={e => e.key === "Enter" && addNote(w)} />
+                              <button className="btn-primary" onClick={() => addNote(w)}>Save</button>
+                            </div>
+                          )}
+                          {sortedNotes.map((n, i) => (
+                            <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
+                          ))}
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
-      );})}
+      )}
     </div>
   );
 }
@@ -7000,6 +7023,24 @@ function Styles() {
       .sheet-row-flag { background: #FBF6EF; }
       .sheet-row-selected { background: #E8F0FE !important; box-shadow: inset 3px 0 0 var(--navy); cursor: pointer; }
       .sheet-row-selected td { background: transparent; }
+
+      .wo-sheet-row { cursor: pointer; }
+      .wo-sheet-row:hover { background: var(--bg); }
+      .wo-sheet-row td { padding: 10px 12px; vertical-align: top; }
+      .wo-sheet-expand { color: var(--ink-soft); text-align: center; }
+      .wo-sheet-apt { font-weight: 600; white-space: nowrap; }
+      .wo-sheet-building { color: var(--ink-soft); white-space: nowrap; }
+      .wo-sheet-desc { min-width: 220px; max-width: 420px; }
+      .wo-sheet-desc-text { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+      .wo-sheet-tenant { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
+      .wo-sheet-vendor { white-space: nowrap; font-size: 13px; }
+      .wo-sheet-status { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+      .wo-sheet-actions { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
+      .wo-sheet-detail-row td { background: var(--bg); padding: 14px 16px; border-top: none; }
+      @media (max-width: 720px) {
+        .wo-sheet-building { display: none; }
+        .wo-sheet-desc { min-width: 140px; max-width: 220px; }
+      }
       .sheet-input {
         width: 100%; border: none; background: transparent; padding: 8px 10px; font-size: 13px;
         font-family: inherit; color: var(--ink); border-radius: 0;
