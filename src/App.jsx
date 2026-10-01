@@ -244,7 +244,7 @@ const WO_PRIORITIES = ["Routine", "Urgent", "Emergency"];
 const RENT_STATUSES = ["Current", "Late", "In Arrears"];
 const HPD_STATUSES = ["Open", "In Progress", "Certified", "Dismissed"];
 const DSNY_STATUSES = ["Unpaid", "Disputing online", "Paid"];
-const OTHER_STATUSES = ["Open", "In Progress", "Resolved", "Dismissed"];
+const OTHER_STATUSES = ["Open", "In Progress", "Certified", "Resolved", "Dismissed"];
 const COURT_RESULTS = [
   "Pending", "Stipulation (payment plan)", "Case dismissed",
   "Adjourned / next date set", "Judgment for landlord", "Judgment for tenant",
@@ -298,7 +298,7 @@ function mergeRemoteWhilePending(localData, remoteData) {
 }
 
 function violationClosedStatuses(agency) {
-  return agency === "HPD" ? ["Certified", "Dismissed"] : agency === "DSNY" ? ["Paid"] : ["Resolved", "Dismissed"];
+  return agency === "HPD" ? ["Certified", "Dismissed"] : agency === "DSNY" ? ["Paid"] : ["Certified", "Resolved", "Dismissed"];
 }
 function isViolationClosed(v) {
   return violationClosedStatuses(v.agency).includes(v.status);
@@ -4483,6 +4483,7 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
 
 function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, tenantName }) {
   const [form, setForm] = useState(null);
+  const [view, setView] = useState("active");
   const [filter, setFilter] = useState("All");
   const [courtOnly, setCourtOnly] = useState(false);
   const [selected, setSelected] = useState(new Set());
@@ -4503,7 +4504,8 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
   };
 
   const list = data.workOrders
-    .filter(w => filter === "All" || w.status === filter)
+    .filter(w => view === "active" ? w.status !== "Done" : w.status === "Done")
+    .filter(w => view === "closed" || filter === "All" || w.status === filter)
     .filter(w => !courtOnly || w.isCourtConnected || w.courtCaseId)
     .slice()
     .sort((a, b) => (b.dateOpened || "").localeCompare(a.dateOpened || ""));
@@ -4558,12 +4560,18 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
         </div>
       </div>
       <div className="filter-row">
-        {["All", ...WO_STATUSES].map(s => (
-          <button key={s} className={`chip ${filter === s ? "chip-active" : ""}`} onClick={() => setFilter(s)}>{s}</button>
-        ))}
+        <button className={`chip ${view === "active" ? "chip-active" : ""}`} onClick={() => { setView("active"); setSelected(new Set()); }}>Active</button>
+        <button className={`chip ${view === "closed" ? "chip-active" : ""}`} onClick={() => { setView("closed"); setSelected(new Set()); }}>Done</button>
         <span className="wo-filter-divider" />
-        <button className={`chip ${courtOnly ? "chip-active" : ""}`} onClick={() => setCourtOnly(o => !o)}><Gavel size={11} /> Court-linked only</button>
+        <button className={`chip ${courtOnly ? "chip-active" : ""}`} onClick={() => { setCourtOnly(o => !o); setSelected(new Set()); }}><Gavel size={11} /> Court-linked only</button>
       </div>
+      {view === "active" && (
+        <div className="filter-row">
+          {["All", ...WO_STATUSES.filter(s => s !== "Done")].map(s => (
+            <button key={s} className={`chip ${filter === s ? "chip-active" : ""}`} onClick={() => { setFilter(s); setSelected(new Set()); }}>{s}</button>
+          ))}
+        </div>
+      )}
 
       {form && (
         <div className="form-panel">
@@ -4689,7 +4697,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
         </div>
       )}
 
-      {list.length === 0 && <EmptyState text="No work orders here." />}
+      {list.length === 0 && <EmptyState text={view === "active" ? "No open work orders here." : "Nothing marked done yet."} />}
       {list.map(w => {
         const isOpen = expandedRow === w.id;
         const sortedNotes = [...(w.notes || [])].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -4721,7 +4729,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
           </div>
           <div className="wo-card-tags" onClick={() => setExpandedRow(isOpen ? null : w.id)} style={{ cursor: "pointer" }}>
             {w.priority !== "Routine" && <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span>}
-            {w.status !== "Open" && <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>}
+            {view === "active" && w.status !== "Open" && <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>}
             {w.items && w.items.length > 0
               ? w.items.filter(it => it.vendorId).map(it => <span key={it.id} className="pill pill-muted">{vendorName(it.vendorId)}</span>)
               : (w.vendorId && <span className="pill pill-muted">{vendorName(w.vendorId)}</span>)}
@@ -4986,6 +4994,11 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
               Mark paid
             </button>
           )}
+          <IconBtn
+            title={isViolationClosed(v) ? "Reopen" : `Mark ${violationClosedStatuses(v.agency)[0]}`}
+            active={isViolationClosed(v)}
+            onClick={(e) => { e.stopPropagation(); update("violations", v.id, { status: isViolationClosed(v) ? statusesFor(v.agency)[0] : violationClosedStatuses(v.agency)[0] }); }}
+          ><CheckCircle2 size={14} /></IconBtn>
           <IconBtn title={copiedId === v.id ? "Copied!" : "Copy for texting/emailing"} onClick={(e) => { e.stopPropagation(); copyOne(v); }}><ScrollText size={14} /></IconBtn>
           <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); setForm(v); }}><Pencil size={14} /></IconBtn>
           <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("violations", v.id); }}><Trash2 size={14} /></IconBtn>
@@ -5220,7 +5233,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
               <Field label="Violation company handling"><input value={form.company} onChange={e => setForm({ ...form, company: e.target.value })} /></Field>
               <Field label="Description"><textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></Field>
               <Field label="Date issued"><input type="date" value={form.dateIssued} onChange={e => setForm({ ...form, dateIssued: e.target.value })} /></Field>
-              <Field label="Correction deadline"><input type="date" value={form.cureDeadline} onChange={e => setForm({ ...form, cureDeadline: e.target.value })} /></Field>
+              <Field label="Cure / correction deadline"><input type="date" value={form.cureDeadline} onChange={e => setForm({ ...form, cureDeadline: e.target.value })} /></Field>
             </>
           )}
 
@@ -6253,12 +6266,15 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
   const [expandedRow, setExpandedRow] = useState(null);
   const allTypes = [...APPOINTMENT_TYPES, ...(data.customAppointmentTypes || [])];
 
-  const [lastUsedType, setLastUsedType] = useState(null);
   const submit = () => {
     if (!form.type) return;
     if (form.id) update("appointments", form.id, form);
     else add("appointments", { ...form, completed: false });
-    setLastUsedType(form.type);
+    // Stored in the actual saved data, not component state — component
+    // state resets to nothing every time this tab unmounts (switching
+    // tabs and back, reloading the page), which silently undid the whole
+    // point of remembering this the moment you left the page.
+    setData(d => ({ ...d, lastUsedAppointmentType: form.type }));
     setForm(null);
   };
 
@@ -6270,7 +6286,7 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
 
   // Defaults to 9am-11am so the time picker opens near a normal workday start
   // instead of midnight — still fully editable to anything earlier or later.
-  const blank = () => ({ buildingId: data.buildings[0]?.id || "", unitId: "", type: lastUsedType || allTypes[0] || "Other", date: "", timeFrom: "09:00", timeTo: "11:00", notes: "", recurring: false, completed: false });
+  const blank = () => ({ buildingId: data.buildings[0]?.id || "", unitId: "", type: data.lastUsedAppointmentType || allTypes[0] || "Other", date: "", timeFrom: "09:00", timeTo: "11:00", notes: "", recurring: false, completed: false });
 
   const list = data.appointments
     .filter(a => view === "upcoming" ? !a.completed : a.completed)
@@ -6510,6 +6526,7 @@ function QuickNotesTab({ data, add, update, remove, buildingName }) {
   const [editingId, setEditingId] = useState(null);
   const [editText, setEditText] = useState("");
   const [showDone, setShowDone] = useState(false);
+  const [showDoneReminders, setShowDoneReminders] = useState(false);
   const [showAllReminders, setShowAllReminders] = useState(false);
 
   const submit = () => {
@@ -6530,7 +6547,7 @@ function QuickNotesTab({ data, add, update, remove, buildingName }) {
   // a reminder date, shown separately, and only once due unless "All upcoming" is picked.
   const plainNotes = (showDone ? allNotes : allNotes.filter(n => !n.done)).filter(n => !n.reminderDate);
   const allReminders = (data.quickNotes || []).filter(n => n.reminderDate).sort((a, b) => a.reminderDate.localeCompare(b.reminderDate));
-  const remindersToShow = (showAllReminders ? allReminders : allReminders.filter(n => n.reminderDate <= today)).filter(n => showDone || !n.done);
+  const remindersToShow = (showAllReminders ? allReminders : allReminders.filter(n => n.reminderDate <= today)).filter(n => showDoneReminders || !n.done);
 
   const NoteRow = (n) => (
     <div className="list-card" key={n.id}>
@@ -6591,6 +6608,7 @@ function QuickNotesTab({ data, add, update, remove, buildingName }) {
       <div className="filter-row">
         <button className={`chip ${!showAllReminders ? "chip-active" : ""}`} onClick={() => setShowAllReminders(false)}>Due now</button>
         <button className={`chip ${showAllReminders ? "chip-active" : ""}`} onClick={() => setShowAllReminders(true)}>All upcoming</button>
+        <button className={`chip ${showDoneReminders ? "chip-active" : ""}`} onClick={() => setShowDoneReminders(s => !s)}>{showDoneReminders ? "Hide checked off" : "Show checked off"}</button>
       </div>
       {remindersToShow.length === 0 && <EmptyState text={showAllReminders ? "No reminders set." : "Nothing due yet."} />}
       {remindersToShow.map(NoteRow)}
