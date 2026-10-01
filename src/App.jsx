@@ -276,23 +276,46 @@ const emptyData = () => ({
 // Every field in emptyData() is an array of records with an id. When a
 // remote update arrives on this device while a local edit is still
 // pending save, blindly ignoring the remote update entirely would let this
-// device's own save (a full document replace) later overwrite it — the
-// other device's just-saved work would silently vanish the moment this
-// device's pending save fires. Blindly applying the remote update instead
-// would discard whatever's being edited locally right now. This splits
-// the difference safely: keep every local record as-is (so an in-progress
-// edit is never discarded), but fold in any record that exists ONLY in
-// the remote version — something the other device added or already has —
-// so it isn't lost either. Not a perfect same-record conflict resolution,
-// but it guarantees neither side's distinct records disappear.
-function mergeRemoteWhilePending(localData, remoteData) {
+// device's own save (a full document replace) later overwrite it — another
+// tab's just-saved change would silently revert the moment this device's
+// unrelated pending save fires. That's not hypothetical: with several tabs
+// open on different devices, it's an everyday occurrence — check a box on
+// one tab while a completely different tab has any pending edit of its
+// own, and without this, that other tab's next save would silently
+// resurrect the unchecked version, making the change look like it "came
+// back" moments later.
+//
+// Blindly taking the remote version for everything would instead discard
+// whatever's actively being edited locally right now. So this is
+// record-aware: changedIds says which records THIS tab has actually
+// touched since its last successful save (passed in from the ref that
+// add/update/remove maintain). A record in that set keeps its local
+// version, since this tab's own in-progress edit to it takes priority. A
+// record NOT in that set — one this tab hasn't touched at all — safely
+// takes the server's version, since there's nothing local to protect and
+// the server reflects whatever another tab most recently did to it. A
+// record that exists only remotely (added elsewhere, not here at all) is
+// folded in either way.
+function mergeRemoteWhilePending(localData, remoteData, changedIds) {
   const merged = { ...localData };
   Object.keys(emptyData()).forEach(k => {
     const local = Array.isArray(localData[k]) ? localData[k] : [];
     const remote = Array.isArray(remoteData[k]) ? remoteData[k] : [];
+    const changed = (changedIds && changedIds[k]) || new Set();
+    const remoteById = new Map(remote.filter(x => x && x.id).map(x => [x.id, x]));
     const localIds = new Set(local.map(x => x && x.id));
+    const reconciled = local.map(x => {
+      if (x && !changed.has(x.id) && remoteById.has(x.id)) return remoteById.get(x.id);
+      return x;
+    })
+    // A local record that's untouched by this tab and no longer exists on
+    // the server was very likely deleted by another tab — drop it here too,
+    // rather than silently re-adding it the next time this tab saves. A
+    // record this tab just created locally (pending, not saved yet) is
+    // exempt, since it's correctly absent from the server for now.
+    .filter(x => !x || changed.has(x.id) || remoteById.has(x.id));
     const remoteOnly = remote.filter(x => x && !localIds.has(x.id));
-    if (remoteOnly.length > 0) merged[k] = [...local, ...remoteOnly];
+    merged[k] = [...reconciled, ...remoteOnly];
   });
   return merged;
 }
@@ -1362,7 +1385,7 @@ function PinLockScreen({ onUnlock, onForgot }) {
 
 function PropertyOpsAppInner() {
   const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
-  const [data, setData] = useState(emptyData());
+  const [data, setDataRaw] = useState(emptyData());
   // Always mirrors the latest `data` — needed so a save that gets queued
   // while another is still in flight can read the truly current data when
   // it actually runs, not a stale value captured back when it was queued.
@@ -1384,6 +1407,44 @@ function PropertyOpsAppInner() {
   // tracks whether a save is still owed and, if so, asks the browser to
   // confirm before actually leaving.
   const hasPendingSave = useRef(false);
+  // { collectionName: Set of record ids changed locally since the last
+  // successful save } — lets a remote update arriving mid-save correctly
+  // distinguish "a record this tab is actively changing, don't clobber it"
+  // from "a record this tab hasn't touched, safe to take the server's
+  // version of" when merging (see mergeRemoteWhilePending below).
+  const pendingChangedIds = useRef({});
+  const markChanged = (col, id) => {
+    const set = pendingChangedIds.current[col] || new Set();
+    set.add(id);
+    pendingChangedIds.current[col] = set;
+  };
+  // Every actual user-initiated change — whether through add/update/remove
+  // or a direct setData call anywhere else in the app (imports, bulk
+  // deletes, the quick-note box, etc.) — goes through this wrapper rather
+  // than the raw setter. It diffs old vs new state per collection right
+  // here and marks every added, changed, or removed record id as pending,
+  // automatically. That means the multi-tab protection this exists for
+  // can never silently miss a call site the way manually adding
+  // markChanged() to every individual place that touches data could —
+  // there's nothing left to remember to instrument.
+  const setData = (updater) => {
+    setDataRaw(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      Object.keys(emptyData()).forEach(col => {
+        const prevArr = Array.isArray(prev[col]) ? prev[col] : [];
+        const nextArr = Array.isArray(next[col]) ? next[col] : [];
+        if (prevArr === nextArr) return; // untouched collection, nothing to diff
+        const prevById = new Map(prevArr.filter(x => x && x.id).map(x => [x.id, x]));
+        nextArr.forEach(x => {
+          if (!x || !x.id) return;
+          if (!prevById.has(x.id) || prevById.get(x.id) !== x) markChanged(col, x.id);
+        });
+        const nextIds = new Set(nextArr.filter(x => x && x.id).map(x => x.id));
+        prevArr.forEach(x => { if (x && x.id && !nextIds.has(x.id)) markChanged(col, x.id); });
+      });
+      return next;
+    });
+  };
   // Tracks whether a real (existing) document has been loaded at least
   // once this session — used to tell a genuinely brand-new account (no
   // document yet, safe to start empty) apart from a later snapshot that
@@ -1447,9 +1508,10 @@ function PropertyOpsAppInner() {
     // data rather than the previous account's private data into whatever
     // account signs in next in the same browser session.
     setLoaded(false);
-    setData(emptyData());
+    setDataRaw(emptyData());
     hasPendingSave.current = false;
     pendingSince.current = null;
+    pendingChangedIds.current = {};
     setSaveStuck(false);
     justLoaded.current = true;
     clearTimeout(saveRetryTimer.current);
@@ -1480,7 +1542,7 @@ function PropertyOpsAppInner() {
         if (hasPendingSave.current) {
           if (snap.exists()) {
             const loaded = snap.data();
-            setData(d => mergeRemoteWhilePending(d, loaded));
+            setDataRaw(d => mergeRemoteWhilePending(d, loaded, pendingChangedIds.current));
           }
           setLoaded(true);
           return;
@@ -1498,7 +1560,7 @@ function PropertyOpsAppInner() {
           Object.keys(merged).forEach(k => {
             if (loaded[k] !== null && loaded[k] !== undefined) merged[k] = loaded[k];
           });
-          setData(merged);
+          setDataRaw(merged);
           hasLoadedRealDataOnce.current = true;
         } else if (!hasLoadedRealDataOnce.current && !snap.metadata.fromCache) {
           // Genuinely a brand-new account with nothing saved yet — this is
@@ -1509,7 +1571,7 @@ function PropertyOpsAppInner() {
           // found" for a document that actually exists on the server, and
           // this determination is irreversible enough that an unconfirmed
           // signal isn't good enough grounds for it.
-          setData(emptyData());
+          setDataRaw(emptyData());
         } else if (!hasLoadedRealDataOnce.current) {
           // First read said "missing" but came from cache, not the server —
           // wait for the server-confirmed snapshot instead of acting on this
@@ -1577,7 +1639,7 @@ function PropertyOpsAppInner() {
       // truly nothing left owed — a failed save, or one where a newer
       // change already arrived while this one was running, needs to keep
       // the flag (and the leave-page warning it drives) reflecting that.
-      if (!saveQueued.current) { hasPendingSave.current = false; pendingSince.current = null; }
+      if (!saveQueued.current) { hasPendingSave.current = false; pendingSince.current = null; pendingChangedIds.current = {}; }
     } catch (e) {
       console.error("save failed", e);
       setSaveError(true);
@@ -1622,9 +1684,14 @@ function PropertyOpsAppInner() {
   }, []);
 
   // generic collection ops
-  const add = (col, item) => setData(d => ({ ...d, [col]: [...d[col], { id: uid(), ...item }] }));
-  const update = (col, id, patch) => setData(d => ({ ...d, [col]: d[col].map(x => x.id === id ? { ...x, ...patch } : x) }));
-  const remove = (col, id) => setData(d => ({ ...d, [col]: d[col].filter(x => x.id !== id) }));
+  const add = (col, item) => {
+    const id = item.id || uid();
+    markChanged(col, id);
+    setData(d => ({ ...d, [col]: [...d[col], { ...item, id }] }));
+    return id;
+  };
+  const update = (col, id, patch) => { markChanged(col, id); setData(d => ({ ...d, [col]: d[col].map(x => x.id === id ? { ...x, ...patch } : x) })); };
+  const remove = (col, id) => { markChanged(col, id); setData(d => ({ ...d, [col]: d[col].filter(x => x.id !== id) })); };
 
   const buildingName = (id) => shortAddress(data.buildings.find(b => b.id === id)?.address) || "—";
   const vendorName = (id) => data.vendors.find(v => v.id === id)?.name || "—";
@@ -4738,6 +4805,11 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
           </div>
           {isOpen && (
             <div className="list-card-body">
+              <div className="wo-full-description">
+                {w.items && w.items.length > 0
+                  ? w.items.map(it => <div key={it.id}>{it.description}{it.vendorId ? ` — ${vendorName(it.vendorId)}` : ""}</div>)
+                  : w.description}
+              </div>
               <PhotoUploader
                 photos={w.photos}
                 pathPrefix={`workOrders/${w.id}/photos`}
@@ -6750,6 +6822,7 @@ function Styles() {
         overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       }
       .wo-card-tags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 14px 12px; }
+      .wo-full-description { white-space: pre-wrap; word-break: break-word; margin-bottom: 10px; line-height: 1.5; }
       .wo-filter-divider { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
       .list-card-title { font-weight: 600; font-size: 14px; margin-right: 4px; }
       .list-card-body { padding: 0 14px 14px 14px; border-top: 1px solid var(--border); padding-top: 10px; font-size: 13px; }
@@ -7046,7 +7119,8 @@ function Styles() {
         /* iOS Safari auto-zooms the whole page when you tap an input with a font
            smaller than 16px — jarring on every single field in an app this
            form-heavy. Force 16px on mobile only, so desktop stays compact. */
-        input, select, textarea { font-size: 16px !important; }
+        input:not([type="checkbox"]):not([type="radio"]), select, textarea { font-size: 16px !important; }
+        input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; flex-shrink: 0; margin: 0; }
         /* Icon-only buttons (edit/delete/etc, used on nearly every row) were
            only ~22px of actual tap area — below the ~44px minimum comfortable
            touch target, easy to mis-tap Delete instead of Edit on a real phone. */
