@@ -4561,6 +4561,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
   const [view, setView] = useState("active");
   const [filter, setFilter] = useState("All");
   const [courtOnly, setCourtOnly] = useState(false);
+  const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(new Set());
   const [copiedId, setCopiedId] = useState(null);
   const [expandedRow, setExpandedRow] = useState(null);
@@ -4582,6 +4583,18 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
     .filter(w => view === "active" ? w.status !== "Done" : w.status === "Done")
     .filter(w => view === "closed" || filter === "All" || w.status === filter)
     .filter(w => !courtOnly || w.isCourtConnected || w.courtCaseId)
+    .filter(w => {
+      if (!search.trim()) return true;
+      const q = search.trim().toLowerCase();
+      const unit = w.unitId ? data.units.find(u => u.id === w.unitId) : null;
+      const unitTenant = w.unitId ? data.tenants.find(t => t.unitId === w.unitId && !t.movedOut) : null;
+      const vendorNames = w.items && w.items.length > 0
+        ? w.items.map(it => it.vendorId ? vendorName(it.vendorId) : "").join(" ")
+        : (w.vendorId ? vendorName(w.vendorId) : "");
+      const desc = w.items && w.items.length > 0 ? w.items.map(it => it.description).join(" ") : w.description;
+      return [desc, unit?.unitNumber, buildingName(w.buildingId), vendorNames, w.status, w.priority, unitTenant?.name]
+        .some(f => (f || "").toString().toLowerCase().includes(q));
+    })
     .slice()
     .sort((a, b) => (b.dateOpened || "").localeCompare(a.dateOpened || ""));
 
@@ -4633,6 +4646,13 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
             <Plus size={14} /> Add work order
           </button>
         </div>
+      </div>
+      <div className="row" style={{ marginBottom: 10 }}>
+        <input
+          type="text" placeholder="Search description, apt, building, vendor, status…" value={search}
+          onChange={e => setSearch(e.target.value)}
+          style={{ width: "100%", maxWidth: 360 }}
+        />
       </div>
       <div className="filter-row">
         <button className={`chip ${view === "active" ? "chip-active" : ""}`} onClick={() => { setView("active"); setSelected(new Set()); }}>Active</button>
@@ -5933,6 +5953,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
   const [dueOnlyFilter, setDueOnlyFilter] = useState(null); // null | "court" | "stip"
   const [logForm, setLogForm] = useState({});
   const [confirmingDeleteAll, setConfirmingDeleteAll] = useState(false);
+  const [search, setSearch] = useState("");
 
   const deleteAllCases = () => {
     setData(d => ({ ...d, courtCases: [] }));
@@ -6007,6 +6028,13 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
       if (dueOnlyFilter === "court") return c.result === "Stipulation (payment plan)" ? dateDueStrict(c.nextCourtDate) : dateDue(c.nextCourtDate);
       if (dueOnlyFilter === "stip") return c.result === "Stipulation (payment plan)" && dateDue(c.nextPaymentDue);
       return true;
+    })
+    .filter(c => {
+      if (!search.trim()) return true;
+      const q = search.trim().toLowerCase();
+      const name = c.tenantId ? tenantName(c.tenantId) : (c.rawName || "");
+      return [name, c.caseNumber, buildingName(c.buildingId), c.stage, c.result, c.stipulationTerms]
+        .some(f => (f || "").toString().toLowerCase().includes(q));
     })
     .slice()
     .sort((a, b) => (a.nextCourtDate || "9999-99-99").localeCompare(b.nextCourtDate || "9999-99-99"));
@@ -6083,6 +6111,16 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
         <button className={`chip ${section === "cases" ? "chip-active" : ""}`} onClick={() => setSection("cases")}>Cases</button>
         <button className={`chip ${section === "import" ? "chip-active" : ""}`} onClick={() => setSection("import")}>Import from attorney report</button>
       </div>
+
+      {section === "cases" && (
+        <div className="row" style={{ marginBottom: 10 }}>
+          <input
+            type="text" placeholder="Search tenant, docket #, building, stage, result…" value={search}
+            onChange={e => setSearch(e.target.value)}
+            style={{ width: "100%", maxWidth: 360 }}
+          />
+        </div>
+      )}
 
       {section === "cases" && buildingsWithCases.length > 1 && (
         <div className="filter-row">
