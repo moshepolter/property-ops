@@ -1635,11 +1635,19 @@ function PropertyOpsAppInner() {
       setSaveError(false);
       saveRetryCount.current = 0;
       clearTimeout(saveRetryTimer.current);
-      // Only a confirmed success with nothing further queued means there's
-      // truly nothing left owed — a failed save, or one where a newer
-      // change already arrived while this one was running, needs to keep
-      // the flag (and the leave-page warning it drives) reflecting that.
-      if (!saveQueued.current) { hasPendingSave.current = false; pendingSince.current = null; pendingChangedIds.current = {}; }
+      // Only a confirmed success with nothing further owed means there's
+      // truly nothing left pending — a failed save needs to keep the flag
+      // (and the leave-page warning it drives) reflecting that. saveQueued
+      // alone isn't a reliable signal here: it only catches a save being
+      // directly re-attempted while one was in flight, not a new edit that
+      // arrived via setData/markChanged and is still quietly waiting out
+      // its own debounce timer. Comparing what was actually just written
+      // to the current data catches both cases precisely — if they differ,
+      // something changed locally since this save started, and that
+      // change's own tracking must survive until it, too, is confirmed
+      // saved, however it happens to get there.
+      const unchangedSinceSave = JSON.stringify(dataRef.current) === JSON.stringify(safe);
+      if (!saveQueued.current && unchangedSinceSave) { hasPendingSave.current = false; pendingSince.current = null; pendingChangedIds.current = {}; }
     } catch (e) {
       console.error("save failed", e);
       setSaveError(true);
