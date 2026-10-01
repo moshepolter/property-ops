@@ -4774,7 +4774,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
 
       {list.length === 0 && <EmptyState text={view === "active" ? "No open work orders here." : "Nothing marked done yet."} />}
       {list.length > 0 && (
-        <div className="sheet-wrap">
+        <div className="sheet-wrap wo-sheet-wrap">
           <table className="sheet wo-sheet">
             <thead>
               <tr>
@@ -4798,18 +4798,18 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
                   <React.Fragment key={w.id}>
                     <tr className="wo-sheet-row" onClick={() => setExpandedRow(isOpen ? null : w.id)}>
                       <td className="wo-sheet-expand">{isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</td>
-                      <td className="wo-sheet-apt">{unit ? (unit.unitNumber || "—") : <span className="row-muted">—</span>}</td>
-                      <td className="wo-sheet-building">{buildingName(w.buildingId)}</td>
-                      <td className="wo-sheet-desc">
+                      <td className="wo-sheet-apt" data-label="Apt">{unit ? (unit.unitNumber || "—") : <span className="row-muted">—</span>}</td>
+                      <td className="wo-sheet-building" data-label="Building">{buildingName(w.buildingId)}</td>
+                      <td className="wo-sheet-desc" data-label="Description">
                         <div className="wo-sheet-desc-text">{shortDesc}</div>
                         {unitTenant && <div className="wo-sheet-tenant">{unitTenant.name}</div>}
                       </td>
-                      <td className="wo-sheet-vendor">
+                      <td className="wo-sheet-vendor" data-label="Vendor">
                         {w.items && w.items.length > 0
                           ? w.items.filter(it => it.vendorId).map(it => <div key={it.id}>{vendorName(it.vendorId)}</div>)
                           : (w.vendorId ? vendorName(w.vendorId) : <span className="row-muted">Unassigned</span>)}
                       </td>
-                      <td className="wo-sheet-status">
+                      <td className="wo-sheet-status" data-label="Status">
                         {w.priority !== "Routine" && <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span>}
                         {view === "active" && w.status !== "Open" && <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>}
                         {w.courtCaseId && <span className="pill pill-accent"><Gavel size={11} /> Court</span>}
@@ -7046,8 +7046,28 @@ function Styles() {
       .wo-sheet-actions { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
       .wo-sheet-detail-row td { background: var(--bg); padding: 14px 16px; border-top: none; }
       @media (max-width: 720px) {
-        .wo-sheet-building { display: none; }
-        .wo-sheet-desc { min-width: 140px; max-width: 220px; }
+        .wo-sheet-wrap { overflow: visible; border: none; background: none; }
+        .wo-sheet thead { display: none; }
+        .wo-sheet, .wo-sheet tbody, .wo-sheet tr { display: block; width: 100%; }
+        .wo-sheet-detail-row td { display: block !important; width: 100%; }
+        .wo-sheet-row {
+          display: flex; flex-wrap: wrap; width: 100%;
+          background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+          margin-bottom: 10px; padding: 10px 12px;
+        }
+        .wo-sheet-row td { display: block; border: none !important; padding: 3px 0 !important; width: 100%; }
+        .wo-sheet-expand { display: none; }
+        .wo-sheet-apt, .wo-sheet-building { display: inline-block !important; width: auto !important; }
+        .wo-sheet-apt::after { content: " · "; color: var(--ink-soft); }
+        .wo-sheet-desc { order: 3; margin-top: 4px; max-width: 100%; }
+        .wo-sheet-desc-text { -webkit-line-clamp: 3; }
+        .wo-sheet-vendor, .wo-sheet-status { order: 4; margin-top: 4px; }
+        .wo-sheet-vendor:empty, .wo-sheet-status:empty { display: none; }
+        .wo-sheet-vendor:not(:empty)::before { content: attr(data-label) ": "; color: var(--ink-soft); font-size: 12px; }
+        .wo-sheet-actions {
+          order: 5; display: flex !important; justify-content: flex-end; width: 100% !important;
+          margin-top: 8px; padding-top: 8px !important; border-top: 1px solid var(--border) !important;
+        }
       }
       .sheet-input {
         width: 100%; border: none; background: transparent; padding: 8px 10px; font-size: 13px;
