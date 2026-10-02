@@ -1393,6 +1393,13 @@ function PropertyOpsAppInner() {
   useEffect(() => { dataRef.current = data; }, [data]);
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState("dashboard");
+  // { tab, id } — set alongside setTab(...) when navigating to a specific
+  // record, not just its general tab. The destination tab's own effect
+  // consumes this (scrolling to and expanding the matching record) and
+  // clears it immediately after, so it's a one-shot instruction rather
+  // than something that keeps re-triggering.
+  const [deepLink, setDeepLink] = useState(null);
+  const goTo = (targetTab, id) => { setTab(targetTab); setDeepLink({ tab: targetTab, id }); };
   const [query, setQuery] = useState("");
   const [navOpen, setNavOpen] = useState(false);
   const [pinUnlocked, setPinUnlocked] = useState(() => !localStorage.getItem(PIN_STORAGE_KEY));
@@ -1838,17 +1845,17 @@ function PropertyOpsAppInner() {
             ))}
           </nav>
           <main className="content">
-            {tab === "dashboard" && <Dashboard data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} setData={setData} update={update} saveStuck={saveStuck} />}
+            {tab === "dashboard" && <Dashboard data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} goTo={goTo} setData={setData} update={update} saveStuck={saveStuck} />}
             {tab === "buildings" && <BuildingsTab data={data} add={add} update={update} remove={remove} setData={setData} buildingName={buildingName} />}
-            {tab === "rent" && <RentTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} />}
-            {tab === "workorders" && <WorkOrdersTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} tenantName={tenantName} />}
-            {tab === "violations" && <ViolationsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} setData={setData} />}
+            {tab === "rent" && <RentTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} deepLink={deepLink} setDeepLink={setDeepLink} />}
+            {tab === "workorders" && <WorkOrdersTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} tenantName={tenantName} deepLink={deepLink} setDeepLink={setDeepLink} />}
+            {tab === "violations" && <ViolationsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} setData={setData} deepLink={deepLink} setDeepLink={setDeepLink} />}
             {tab === "vendors" && <VendorsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
-            {tab === "court" && <CourtTab data={data} add={add} update={update} remove={remove} setData={setData} tenantName={tenantName} buildingName={buildingName} />}
-            {tab === "inspections" && <AppointmentsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} />}
+            {tab === "court" && <CourtTab data={data} add={add} update={update} remove={remove} setData={setData} tenantName={tenantName} buildingName={buildingName} deepLink={deepLink} setDeepLink={setDeepLink} />}
+            {tab === "inspections" && <AppointmentsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} deepLink={deepLink} setDeepLink={setDeepLink} />}
             {tab === "laws" && <LocalLawsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
             {tab === "reminders" && <RemindersTab data={data} add={add} update={update} remove={remove} />}
-            {tab === "quicknotes" && <QuickNotesTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
+            {tab === "quicknotes" && <QuickNotesTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} deepLink={deepLink} setDeepLink={setDeepLink} />}
           </main>
         </div>
       )}
@@ -2031,7 +2038,7 @@ function monthGridDays(refDate) {
   });
 }
 
-function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
+function DashboardCalendar({ data, buildingName, tenantName, setTab, goTo }) {
   const [viewMode, setViewMode] = useState("day"); // day | week | month | year
   const [refDate, setRefDate] = useState(todayISO());
   const today = todayISO();
@@ -2064,7 +2071,7 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
   const selectedLabel = refDate === today ? "Today" : new Date(refDate + "T00:00:00").toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
 
   const Row = (item) => (
-    <button key={item.key} className="dash-detail-item" onClick={() => setTab(item.tab)}>
+    <button key={item.key} className="dash-detail-item" onClick={() => goTo(item.tab, item.key.slice(item.key.indexOf("-") + 1))}>
       <span className="pill pill-danger">{item.type}</span>
       <div className="followup-item-main">
         <div className="followup-item-name">{item.label}{item.sub ? <span className="row-muted"> — {item.sub}</span> : null}</div>
@@ -2144,7 +2151,7 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab }) {
   );
 }
 
-function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, update, saveStuck }) {
+function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setData, update, saveStuck }) {
   const [violationsPanelOpen, setViolationsPanelOpen] = useState(false);
   const [excludedSectionOpen, setExcludedSectionOpen] = useState(false);
   // Buildings marked "Mitch's father" are excluded from every main
@@ -2591,7 +2598,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, u
             allDated.filter(i => i.date < today && i.type !== "Follow-up").length === 0
               ? <div className="hint">Nothing overdue.</div>
               : allDated.filter(i => i.date < today && i.type !== "Follow-up").sort((a, b) => a.date.localeCompare(b.date)).map(item => (
-                <div key={item.key} className="dash-detail-item" onClick={() => setTab(item.tab)}>
+                <div key={item.key} className="dash-detail-item" onClick={() => goTo(item.tab, item.key.slice(item.key.indexOf("-") + 1))}>
                   <span className="pill pill-danger">{item.type}</span>
                   <div className="followup-item-main">
                     <div className="followup-item-name">{item.label}{item.sub ? <span className="row-muted"> — {item.sub}</span> : null}</div>
@@ -2644,7 +2651,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, u
       )}
 
       <div className="dash-calendar-hero">
-        <DashboardCalendar data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} />
+        <DashboardCalendar data={data} buildingName={buildingName} tenantName={tenantName} setTab={setTab} goTo={goTo} />
       </div>
 
       <div className="dash-col-main">
@@ -2652,7 +2659,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, setData, u
           <div className="dash-roster">
             <div className="dash-roster-title">Follow up with ({followUpEntries.length})</div>
               {rosterEntries.map(({ tenant: t, followUp: f }) => (
-                <div className="dash-roster-row" key={f.id}>
+                <div className="dash-roster-row" key={f.id} onClick={() => goTo("rent", t.id)} style={{ cursor: "pointer" }}>
                   <div className="dash-roster-info">
                     <div className="dash-roster-name">{t.name}</div>
                     <div className="dash-roster-sub">{buildingName(t.buildingId)}{f.note ? ` — ${f.note}` : ""}{!f.note && t.balance ? ` — $${t.balance} behind` : ""}</div>
@@ -3355,7 +3362,7 @@ function PhoneCycleCell({ tenant, update }) {
   );
 }
 
-function RentTab({ data: rawData, add, update, remove, buildingName, setData }) {
+function RentTab({ data: rawData, add, update, remove, buildingName, setData, deepLink, setDeepLink }) {
   const [excludedSectionOpen, setExcludedSectionOpen] = useState(false);
   const mainBuildingIds = new Set(rawData.buildings.filter(b => !b.excludedOwner).map(b => b.id));
   const excludedBuildingsList = rawData.buildings.filter(b => b.excludedOwner);
@@ -3378,6 +3385,23 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
   const [sortMode, setSortMode] = useState("building"); // building | balance | oldest
   const [expandedBuildings, setExpandedBuildings] = useState(new Set());
   const [section, setSection] = useState("sheet");
+  const [highlightTenantId, setHighlightTenantId] = useState(null);
+
+  useEffect(() => {
+    if (!deepLink || deepLink.tab !== "rent") return;
+    const target = data.tenants.find(t => t.id === deepLink.id);
+    if (target) {
+      setSection("sheet");
+      setStatusFilter("All"); // a filter that excludes this tenant would otherwise hide them even with their building expanded
+      setExpandedBuildings(prev => new Set(prev).add(target.buildingId));
+      setHighlightTenantId(target.id);
+      setTimeout(() => {
+        document.getElementById(`tenant-row-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 100);
+      setTimeout(() => setHighlightTenantId(null), 2500);
+    }
+    setDeepLink(null);
+  }, [deepLink]);
 
   const inCourt = (tenantId) => (data.courtCases || []).some(c => c.tenantId === tenantId && !c.archived);
   // Creates a linked court case for the tenant — the moment one exists,
@@ -3588,7 +3612,8 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData }) 
           {tenants.map(t => (
             <React.Fragment key={t.id}>
               <tr
-                className={`${t.status !== "Current" ? "sheet-row-flag" : ""} ${selectedTenantId === t.id ? "sheet-row-selected" : ""}`}
+                id={`tenant-row-${t.id}`}
+                className={`${t.status !== "Current" ? "sheet-row-flag" : ""} ${selectedTenantId === t.id ? "sheet-row-selected" : ""} ${highlightTenantId === t.id ? "sheet-row-deeplinked" : ""}`}
                 onClick={() => setSelectedTenantId(selectedTenantId === t.id ? null : t.id)}
               >
                 <td className="sheet-readonly">{unitOf(t) || "—"}</td>
@@ -4365,17 +4390,25 @@ function ImportBlock({ type, data, setData, buildingName }) {
           });
         }
       });
+      const newHistoryEntry = {
+        id: uid(), date: todayISO(), buildingId, type,
+        updated: applied.filter(c => !c.isNew).length,
+        added: applied.filter(c => c.isNew).length,
+        missing: preview.missing.length,
+        skipped: preview.changes.length - applied.length,
+        details: applied.map(c => ({ apt: c.apt, name: c.name, isNew: c.isNew, fields: c.fields, before: c.before })),
+        missingDetails: preview.missing,
+      };
+      // Keep only the 10 most recent entries for this specific building and
+      // import type — older ones for that combination are dropped
+      // automatically here, rather than needing a manual cleanup click
+      // each time storage creeps up. A different building or type keeps
+      // its own separate history, untouched by this.
+      const sameKey = next.importHistory.filter(h => h.buildingId === buildingId && h.type === type);
+      const keepIds = new Set(sameKey.slice(0, 9).map(h => h.id));
       next.importHistory = [
-        {
-          id: uid(), date: todayISO(), buildingId, type,
-          updated: applied.filter(c => !c.isNew).length,
-          added: applied.filter(c => c.isNew).length,
-          missing: preview.missing.length,
-          skipped: preview.changes.length - applied.length,
-          details: applied.map(c => ({ apt: c.apt, name: c.name, isNew: c.isNew, fields: c.fields, before: c.before })),
-          missingDetails: preview.missing,
-        },
-        ...next.importHistory,
+        newHistoryEntry,
+        ...next.importHistory.filter(h => h.buildingId !== buildingId || h.type !== type || keepIds.has(h.id)),
       ];
       return next;
     });
@@ -4556,7 +4589,7 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
 
 /* ============================== work orders ============================== */
 
-function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, tenantName }) {
+function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, tenantName, deepLink, setDeepLink }) {
   const [form, setForm] = useState(null);
   const [view, setView] = useState("active");
   const [filter, setFilter] = useState("All");
@@ -4569,6 +4602,27 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
   const [expandedRow, setExpandedRow] = useState(null);
   const [noteFor, setNoteFor] = useState(null);
   const [noteText, setNoteText] = useState("");
+  const [highlightWoId, setHighlightWoId] = useState(null);
+
+  useEffect(() => {
+    if (!deepLink || deepLink.tab !== "workorders") return;
+    const target = data.workOrders.find(w => w.id === deepLink.id);
+    if (target) {
+      setView(target.status === "Done" ? "closed" : "active");
+      setFilter("All");
+      setCourtOnly(false);
+      setVendorFilter("All");
+      setBuildingFilter("All");
+      setSearch("");
+      setExpandedRow(target.id);
+      setHighlightWoId(target.id);
+      setTimeout(() => {
+        document.getElementById(`wo-row-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 100);
+      setTimeout(() => setHighlightWoId(null), 2500);
+    }
+    setDeepLink(null);
+  }, [deepLink]);
 
   const submit = () => {
     if (!form.description) return;
@@ -4832,7 +4886,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
                 const shortDesc = w.items && w.items.length > 0 ? w.items.map(it => it.description).join(", ") : w.description;
                 return (
                   <React.Fragment key={w.id}>
-                    <tr className="wo-sheet-row" onClick={() => setExpandedRow(isOpen ? null : w.id)}>
+                    <tr className={`wo-sheet-row ${highlightWoId === w.id ? "sheet-row-deeplinked" : ""}`} id={`wo-row-${w.id}`} onClick={() => setExpandedRow(isOpen ? null : w.id)}>
                       <td className="wo-sheet-expand">{isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</td>
                       <td className="wo-sheet-apt" data-label="Apt">{unit ? (unit.unitNumber || "—") : <span className="row-muted">—</span>}</td>
                       <td className="wo-sheet-building" data-label="Building">{buildingName(w.buildingId)}</td>
@@ -4866,6 +4920,15 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
                     {isOpen && (
                       <tr className="wo-sheet-detail-row">
                         <td colSpan={7}>
+                          {unitTenant && (
+                            <div className="wo-tenant-info">
+                              <strong>{unitTenant.name}</strong>
+                              {(unitTenant.phone || "").split(";").map(s => s.trim()).filter(Boolean).map((num, i) => (
+                                <a key={i} href={`tel:${num}`} onClick={(e) => e.stopPropagation()} className="wo-tenant-phone"><Phone size={12} /> {num}</a>
+                              ))}
+                              {!unitTenant.phone && <span className="row-muted"> — no phone on file</span>}
+                            </div>
+                          )}
                           <div className="wo-full-description">
                             {w.items && w.items.length > 0
                               ? w.items.map(it => <div key={it.id}>{it.description}{it.vendorId ? ` — ${vendorName(it.vendorId)}` : ""}</div>)
@@ -4909,7 +4972,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
 
 /* ============================== violations ============================== */
 
-function ViolationsTab({ data, add, update, remove, buildingName, vendorName, setData }) {
+function ViolationsTab({ data, add, update, remove, buildingName, vendorName, setData, deepLink, setDeepLink }) {
   const [agency, setAgency] = useState("All");
   const [form, setForm] = useState(null);
   const [view, setView] = useState("active");
@@ -4924,7 +4987,28 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
   const [search, setSearch] = useState("");
   const [confirmingDeleteAllHpd, setConfirmingDeleteAllHpd] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState(new Set());
+  const [highlightViolationId, setHighlightViolationId] = useState(null);
   const fileRef = useRef(null);
+
+  useEffect(() => {
+    if (!deepLink || deepLink.tab !== "violations") return;
+    const target = data.violations.find(v => v.id === deepLink.id);
+    if (target) {
+      setAgency("All");
+      setView(isViolationClosed(target) ? "closed" : "active");
+      setDueFilter("all");
+      setBuildingFilter("All");
+      setSearch("");
+      setExpandedGroups(prev => new Set(prev).add(target.agency));
+      setExpandedRow(target.id);
+      setHighlightViolationId(target.id);
+      setTimeout(() => {
+        document.getElementById(`violation-row-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 100);
+      setTimeout(() => setHighlightViolationId(null), 2500);
+    }
+    setDeepLink(null);
+  }, [deepLink]);
 
   // Scoped to HPD only — a generic "delete all violations" would also wipe
   // DSNY and other agencies' data, which has nothing to do with re-testing
@@ -5103,7 +5187,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
     const flag = view === "active" ? flagFor(v.cureDeadline) : null;
     const isOpen = expandedRow === v.id;
     return (
-      <div className={`list-card list-card-compact ${flag === "overdue" ? "list-card-danger" : flag === "soon" ? "list-card-warn" : ""}`} key={v.id}>
+      <div className={`list-card list-card-compact ${flag === "overdue" ? "list-card-danger" : flag === "soon" ? "list-card-warn" : ""} ${highlightViolationId === v.id ? "sheet-row-deeplinked" : ""}`} key={v.id} id={`violation-row-${v.id}`}>
         <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : v.id)} style={{ cursor: "pointer", alignItems: "flex-start" }}>
           {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           <input type="checkbox" checked={selected.has(v.id)} onChange={(e) => { e.stopPropagation(); toggleSelected(v.id); }} onClick={(e) => e.stopPropagation()} title="Select for batch copy" />
@@ -5959,7 +6043,7 @@ function CourtCaseImportSection({ data, add, update }) {
   );
 }
 
-function CourtTab({ data, add, update, remove, setData, tenantName, buildingName }) {
+function CourtTab({ data, add, update, remove, setData, tenantName, buildingName, deepLink, setDeepLink }) {
   const [form, setForm] = useState(null);
   const [view, setView] = useState("active");
   const [checklistText, setChecklistText] = useState({});
@@ -5970,6 +6054,26 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
   const [logForm, setLogForm] = useState({});
   const [confirmingDeleteAll, setConfirmingDeleteAll] = useState(false);
   const [search, setSearch] = useState("");
+  const [highlightCaseId, setHighlightCaseId] = useState(null);
+
+  useEffect(() => {
+    if (!deepLink || deepLink.tab !== "court") return;
+    const target = data.courtCases.find(c => c.id === deepLink.id);
+    if (target) {
+      setSection("cases");
+      setView(target.archived ? "closed" : "active");
+      setBuildingFilter("All");
+      setDueOnlyFilter(null);
+      setSearch("");
+      setDetailsFor(target.id);
+      setHighlightCaseId(target.id);
+      setTimeout(() => {
+        document.getElementById(`case-row-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 100);
+      setTimeout(() => setHighlightCaseId(null), 2500);
+    }
+    setDeepLink(null);
+  }, [deepLink]);
 
   const deleteAllCases = () => {
     setData(d => ({ ...d, courtCases: [] }));
@@ -6269,7 +6373,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
         const latestLog = sortedLog[0];
         const isOpen = detailsFor === c.id;
         return (
-        <div className="list-card" key={c.id}>
+        <div className={`list-card ${highlightCaseId === c.id ? "sheet-row-deeplinked" : ""}`} key={c.id} id={`case-row-${c.id}`}>
           <div className="list-card-head" onClick={() => setDetailsFor(isOpen ? null : c.id)} style={{ cursor: "pointer" }}>
             {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
             {c.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === c.unitId)?.unitNumber || "—"}</span>}
@@ -6417,11 +6521,27 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
 
 /* ============================== appointments (incl. recurring) ============================== */
 
-function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
+function AppointmentsTab({ data, add, update, remove, buildingName, setData, deepLink, setDeepLink }) {
   const [form, setForm] = useState(null);
   const [view, setView] = useState("upcoming");
   const [expandedRow, setExpandedRow] = useState(null);
+  const [highlightApptId, setHighlightApptId] = useState(null);
   const allTypes = [...APPOINTMENT_TYPES, ...(data.customAppointmentTypes || [])];
+
+  useEffect(() => {
+    if (!deepLink || deepLink.tab !== "inspections") return;
+    const target = (data.appointments || []).find(a => a.id === deepLink.id);
+    if (target) {
+      setView(target.completed ? "completed" : "upcoming");
+      setExpandedRow(target.id);
+      setHighlightApptId(target.id);
+      setTimeout(() => {
+        document.getElementById(`appt-row-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 100);
+      setTimeout(() => setHighlightApptId(null), 2500);
+    }
+    setDeepLink(null);
+  }, [deepLink]);
 
   const submit = () => {
     if (!form.type) return;
@@ -6519,7 +6639,7 @@ function AppointmentsTab({ data, add, update, remove, buildingName, setData }) {
         const reminderHit = view === "upcoming" && d !== null && [0, 1, 3, 7].includes(d);
         const isOpen = expandedRow === a.id;
         return (
-          <div className="list-card" key={a.id}>
+          <div className={`list-card ${highlightApptId === a.id ? "sheet-row-deeplinked" : ""}`} key={a.id} id={`appt-row-${a.id}`}>
             <div className="list-card-head" onClick={() => setExpandedRow(isOpen ? null : a.id)} style={{ cursor: "pointer" }}>
               {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
               <div className="list-card-title">{a.type}</div>
@@ -6676,7 +6796,7 @@ function RemindersTab({ data, add, update, remove }) {
 
 /* ============================== quick notes ============================== */
 
-function QuickNotesTab({ data, add, update, remove, buildingName }) {
+function QuickNotesTab({ data, add, update, remove, buildingName, deepLink, setDeepLink }) {
   const [text, setText] = useState("");
   const [reminderDate, setReminderDate] = useState("");
   const [buildingId, setBuildingId] = useState("");
@@ -6685,6 +6805,25 @@ function QuickNotesTab({ data, add, update, remove, buildingName }) {
   const [showDone, setShowDone] = useState(false);
   const [showDoneReminders, setShowDoneReminders] = useState(false);
   const [showAllReminders, setShowAllReminders] = useState(false);
+  const [highlightNoteId, setHighlightNoteId] = useState(null);
+
+  useEffect(() => {
+    if (!deepLink || deepLink.tab !== "quicknotes") return;
+    const target = (data.quickNotes || []).find(n => n.id === deepLink.id);
+    if (target) {
+      // A target that isn't due yet, or already checked off, would be
+      // invisible under the default filters — widen whichever one applies
+      // so the thing just navigated to is actually on screen.
+      if (target.reminderDate && target.reminderDate > todayISO()) setShowAllReminders(true);
+      if (target.done) setShowDoneReminders(true);
+      setHighlightNoteId(target.id);
+      setTimeout(() => {
+        document.getElementById(`note-row-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 100);
+      setTimeout(() => setHighlightNoteId(null), 2500);
+    }
+    setDeepLink(null);
+  }, [deepLink]);
 
   const submit = () => {
     if (!text.trim()) return;
@@ -6707,7 +6846,7 @@ function QuickNotesTab({ data, add, update, remove, buildingName }) {
   const remindersToShow = (showAllReminders ? allReminders : allReminders.filter(n => n.reminderDate <= today)).filter(n => showDoneReminders || !n.done);
 
   const NoteRow = (n) => (
-    <div className="list-card" key={n.id}>
+    <div className={`list-card ${highlightNoteId === n.id ? "sheet-row-deeplinked" : ""}`} key={n.id} id={`note-row-${n.id}`}>
       <div className="list-card-head">
         <input type="checkbox" checked={!!n.done} onChange={e => update("quickNotes", n.id, { done: e.target.checked })} />
         {editingId === n.id ? (
@@ -6908,6 +7047,9 @@ function Styles() {
       }
       .wo-card-tags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 14px 12px; }
       .wo-full-description { white-space: pre-wrap; word-break: break-word; margin-bottom: 10px; line-height: 1.5; }
+      .wo-tenant-info { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+      .wo-tenant-phone { display: inline-flex; align-items: center; gap: 4px; color: var(--navy); text-decoration: none; font-size: 13px; }
+      .wo-tenant-phone:hover { text-decoration: underline; }
       .wo-filter-divider { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
       .list-card-title { font-weight: 600; font-size: 14px; margin-right: 4px; }
       .list-card-body { padding: 0 14px 14px 14px; border-top: 1px solid var(--border); padding-top: 10px; font-size: 13px; }
@@ -7084,14 +7226,19 @@ function Styles() {
       .sheet td:last-child, .sheet th:last-child { border-right: none; }
       .sheet-row-flag { background: #FBF6EF; }
       .sheet-row-selected { background: #E8F0FE !important; box-shadow: inset 3px 0 0 var(--navy); cursor: pointer; }
+      .sheet-row-deeplinked { animation: deeplink-flash 2.5s ease-out; }
+      @keyframes deeplink-flash {
+        0% { background: #FFF3CD; } 70% { background: #FFF3CD; } 100% { background: transparent; }
+      }
       .sheet-row-selected td { background: transparent; }
 
       .wo-sheet-row { cursor: pointer; }
-      .wo-sheet-row:hover { background: var(--bg); }
+      .wo-sheet-row:nth-child(even) { background: var(--bg); }
+      .wo-sheet-row:hover { background: #E8F0FE; }
       .wo-sheet-row td { padding: 10px 12px; vertical-align: top; }
       .wo-sheet-expand { color: var(--ink-soft); text-align: center; }
       .wo-sheet-apt { font-weight: 600; white-space: nowrap; }
-      .wo-sheet-building { color: var(--ink-soft); white-space: nowrap; }
+      .wo-sheet-building { color: var(--ink); font-weight: 600; white-space: nowrap; }
       .wo-sheet-desc { min-width: 220px; max-width: 420px; }
       .wo-sheet-desc-text { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
       .wo-sheet-tenant { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
