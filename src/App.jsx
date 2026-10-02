@@ -1711,6 +1711,21 @@ function PropertyOpsAppInner() {
     }
   }, [loaded, user]);
 
+  const trimmedCertifiedHpdOnce = useRef(false);
+  useEffect(() => {
+    if (!loaded || !user || trimmedCertifiedHpdOnce.current) return;
+    trimmedCertifiedHpdOnce.current = true;
+    const needsTrim = (v) => v.agency === "HPD" && v.status === "Certified" && Object.keys(v).length > 6;
+    if ((data.violations || []).some(needsTrim)) {
+      setData(d => ({
+        ...d,
+        violations: (d.violations || []).map(v => needsTrim(v)
+          ? { id: v.id, agency: "HPD", buildingId: v.buildingId, unitId: v.unitId, violationNumber: v.violationNumber, status: "Certified" }
+          : v),
+      }));
+    }
+  }, [loaded, user]);
+
   useEffect(() => {
     const handler = (e) => {
       if (hasPendingSave.current) {
@@ -1729,7 +1744,26 @@ function PropertyOpsAppInner() {
     setData(d => ({ ...d, [col]: [...d[col], { ...item, id }] }));
     return id;
   };
-  const update = (col, id, patch) => { markChanged(col, id); setData(d => ({ ...d, [col]: d[col].map(x => x.id === id ? { ...x, ...patch } : x) })); };
+  const update = (col, id, patch) => {
+    markChanged(col, id);
+    setData(d => ({
+      ...d,
+      [col]: d[col].map(x => {
+        if (x.id !== id) return x;
+        const merged = { ...x, ...patch };
+        // HPD only, and only once it actually becomes Certified — every
+        // other agency (DOB, FDNY, DSNY, ECB, DEP, Con Edison) keeps its
+        // full record forever, even after marked done. Keeping the
+        // violation number, building, unit, and agency means a future HPD
+        // re-import still correctly recognizes this one as already on
+        // file and leaves it alone, and it still shows on the page.
+        if (col === "violations" && merged.agency === "HPD" && merged.status === "Certified" && x.status !== "Certified") {
+          return { id: x.id, agency: "HPD", buildingId: x.buildingId, unitId: x.unitId, violationNumber: x.violationNumber, status: "Certified" };
+        }
+        return merged;
+      }),
+    }));
+  };
   const remove = (col, id) => { markChanged(col, id); setData(d => ({ ...d, [col]: d[col].filter(x => x.id !== id) })); };
 
   const buildingName = (id) => shortAddress(data.buildings.find(b => b.id === id)?.address) || "—";
