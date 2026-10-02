@@ -4562,6 +4562,8 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
   const [filter, setFilter] = useState("All");
   const [courtOnly, setCourtOnly] = useState(false);
   const [search, setSearch] = useState("");
+  const [vendorFilter, setVendorFilter] = useState("All");
+  const [buildingFilter, setBuildingFilter] = useState("All");
   const [selected, setSelected] = useState(new Set());
   const [copiedId, setCopiedId] = useState(null);
   const [expandedRow, setExpandedRow] = useState(null);
@@ -4583,6 +4585,12 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
     .filter(w => view === "active" ? w.status !== "Done" : w.status === "Done")
     .filter(w => view === "closed" || filter === "All" || w.status === filter)
     .filter(w => !courtOnly || w.isCourtConnected || w.courtCaseId)
+    .filter(w => buildingFilter === "All" || w.buildingId === buildingFilter)
+    .filter(w => {
+      if (vendorFilter === "All") return true;
+      if (w.items && w.items.length > 0) return w.items.some(it => it.vendorId === vendorFilter);
+      return w.vendorId === vendorFilter;
+    })
     .filter(w => {
       if (!search.trim()) return true;
       const q = search.trim().toLowerCase();
@@ -4647,12 +4655,20 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
           </button>
         </div>
       </div>
-      <div className="row" style={{ marginBottom: 10 }}>
+      <div className="row" style={{ marginBottom: 10, flexWrap: "wrap" }}>
         <input
           type="text" placeholder="Search description, apt, building, vendor, status…" value={search}
           onChange={e => setSearch(e.target.value)}
           style={{ width: "100%", maxWidth: 360 }}
         />
+        <select value={buildingFilter} onChange={e => { setBuildingFilter(e.target.value); setSelected(new Set()); }} style={{ maxWidth: 220 }}>
+          <option value="All">All buildings</option>
+          {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
+        </select>
+        <select value={vendorFilter} onChange={e => { setVendorFilter(e.target.value); setSelected(new Set()); }} style={{ maxWidth: 220 }}>
+          <option value="All">All vendors</option>
+          {data.vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+        </select>
       </div>
       <div className="filter-row">
         <button className={`chip ${view === "active" ? "chip-active" : ""}`} onClick={() => { setView("active"); setSelected(new Set()); }}>Active</button>
