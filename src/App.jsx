@@ -2910,6 +2910,14 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
           )}
         </div>
       )}
+      <div className="dash-storage-footer no-print">
+        {(() => {
+          const sizeBytes = JSON.stringify(rawData).length;
+          const sizeKB = (sizeBytes / 1024).toFixed(0);
+          const pctUsed = (sizeBytes / 1048576 * 100).toFixed(1);
+          return `Document size: ${sizeKB} KB of 1,024 KB (${pctUsed}%)`;
+        })()}
+      </div>
     </div>
   );
 }
@@ -7207,6 +7215,7 @@ function Styles() {
       .dash-detail-item:hover { background: var(--bg); border-color: var(--navy); }
       .dash-building-chips { display: flex; flex-wrap: wrap; gap: 6px; }
       .dash-building-clear { font-size: 12px; color: var(--ok); }
+      .dash-storage-footer { margin-top: 24px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--ink-soft); opacity: 0.6; text-align: center; }
 
       .sheet-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
       .rent-total-banner {
