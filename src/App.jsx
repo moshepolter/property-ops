@@ -1687,6 +1687,30 @@ function PropertyOpsAppInner() {
     return () => clearTimeout(saveTimer.current);
   }, [data, loaded, user, runSave]);
 
+  const prunedHistoryOnce = useRef(false);
+  useEffect(() => {
+    if (!loaded || !user || prunedHistoryOnce.current) return;
+    prunedHistoryOnce.current = true;
+    const byKey = {};
+    (data.importHistory || []).forEach(h => {
+      const key = `${h.buildingId}::${h.type}`;
+      (byKey[key] = byKey[key] || []).push(h);
+    });
+    const keepIds = new Set();
+    // Explicitly sorted by date, most recent first — not relying on the
+    // array's stored order, so this is correct regardless of how these
+    // entries happen to be arranged. Getting this backwards would mean
+    // keeping old records and discarding recent ones, which is exactly
+    // the opposite of what this is supposed to do.
+    Object.values(byKey).forEach(entries => {
+      entries.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 10).forEach(h => keepIds.add(h.id));
+    });
+    const needsPruning = (data.importHistory || []).length > keepIds.size;
+    if (needsPruning) {
+      setData(d => ({ ...d, importHistory: (d.importHistory || []).filter(h => keepIds.has(h.id)) }));
+    }
+  }, [loaded, user]);
+
   useEffect(() => {
     const handler = (e) => {
       if (hasPendingSave.current) {
@@ -2349,8 +2373,9 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       "Monthly Rent": t.rentAmount || "",
       "Months Behind": (parseBalance(t.rentAmount) > 0 && parseBalance(t.balance) > 0) ? (parseBalance(t.balance) / parseBalance(t.rentAmount)).toFixed(1) : "",
       Status: t.status || "",
-      "Latest Note": Array.isArray(t.notes) && t.notes.length ? t.notes[t.notes.length - 1].text : "",
-      "Next Follow-up": (() => { const d = earliestFollowUpDate(t); return d ? fmtDate(d) : ""; })(),
+      Notes: (Array.isArray(t.notes) ? t.notes : []).map(n => `${fmtDate(n.date)}: ${n.text}`).join(" | "),
+      "Payment History": (Array.isArray(t.payments) ? t.payments : []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(p => `${fmtDate(p.date)}: $${p.amount}${p.note ? ` (${p.note})` : ""}`).join(" | "),
+      "Follow-ups": tenantFollowUps(t).map(f => `${fmtDate(f.date)}${f.note ? `: ${f.note}` : ""}`).join(" | "),
     })));
 
     addSheet("Violations", data.violations.map(v => ({
@@ -2365,24 +2390,30 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       Company: v.company || "",
       Status: v.status || "",
       Vendor: vendorMap[v.vendorId] || "",
+      Notes: (Array.isArray(v.notes) ? v.notes : []).map(n => `${fmtDate(n.date)}: ${n.text}`).join(" | "),
     })));
 
     addSheet("Work Orders", data.workOrders.map(w => ({
       Building: buildingMap[w.buildingId] || "",
       Unit: unitMap[w.unitId] || "",
-      Description: w.description || "",
+      Description: (w.items && w.items.length > 0) ? w.items.map(it => it.description).join(" | ") : (w.description || ""),
       Priority: w.priority || "",
       Status: w.status || "",
       Vendor: (w.items && w.items.length > 0)
         ? w.items.map(it => vendorMap[it.vendorId]).filter(Boolean).join(", ")
         : (vendorMap[w.vendorId] || ""),
       "Date Opened": w.dateOpened ? fmtDate(w.dateOpened) : "",
+      "Court Linked": w.isCourtConnected || w.courtCaseId ? "Yes" : "No",
+      "Due By": w.dueByDate ? fmtDate(w.dueByDate) : "",
+      "Access Date": w.accessDate ? fmtDate(w.accessDate) : "",
+      "Access Granted": w.accessGranted === true ? "Yes" : w.accessGranted === false ? "No" : "",
+      Notes: (w.notes || []).slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)).map(n => `${fmtDate(n.date)}: ${n.text}`).join(" | "),
     })));
 
     addSheet("Court Cases", data.courtCases.map(c => ({
       Building: buildingMap[c.buildingId] || "",
       Unit: unitMap[c.unitId] || "",
-      Tenant: tenantMap[c.tenantId] || "",
+      Tenant: tenantMap[c.tenantId] || c.rawName || "",
       "Docket #": c.caseNumber || "",
       Stage: c.stage || "",
       "Court Date": c.nextCourtDate ? fmtDate(c.nextCourtDate) : "",
@@ -2390,6 +2421,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       "Stipulation Terms": c.stipulationTerms || "",
       "Next Payment Due": c.nextPaymentDue ? fmtDate(c.nextPaymentDue) : "",
       Status: c.archived ? "Closed" : "Active",
+      Log: (c.log || []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(l => `${fmtDate(l.date)}: ${l.note}`).join(" | "),
     })));
 
     addSheet("Appointments", data.appointments.map(a => ({
