@@ -46,6 +46,9 @@ import {
 /* ============================== constants ============================== */
 
 const STORAGE_KEY = "pm-ops-data-v1";
+// Shown at the bottom of the Dashboard so you can tell at a glance which copy of
+// the app a given phone or browser tab is actually running.
+const APP_BUILD = "sync-fix-3";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -1422,7 +1425,19 @@ function PropertyOpsAppInner() {
   const [pinUnlocked, setPinUnlocked] = useState(() => !localStorage.getItem(PIN_STORAGE_KEY));
   const [showPinSetup, setShowPinSetup] = useState(false);
   const [saveError, setSaveError] = useState(false);
+  // Why the last save failed (Firestore's own error code/message), so the red
+  // notice can say something more useful than "check your connection".
+  const [saveErrorDetail, setSaveErrorDetail] = useState("");
+  // "idle" | "saving" | "saved" | "error" — drives the small save indicator that
+  // shows on every tab, so you can see an edit has really reached the server
+  // before you refresh or close the page.
+  const [saveStatus, setSaveStatus] = useState("idle");
   const [loadError, setLoadError] = useState(false);
+  // True once this copy has seen the data document being written by an OLDER
+  // copy of the app (one without the revision counter) — i.e. another phone,
+  // tablet or browser tab is still running the old version, which can overwrite
+  // changes made here.
+  const [olderVersionOpen, setOlderVersionOpen] = useState(false);
   const saveTimer = useRef(null);
   // Saves are debounced 400ms so typing doesn't hammer Firestore on every
   // keystroke — but that also means a change sits unsaved for up to 400ms
@@ -1551,6 +1566,7 @@ function PropertyOpsAppInner() {
     setSaveStuck(false);
     justLoaded.current = true;
     knownRev.current = 0;
+    setOlderVersionOpen(false);
     clearTimeout(saveRetryTimer.current);
     saveRetryCount.current = 0;
     if (!user) return;
@@ -1574,9 +1590,17 @@ function PropertyOpsAppInner() {
         // arrive afterwards and roll the screen back to before the edit you just
         // made — and the next edit would then be built on the old version.
         if (snap.exists()) {
-          const incomingRev = snap.data()._rev || 0;
-          if (incomingRev < knownRev.current) { setLoaded(true); return; }
-          knownRev.current = incomingRev;
+          const incomingRev = snap.data()._rev;
+          if (incomingRev === undefined) {
+            // No revision number at all: this write came from a copy of the app
+            // that predates it. That's real, current data — apply it like any
+            // other update, don't treat it as "older" and go deaf to it — and
+            // say so, because that older copy can overwrite changes made here.
+            if (knownRev.current > 0) setOlderVersionOpen(true);
+          } else {
+            if (incomingRev < knownRev.current) { setLoaded(true); return; }
+            knownRev.current = incomingRev;
+          }
         }
         // If this device has a local edit queued but not saved yet, don't
         // apply the remote update wholesale — that would discard whatever
@@ -1703,12 +1727,13 @@ function PropertyOpsAppInner() {
             merged[k] = ((changedAtStart._fields && changedAtStart._fields.has(k)) || !(k in remote)) ? safe[k] : remote[k];
           });
         }
-        const nextRev = ((remote && remote._rev) || 0) + 1;
+        const nextRev = Math.max((remote && remote._rev) || 0, knownRev.current) + 1;
         tx.set(dataRef_, { ...JSON.parse(JSON.stringify(merged)), _rev: nextRev });
         return nextRev;
       });
       knownRev.current = Math.max(knownRev.current, savedRev);
       setSaveError(false);
+      setSaveErrorDetail("");
       saveRetryCount.current = 0;
       clearTimeout(saveRetryTimer.current);
       // Only a confirmed success with nothing further owed means there's
@@ -1723,10 +1748,16 @@ function PropertyOpsAppInner() {
       // change's own tracking must survive until it, too, is confirmed
       // saved, however it happens to get there.
       const unchangedSinceSave = JSON.stringify(dataRef.current) === JSON.stringify(safe);
-      if (!saveQueued.current && unchangedSinceSave) { hasPendingSave.current = false; pendingSince.current = null; pendingChangedIds.current = {}; }
+      if (!saveQueued.current && unchangedSinceSave) {
+        hasPendingSave.current = false; pendingSince.current = null; pendingChangedIds.current = {};
+        setSaveStatus("saved");
+        setTimeout(() => setSaveStatus(st => (st === "saved" ? "idle" : st)), 3000);
+      }
     } catch (e) {
       console.error("save failed", e);
       setSaveError(true);
+      setSaveErrorDetail(String((e && (e.code || e.message)) || e));
+      setSaveStatus("error");
       // A failed save otherwise just sits there — nothing re-triggers
       // runSave unless the user happens to make another edit, which a
       // transient network blip gives no reason to expect. Retry on its own
@@ -1758,6 +1789,7 @@ function PropertyOpsAppInner() {
     if (!Object.values(pendingChangedIds.current).some(s => s && s.size > 0)) return;
     if (!hasPendingSave.current) pendingSince.current = Date.now();
     hasPendingSave.current = true;
+    setSaveStatus(st => (st === "error" ? st : "saving"));
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(runSave, 400);
     return () => clearTimeout(saveTimer.current);
@@ -1971,7 +2003,20 @@ function PropertyOpsAppInner() {
 
       {saveError && (
         <div className="save-error-banner no-print">
-          <AlertTriangle size={16} /> Couldn't save your last change — check your internet connection. Your edits are still here on screen, but won't be there if you close the tab until this clears.
+          <AlertTriangle size={16} /> Couldn't save your last change — check your internet connection. Your edits are still here on screen, but won't be there if you close the tab until this clears.{saveErrorDetail ? ` (Reason: ${saveErrorDetail})` : ""}
+        </div>
+      )}
+
+      {saveStatus !== "idle" && (
+        <div className="no-print" style={{ position: "fixed", left: 10, bottom: "calc(env(safe-area-inset-bottom, 0px) + 10px)", zIndex: 60, padding: "6px 12px", borderRadius: 999, fontSize: 12, fontWeight: 600, color: "#fff", pointerEvents: "none",
+          background: saveStatus === "saved" ? "rgba(22,128,60,.92)" : saveStatus === "error" ? "rgba(185,28,28,.95)" : "rgba(30,30,30,.9)" }}>
+          {saveStatus === "saving" ? "Saving… don't refresh yet" : saveStatus === "saved" ? "✓ Saved" : "⚠ Not saved yet"}
+        </div>
+      )}
+
+      {olderVersionOpen && (
+        <div className="save-error-banner no-print">
+          <AlertTriangle size={16} /> Another phone, tablet, or browser tab still has an OLD version of this app open — it can overwrite changes you make here. Close it, or fully quit and reopen the app there, then reload this page.
         </div>
       )}
 
@@ -3076,7 +3121,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
           const sizeBytes = JSON.stringify(rawData).length;
           const sizeKB = (sizeBytes / 1024).toFixed(0);
           const pctUsed = (sizeBytes / 1048576 * 100).toFixed(1);
-          return `Document size: ${sizeKB} KB of 1,024 KB (${pctUsed}%)`;
+          return `Document size: ${sizeKB} KB of 1,024 KB (${pctUsed}%) · version ${APP_BUILD}`;
         })()}
       </div>
     </div>
