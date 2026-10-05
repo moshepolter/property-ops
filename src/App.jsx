@@ -18,7 +18,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_PRIMARY;
 // Fill in firebaseConfig below with the values from your Firebase project settings.
 import { initializeApp } from "firebase/app";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
-import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
+import { getFirestore, doc, setDoc, onSnapshot, runTransaction } from "firebase/firestore";
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { getFunctions, httpsCallable } from "firebase/functions";
 
@@ -149,6 +149,20 @@ function shortAddress(address) {
   // clean that up before trimming.
   s = s.replace(/,\s*$/, "");
   return s.trim() || address;
+}
+
+// What an edit form actually changed, compared with the record as it was when
+// the form was opened. Saving only these — instead of writing the whole form
+// back — means a form that has been open for a while can't put back fields
+// that something else (another device, a note added meanwhile) changed in the
+// meantime.
+function changedFieldsOnly(original, edited) {
+  if (!original) return edited;
+  const patch = {};
+  new Set([...Object.keys(original), ...Object.keys(edited)]).forEach(k => {
+    if (JSON.stringify(original[k]) !== JSON.stringify(edited[k])) patch[k] = edited[k];
+  });
+  return patch;
 }
 
 // Shared by Violations and Work Orders for the "copy" feature — groups
@@ -314,7 +328,10 @@ function mergeRemoteWhilePending(localData, remoteData, changedIds) {
     // record this tab just created locally (pending, not saved yet) is
     // exempt, since it's correctly absent from the server for now.
     .filter(x => !x || changed.has(x.id) || remoteById.has(x.id));
-    const remoteOnly = remote.filter(x => x && !localIds.has(x.id));
+    // Not one this tab just deleted and hasn't saved yet: the server still has
+    // it, and re-adding it here would silently undo the delete (the next
+    // save would then write it straight back).
+    const remoteOnly = remote.filter(x => x && !localIds.has(x.id) && !changed.has(x.id));
     merged[k] = [...reconciled, ...remoteOnly];
   });
   return merged;
@@ -1449,6 +1466,13 @@ function PropertyOpsAppInner() {
         const nextIds = new Set(nextArr.filter(x => x && x.id).map(x => x.id));
         prevArr.forEach(x => { if (x && x.id && !nextIds.has(x.id)) markChanged(col, x.id); });
       });
+      // Settings that aren't lists (the last-used appointment type) have no
+      // ids to track, so record them by name — otherwise, now that saving only
+      // happens for tracked edits, changing one would never be saved at all.
+      const listKeys = Object.keys(emptyData());
+      new Set([...Object.keys(prev), ...Object.keys(next)]).forEach(k => {
+        if (!listKeys.includes(k) && prev[k] !== next[k]) markChanged("_fields", k);
+      });
       return next;
     });
   };
@@ -1467,6 +1491,11 @@ function PropertyOpsAppInner() {
   // server, silently overwriting it. This ref skips exactly that one,
   // load-driven save; only a genuine subsequent edit schedules one.
   const justLoaded = useRef(true);
+  // The newest revision of the data document this device knows about. Every
+  // save stamps the document with a revision number that goes up by one; an
+  // update arriving with a LOWER number than this is a late arrival from before
+  // something this device has already seen or saved, and is ignored.
+  const knownRev = useRef(0);
   // A write to Firestore fully replaces the document rather than merging —
   // so if two saves ever end up in flight at once and the earlier-started
   // one happens to take longer (a slow connection, a brief hiccup — exactly
@@ -1521,6 +1550,7 @@ function PropertyOpsAppInner() {
     pendingChangedIds.current = {};
     setSaveStuck(false);
     justLoaded.current = true;
+    knownRev.current = 0;
     clearTimeout(saveRetryTimer.current);
     saveRetryCount.current = 0;
     if (!user) return;
@@ -1539,6 +1569,15 @@ function PropertyOpsAppInner() {
         // server has fully confirmed it. Our local state is already ahead
         // of that echo, so there's nothing new to apply — skip it.
         if (snap.metadata.hasPendingWrites) { setLoaded(true); return; }
+        // A late, older picture of the data must never be applied. Without this,
+        // an update that was already on its way when this device saved could
+        // arrive afterwards and roll the screen back to before the edit you just
+        // made — and the next edit would then be built on the old version.
+        if (snap.exists()) {
+          const incomingRev = snap.data()._rev || 0;
+          if (incomingRev < knownRev.current) { setLoaded(true); return; }
+          knownRev.current = incomingRev;
+        }
         // If this device has a local edit queued but not saved yet, don't
         // apply the remote update wholesale — that would discard whatever
         // is being edited here right now. But don't ignore it outright
@@ -1567,6 +1606,10 @@ function PropertyOpsAppInner() {
           Object.keys(merged).forEach(k => {
             if (loaded[k] !== null && loaded[k] !== undefined) merged[k] = loaded[k];
           });
+          // The one saved setting that isn't a list: without this the last-used
+          // appointment type was saved but never read back, so it reset to the
+          // default every time the app was opened.
+          if (loaded.lastUsedAppointmentType !== null && loaded.lastUsedAppointmentType !== undefined) merged.lastUsedAppointmentType = loaded.lastUsedAppointmentType;
           setDataRaw(merged);
           hasLoadedRealDataOnce.current = true;
         } else if (!hasLoadedRealDataOnce.current && !snap.metadata.fromCache) {
@@ -1638,7 +1681,33 @@ function PropertyOpsAppInner() {
       // no explanation the moment the document tips over 1MB.
       const approxSize = JSON.stringify(safe).length;
       setDocSizeWarning(approxSize > 800000);
-      await setDoc(doc(db, "users", user.uid, "appData", "main"), safe);
+      // Save by folding THIS device's changes into whatever the server holds right
+      // now, inside a transaction (the server re-runs it if someone else wrote in
+      // between) — instead of replacing the server's copy with this device's view
+      // of everything. A plain overwrite lets a device that hasn't yet heard about
+      // another device's edit silently erase it. Here, only the records this device
+      // actually changed win; everything else is whatever the server has.
+      const changedAtStart = {};
+      Object.entries(pendingChangedIds.current).forEach(([col, ids]) => { changedAtStart[col] = new Set(ids); });
+      const dataRef_ = doc(db, "users", user.uid, "appData", "main");
+      const savedRev = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(dataRef_);
+        const remote = snap.exists() ? snap.data() : null;
+        const merged = remote ? { ...remote, ...mergeRemoteWhilePending(safe, remote, changedAtStart) } : safe;
+        // A setting that isn't a list: this device's value only wins if THIS
+        // device just changed it; otherwise it's whatever the server has.
+        if (remote) {
+          const listKeys = Object.keys(emptyData());
+          Object.keys(safe).forEach(k => {
+            if (listKeys.includes(k)) return;
+            merged[k] = ((changedAtStart._fields && changedAtStart._fields.has(k)) || !(k in remote)) ? safe[k] : remote[k];
+          });
+        }
+        const nextRev = ((remote && remote._rev) || 0) + 1;
+        tx.set(dataRef_, { ...JSON.parse(JSON.stringify(merged)), _rev: nextRev });
+        return nextRev;
+      });
+      knownRev.current = Math.max(knownRev.current, savedRev);
       setSaveError(false);
       saveRetryCount.current = 0;
       clearTimeout(saveRetryTimer.current);
@@ -1680,12 +1749,38 @@ function PropertyOpsAppInner() {
   useEffect(() => {
     if (!loaded || !user) return;
     if (justLoaded.current) { justLoaded.current = false; return; }
+    // Only a change made on THIS device needs saving. This effect also fires
+    // when data merely ARRIVES from another device; writing that straight back
+    // is a full-document write of whatever this device has at that instant,
+    // and it can land after your next edit and overwrite it with an older
+    // version — which is exactly how a note or work-order edit used to "revert".
+    // Every real edit is recorded in pendingChangedIds the moment it's made.
+    if (!Object.values(pendingChangedIds.current).some(s => s && s.size > 0)) return;
     if (!hasPendingSave.current) pendingSince.current = Date.now();
     hasPendingSave.current = true;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(runSave, 400);
     return () => clearTimeout(saveTimer.current);
   }, [data, loaded, user, runSave]);
+
+  // On a phone, switching apps or locking the screen can freeze the page before
+  // the short wait before saving is up, and the browser's "are you sure you want
+  // to leave" warning never fires there. Save right away the moment the app is
+  // hidden or being closed.
+  useEffect(() => {
+    const flushNow = () => {
+      if (!hasPendingSave.current) return;
+      clearTimeout(saveTimer.current);
+      runSave();
+    };
+    const onVisibility = () => { if (document.visibilityState === "hidden") flushNow(); };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", flushNow);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", flushNow);
+    };
+  }, [runSave]);
 
   const prunedHistoryOnce = useRef(false);
   useEffect(() => {
@@ -4668,6 +4763,9 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
   const [view, setView] = useState("active");
   const [filter, setFilter] = useState("All");
   const [courtOnly, setCourtOnly] = useState(false);
+  // The record exactly as it was when the edit form was opened — what the form
+  // is compared against on Save, so only what was actually changed gets saved.
+  const [formOriginal, setFormOriginal] = useState(null);
   const [search, setSearch] = useState("");
   const [vendorFilter, setVendorFilter] = useState("All");
   const [buildingFilter, setBuildingFilter] = useState("All");
@@ -4701,7 +4799,10 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
   const submit = () => {
     if (!form.description) return;
     const exists = data.workOrders.some(w => w.id === form.id);
-    if (exists) update("workOrders", form.id, form);
+    if (exists) {
+      const patch = changedFieldsOnly(formOriginal, form);
+      if (Object.keys(patch).length > 0) update("workOrders", form.id, patch);
+    }
     else {
       add("workOrders", form); // form.id was pre-generated when the form opened
       setExpandedRow(form.id); // so photos/notes can be added immediately, no re-opening needed
@@ -4987,7 +5088,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
                           onClick={() => update("workOrders", w.id, { status: w.status === "Done" ? "Open" : "Done" })}
                         ><CheckCircle2 size={14} /></IconBtn>
                         <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={() => copyOne(w)}><ScrollText size={14} /></IconBtn>
-                        <IconBtn title="Edit" onClick={() => setForm({ ...w, isCourtConnected: w.isCourtConnected || !!w.courtCaseId })}><Pencil size={14} /></IconBtn>
+                        <IconBtn title="Edit" onClick={() => { const f = { ...w, isCourtConnected: w.isCourtConnected || !!w.courtCaseId }; setFormOriginal(f); setForm(f); }}><Pencil size={14} /></IconBtn>
                         <IconBtn title="Delete" danger onClick={() => remove("workOrders", w.id)}><Trash2 size={14} /></IconBtn>
                       </td>
                     </tr>
