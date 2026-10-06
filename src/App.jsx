@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-3";
+const APP_BUILD = "sync-fix-4";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -162,7 +162,9 @@ function shortAddress(address) {
 function changedFieldsOnly(original, edited) {
   if (!original) return edited;
   const patch = {};
-  new Set([...Object.keys(original), ...Object.keys(edited)]).forEach(k => {
+  // Only fields the form actually has. A field the form doesn't manage (a case's
+  // id, log, documents…) is simply not part of it — never treat that as "cleared".
+  Object.keys(edited).forEach(k => {
     if (JSON.stringify(original[k]) !== JSON.stringify(edited[k])) patch[k] = edited[k];
   });
   return patch;
@@ -267,8 +269,6 @@ const COURT_RESULTS = [
   "Adjourned / next date set", "Judgment for landlord", "Judgment for tenant",
   "Settled / withdrawn"
 ];
-const DEFAULT_ATTORNEY_CHECKLIST = ["Lease", "Ledger", "Pre-suite notices"];
-const CASE_STAGES = ["Filed", "Served", "Awaiting court date", "In court", "Awaiting decision", "Post-decision"];
 const INSPECTION_TYPES = ["Boiler", "Elevator", "Fire Alarm", "Other recurring"];
 const APPOINTMENT_TYPES = ["DOB Inspection", "Section 8 Inspection", "Other"];
 const OTHER_AGENCY_PRESETS = ["DOB", "FDNY", "ECB", "DEP", "Con Edison"];
@@ -287,7 +287,7 @@ const emptyData = () => ({
   buildings: [], units: [], tenants: [], vendors: [], workOrders: [],
   violations: [], courtCases: [], inspections: [], appointments: [],
   localLaws: [], bossReminders: [], customAppointmentTypes: [], customInspectionTypes: [],
-  customOtherAgencies: [], quickNotes: [], importHistory: [],
+  customOtherAgencies: [], quickNotes: [], importHistory: [], caseStageOptions: [],
 });
 
 // Every field in emptyData() is an array of records with an id. When a
@@ -313,11 +313,23 @@ const emptyData = () => ({
 // the server reflects whatever another tab most recently did to it. A
 // record that exists only remotely (added elsewhere, not here at all) is
 // folded in either way.
+// A few lists (custom appointment types, inspection types, other agencies) are
+// just plain text — no ids — so none of the by-id logic below can apply to them.
+const isPlainList = (arr) => Array.isArray(arr) && arr.some(x => x != null && typeof x !== "object");
+
 function mergeRemoteWhilePending(localData, remoteData, changedIds) {
   const merged = { ...localData };
   Object.keys(emptyData()).forEach(k => {
     const local = Array.isArray(localData[k]) ? localData[k] : [];
     const remote = Array.isArray(remoteData[k]) ? remoteData[k] : [];
+    // Plain-text lists only ever grow (options are added, never removed), so keep
+    // everything either side has. Without this, the by-id matching below sees
+    // text entries as having no id at all and silently throws the whole list away.
+    if (isPlainList(local) || isPlainList(remote)) {
+      const seen = new Set(local);
+      merged[k] = [...local, ...remote.filter(x => !seen.has(x))];
+      return;
+    }
     const changed = (changedIds && changedIds[k]) || new Set();
     const remoteById = new Map(remote.filter(x => x && x.id).map(x => [x.id, x]));
     const localIds = new Set(local.map(x => x && x.id));
@@ -1256,6 +1268,51 @@ function TypeSelectWithAdd({ value, options, onChange, onAddType }) {
   );
 }
 
+// "Where it's up to" for a court case — a row of options YOU define (e.g. "14 day
+// rent notice served"). Tap one to set it, tap it again to clear it. New options
+// are typed in right here and are shared by every case. Removing an option never
+// changes a case that already uses it.
+function CaseStagePicker({ options, value, onPick, onAdd, onRemove }) {
+  const [text, setText] = useState("");
+  const [editing, setEditing] = useState(false);
+  const list = options || [];
+  const labels = list.map(o => o.label);
+  const addNow = () => {
+    const label = text.trim();
+    if (!label) return;
+    const existing = list.find(o => (o.label || "").toLowerCase() === label.toLowerCase());
+    if (existing) onPick(existing.label); // already in your list — just select it
+    else { onAdd(label); onPick(label); }
+    setText("");
+  };
+  return (
+    <div>
+      <div className="inline-form" style={{ flexWrap: "wrap", margin: 0 }}>
+        {list.map(o => (
+          <span key={o.id} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+            <button type="button" className={`chip ${value === o.label ? "chip-active" : ""}`} onClick={() => onPick(value === o.label ? "" : o.label)}>{o.label}</button>
+            {editing && (
+              <button type="button" className="checklist-remove" title="Remove this option"
+                onClick={() => { if (window.confirm(`Remove "${o.label}" from your options? Cases already set to it keep it.`)) onRemove(o); }}>
+                <X size={12} />
+              </button>
+            )}
+          </span>
+        ))}
+        {value && !labels.includes(value) && (
+          <button type="button" className="chip chip-active" title="Not in your list — tap to clear" onClick={() => onPick("")}>{value}</button>
+        )}
+        {list.length === 0 && !value && <span className="hint">No options yet — add your first one below.</span>}
+      </div>
+      <div className="inline-form" style={{ marginTop: 6 }}>
+        <input placeholder="Add an option, e.g. 14 day rent notice served…" value={text} onChange={e => setText(e.target.value)} onKeyDown={e => e.key === "Enter" && addNow()} />
+        <button type="button" className="btn-ghost" onClick={addNow}>Add</button>
+        {list.length > 0 && <button type="button" className="btn-ghost" onClick={() => setEditing(!editing)}>{editing ? "Done" : "Edit options"}</button>}
+      </div>
+    </div>
+  );
+}
+
 function PhotoUploader({ photos, onAdd, onRemove, pathPrefix }) {
   const ref = useRef(null);
   const [uploading, setUploading] = useState(false);
@@ -1473,6 +1530,13 @@ function PropertyOpsAppInner() {
         const prevArr = Array.isArray(prev[col]) ? prev[col] : [];
         const nextArr = Array.isArray(next[col]) ? next[col] : [];
         if (prevArr === nextArr) return; // untouched collection, nothing to diff
+        // Plain-text lists have no ids to track, so a change to one is recorded
+        // against the list as a whole — otherwise adding a custom option would
+        // never count as an edit and would never be saved.
+        if (isPlainList(prevArr) || isPlainList(nextArr)) {
+          if (JSON.stringify(prevArr) !== JSON.stringify(nextArr)) markChanged(col, "_list");
+          return;
+        }
         const prevById = new Map(prevArr.filter(x => x && x.id).map(x => [x.id, x]));
         nextArr.forEach(x => {
           if (!x || !x.id) return;
@@ -2588,7 +2652,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       Building: buildingMap[c.buildingId] || "",
       Unit: unitMap[c.unitId] || "",
       Tenant: tenantMap[c.tenantId] || c.rawName || "",
-      "Docket #": c.caseNumber || "",
+      "Case #": c.caseNumber || "",
       Stage: c.stage || "",
       "Court Date": c.nextCourtDate ? fmtDate(c.nextCourtDate) : "",
       Result: c.result || "",
@@ -3628,10 +3692,9 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData, de
     if (!t) return;
     add("courtCases", {
       tenantId, buildingId: t.buildingId, unitId: t.unitId, caseNumber: "",
-      stage: CASE_STAGES[0], nextCourtDate: "", result: "Pending",
+      stage: "", nextCourtDate: "", result: "Pending",
       stipulationTerms: "", nextPaymentDue: "",
       archived: false, documents: [],
-      checklist: DEFAULT_ATTORNEY_CHECKLIST.map(label => ({ id: uid(), label, checked: false })),
     });
   };
   const [selectedTenantId, setSelectedTenantId] = useState(null);
@@ -6202,9 +6265,8 @@ function CourtCaseImportSection({ data, add, update }) {
         updated++;
       } else {
         add("courtCases", {
-          ...fields, stage: CASE_STAGES[0], nextCourtDate: parsedNextCourtDate, result: "Pending",
+          ...fields, stage: "", nextCourtDate: parsedNextCourtDate, result: "Pending",
           stipulationTerms: "", nextPaymentDue: "", archived: false, documents: [],
-          checklist: DEFAULT_ATTORNEY_CHECKLIST.map(label => ({ id: uid(), label, checked: false })),
         });
         created++;
       }
@@ -6265,8 +6327,10 @@ function CourtCaseImportSection({ data, add, update }) {
 
 function CourtTab({ data, add, update, remove, setData, tenantName, buildingName, deepLink, setDeepLink }) {
   const [form, setForm] = useState(null);
+  // The case's fields exactly as they were when the edit form was opened, so Save
+  // can send only what was actually changed in the form (see submit below).
+  const [formOriginal, setFormOriginal] = useState(null);
   const [view, setView] = useState("active");
-  const [checklistText, setChecklistText] = useState({});
   const [detailsFor, setDetailsFor] = useState(null);
   const [section, setSection] = useState("cases"); // cases | import
   const [buildingFilter, setBuildingFilter] = useState("All");
@@ -6339,27 +6403,31 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
 
   const submit = () => {
     if (!form.tenantId) return; // a case with no tenant is a silent data-quality trap
-    // Only patch the fields this form actually manages — checklist, documents, and
-    // archived get edited from their own controls elsewhere on the card, so if we
-    // sent the whole `form` object here, saving this form after toggling a checklist
-    // item (both are on-screen at once) would silently revert that checklist change
-    // back to whatever it was when this form was opened.
+    // Only patch the fields this form actually manages — documents and archived
+    // get edited from their own controls elsewhere on the card, so if we sent the
+    // whole `form` object here, saving this form would silently revert any change
+    // made there back to whatever it was when this form was opened.
     const fields = {
       tenantId: form.tenantId, buildingId: form.buildingId, unitId: form.unitId, caseNumber: form.caseNumber,
       stage: form.stage, nextCourtDate: form.nextCourtDate, result: form.result,
       stipulationTerms: form.stipulationTerms || "", nextPaymentDue: form.nextPaymentDue || "",
     };
-    if (form.id) update("courtCases", form.id, fields);
+    if (form.id) {
+      // Only what this form actually changed — "where it's up to" can also be set
+      // from the card itself while this form is open, and sending every field
+      // back would put that change back to what it was when the form opened.
+      const patch = changedFieldsOnly(formOriginal, fields);
+      if (Object.keys(patch).length > 0) update("courtCases", form.id, patch);
+    }
     else add("courtCases", {
       ...fields, archived: false, documents: [],
-      checklist: DEFAULT_ATTORNEY_CHECKLIST.map(label => ({ id: uid(), label, checked: false })),
     });
     setForm(null);
   };
 
   // Old cases were saved before unitId existed — recover it from the tenant on
   // file so editing an old case still starts from the right apt.
-  const openEdit = (c) => setForm({ ...c, unitId: c.unitId || data.tenants.find(t => t.id === c.tenantId)?.unitId || "" });
+  const openEdit = (c) => { const f = { ...c, unitId: c.unitId || data.tenants.find(t => t.id === c.tenantId)?.unitId || "" }; setFormOriginal(f); setForm(f); };
 
   const list = data.courtCases
     .filter(c => view === "closed" ? c.archived : !c.archived)
@@ -6386,20 +6454,6 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
   const courtDatesDueCount = data.courtCases.filter(c => !c.archived && (c.result === "Stipulation (payment plan)" ? dateDueStrict(c.nextCourtDate) : dateDue(c.nextCourtDate))).length;
   const stipDueCount = data.courtCases.filter(c => !c.archived && c.result === "Stipulation (payment plan)" && dateDue(c.nextPaymentDue)).length;
 
-  const toggleChecklistItem = (c, itemId) => {
-    update("courtCases", c.id, {
-      checklist: (c.checklist || []).map(i => i.id === itemId ? { ...i, checked: !i.checked } : i)
-    });
-  };
-  const addChecklistItem = (c) => {
-    const text = (checklistText[c.id] || "").trim();
-    if (!text) return;
-    update("courtCases", c.id, { checklist: [...(c.checklist || []), { id: uid(), label: text, checked: false }] });
-    setChecklistText({ ...checklistText, [c.id]: "" });
-  };
-  const removeChecklistItem = (c, itemId) => {
-    update("courtCases", c.id, { checklist: (c.checklist || []).filter(i => i.id !== itemId) });
-  };
 
   return (
     <div className="court-page">
@@ -6418,7 +6472,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
               <button className="btn-ghost" style={{ color: "var(--danger)" }} onClick={() => setConfirmingDeleteAll(true)}><Trash2 size={14} /> Delete all</button>
             )
           )}
-          <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", unitId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: CASE_STAGES[0], stipulationTerms: "", nextPaymentDue: "" })}>
+          <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", unitId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: "", stipulationTerms: "", nextPaymentDue: "" })}>
             <Plus size={14} /> Add case
           </button>
         </div>
@@ -6455,7 +6509,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
       {section === "cases" && (
         <div className="row" style={{ marginBottom: 10 }}>
           <input
-            type="text" placeholder="Search tenant, docket #, building, stage, result…" value={search}
+            type="text" placeholder="Search tenant, case #, building, stage, result…" value={search}
             onChange={e => setSearch(e.target.value)}
             style={{ width: "100%", maxWidth: 360 }}
           />
@@ -6495,7 +6549,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                 <span>{items.length} case{items.length === 1 ? "" : "s"}</span>
               </div>
               <table className="print-table">
-                <thead><tr><th>Tenant</th><th>Docket #</th><th>Next court date</th><th>Stage</th><th>Result</th></tr></thead>
+                <thead><tr><th>Tenant</th><th>Case #</th><th>Next court date</th><th>Stage</th><th>Result</th></tr></thead>
                 <tbody>
                   {items.map(c => (
                     <tr key={c.id}>
@@ -6558,11 +6612,15 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                 ))}
             </select>
           </Field>
-          <Field label="Docket #"><input value={form.caseNumber} onChange={e => setForm({ ...form, caseNumber: e.target.value })} /></Field>
-          <Field label="Where the case stands">
-            <select value={form.stage || CASE_STAGES[0]} onChange={e => setForm({ ...form, stage: e.target.value })}>
-              {CASE_STAGES.map(s => <option key={s}>{s}</option>)}
-            </select>
+          <Field label="Case #"><input value={form.caseNumber} onChange={e => setForm({ ...form, caseNumber: e.target.value })} /></Field>
+          <Field label="Where it's up to">
+            <CaseStagePicker
+              options={data.caseStageOptions}
+              value={form.stage || ""}
+              onPick={(label) => setForm({ ...form, stage: label })}
+              onAdd={(label) => add("caseStageOptions", { label })}
+              onRemove={(o) => remove("caseStageOptions", o.id)}
+            />
           </Field>
           <Field label="Court date"><input type="date" value={form.nextCourtDate} onChange={e => setForm({ ...form, nextCourtDate: e.target.value })} /></Field>
           <Field label="Result">
@@ -6588,7 +6646,6 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
 
       {section === "cases" && list.length === 0 && <EmptyState text={view === "active" ? "No open court cases." : "Nothing closed yet."} />}
       {section === "cases" && list.map(c => {
-        const checkedCount = (c.checklist || []).filter(i => i.checked).length;
         const sortedLog = [...(c.log || [])].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
         const latestLog = sortedLog[0];
         const isOpen = detailsFor === c.id;
@@ -6597,7 +6654,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
           <div className="list-card-head" onClick={() => setDetailsFor(isOpen ? null : c.id)} style={{ cursor: "pointer" }}>
             {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
             {c.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === c.unitId)?.unitNumber || "—"}</span>}
-            <div className="list-card-title">{c.tenantId ? tenantName(c.tenantId) : (c.rawName || "(no tenant matched)")} {c.caseNumber && `· Docket #${c.caseNumber}`}</div>
+            <div className="list-card-title">{c.tenantId ? tenantName(c.tenantId) : (c.rawName || "(no tenant matched)")} {c.caseNumber && `· Case #${c.caseNumber}`}</div>
             <span className="pill pill-muted">{buildingName(c.buildingId)}</span>
             {c.nextCourtDate && !c.archived && <Flag date={c.nextCourtDate} label="court date" />}
           </div>
@@ -6627,6 +6684,16 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                 <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("courtCases", c.id); }}><Trash2 size={14} /></IconBtn>
               </div>
               <div className="list-card-body">
+                <div className="row"><strong>Where it's up to</strong></div>
+                <CaseStagePicker
+                  options={data.caseStageOptions}
+                  value={c.stage || ""}
+                  onPick={(label) => update("courtCases", c.id, { stage: label })}
+                  onAdd={(label) => add("caseStageOptions", { label })}
+                  onRemove={(o) => remove("caseStageOptions", o.id)}
+                />
+              </div>
+              <div className="list-card-body" style={{ paddingTop: 0 }}>
                 <div className="row"><strong>Log</strong></div>
                 {sortedLog.length === 0
                   ? <div className="hint" style={{ marginBottom: 6 }}>Nothing logged yet — add the first entry below, or import from an attorney report.</div>
@@ -6705,21 +6772,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
               )}
               <div className="list-card-body" style={{ paddingTop: c.result === "Stipulation (payment plan)" ? 0 : undefined }}>
               <>
-                <div className="row"><strong>To send attorney</strong></div>
-                <div className="checklist">
-                  {(c.checklist || []).map(item => (
-                    <label className="checklist-item" key={item.id}>
-                      <input type="checkbox" checked={item.checked} onChange={() => toggleChecklistItem(c, item.id)} />
-                      <span className={item.checked ? "strike" : ""}>{item.label}</span>
-                      <button className="checklist-remove" onClick={() => removeChecklistItem(c, item.id)} title="Remove"><X size={12} /></button>
-                    </label>
-                  ))}
-                </div>
-                <div className="inline-form">
-                  <input placeholder="Add item…" value={checklistText[c.id] || ""} onChange={e => setChecklistText({ ...checklistText, [c.id]: e.target.value })} onKeyDown={e => e.key === "Enter" && addChecklistItem(c)} />
-                  <button className="btn-ghost" onClick={() => addChecklistItem(c)}>Add</button>
-                </div>
-                <div className="row" style={{ marginTop: 6 }}><strong>Documents</strong></div>
+                <div className="row"><strong>Documents</strong></div>
                 <DocumentUploader
                   documents={c.documents}
                   pathPrefix={`courtCases/${c.id}/documents`}
