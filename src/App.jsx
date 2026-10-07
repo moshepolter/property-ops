@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-4";
+const APP_BUILD = "sync-fix-5";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -455,6 +455,15 @@ function fmtTime(t) {
   const period = h >= 12 ? "PM" : "AM";
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return `${h12}:${String(m).padStart(2, "0")} ${period}`;
+}
+// "Tue, Oct 14 · 9:00 AM" — a work order's scheduled visit. The year only shows
+// when it isn't this year. Used on the work order row and in the Export backup.
+function scheduleText(dateStr, timeStr = "") {
+  if (!dateStr) return "";
+  const d = new Date(dateStr + "T00:00:00");
+  const opts = { weekday: "short", month: "short", day: "numeric" };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+  return d.toLocaleDateString("en-US", opts) + (timeStr ? ` · ${fmtTime(timeStr)}` : "");
 }
 const TIME_OPTIONS = (() => {
   const out = [];
@@ -2643,6 +2652,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       "Date Opened": w.dateOpened ? fmtDate(w.dateOpened) : "",
       "Court Linked": w.isCourtConnected || w.courtCaseId ? "Yes" : "No",
       "Due By": w.dueByDate ? fmtDate(w.dueByDate) : "",
+      "Scheduled": scheduleText(w.scheduledDate, w.scheduledTime),
       "Access Date": w.accessDate ? fmtDate(w.accessDate) : "",
       "Access Granted": w.accessGranted === true ? "Yes" : w.accessGranted === false ? "No" : "",
       Notes: (w.notes || []).slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)).map(n => `${fmtDate(n.date)}: ${n.text}`).join(" | "),
@@ -4883,6 +4893,25 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
   const [noteFor, setNoteFor] = useState(null);
   const [noteText, setNoteText] = useState("");
   const [highlightWoId, setHighlightWoId] = useState(null);
+  // Scheduling: which work order's schedule box is open, and what's typed in it.
+  const [schedulingFor, setSchedulingFor] = useState(null);
+  const [schedDate, setSchedDate] = useState("");
+  const [schedTime, setSchedTime] = useState("");
+  const openSchedule = (w) => {
+    if (schedulingFor === w.id) { setSchedulingFor(null); return; }
+    setSchedDate(w.scheduledDate || ""); setSchedTime(w.scheduledTime || ""); setSchedulingFor(w.id);
+  };
+  // Only these two fields are sent — never the whole work order — so scheduling
+  // can't put back anything that was changed on it somewhere else.
+  const saveSchedule = (w) => {
+    if (!schedDate) return;
+    update("workOrders", w.id, { scheduledDate: schedDate, scheduledTime: schedTime });
+    setSchedulingFor(null);
+  };
+  const clearSchedule = (w) => {
+    update("workOrders", w.id, { scheduledDate: "", scheduledTime: "" });
+    setSchedulingFor(null);
+  };
 
   useEffect(() => {
     if (!deepLink || deepLink.tab !== "workorders") return;
@@ -5157,7 +5186,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
                 <th>Description</th>
                 <th>Vendor</th>
                 <th>Priority / Status</th>
-                <th style={{ width: 120 }}></th>
+                <th style={{ width: 150 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -5187,6 +5216,15 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
                         {view === "active" && w.status !== "Open" && <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>}
                         {w.courtCaseId && <span className="pill pill-accent"><Gavel size={11} /> Court</span>}
                         {w.courtCaseId && w.dueByDate && w.status !== "Done" && <Flag date={w.dueByDate} label="due by" />}
+                        {w.scheduledDate && w.status !== "Done" && (() => {
+                          const d = daysUntil(w.scheduledDate);
+                          const when = d === 0 ? "today" : d === 1 ? "tomorrow" : scheduleText(w.scheduledDate);
+                          return (
+                            <span className={`pill ${d < 0 ? "pill-danger" : d === 0 ? "pill-warn" : "pill-accent"}`} title={scheduleText(w.scheduledDate, w.scheduledTime)}>
+                              <CalendarClock size={11} /> {d < 0 ? "Was scheduled " : "Scheduled "}{when}{w.scheduledTime ? ` · ${fmtTime(w.scheduledTime)}` : ""}
+                            </span>
+                          );
+                        })()}
                       </td>
                       <td className="wo-sheet-actions" onClick={(e) => e.stopPropagation()}>
                         <input type="checkbox" checked={selected.has(w.id)} onChange={() => toggleSelected(w.id)} title="Select for batch copy" />
@@ -5195,11 +5233,29 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
                           active={w.status === "Done"}
                           onClick={() => update("workOrders", w.id, { status: w.status === "Done" ? "Open" : "Done" })}
                         ><CheckCircle2 size={14} /></IconBtn>
+                        <IconBtn title={w.scheduledDate ? "Scheduled — change or clear" : "Schedule"} onClick={() => openSchedule(w)}><CalendarClock size={14} /></IconBtn>
                         <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={() => copyOne(w)}><ScrollText size={14} /></IconBtn>
                         <IconBtn title="Edit" onClick={() => { const f = { ...w, isCourtConnected: w.isCourtConnected || !!w.courtCaseId }; setFormOriginal(f); setForm(f); }}><Pencil size={14} /></IconBtn>
                         <IconBtn title="Delete" danger onClick={() => remove("workOrders", w.id)}><Trash2 size={14} /></IconBtn>
                       </td>
                     </tr>
+                    {schedulingFor === w.id && (
+                      <tr className="wo-sheet-detail-row">
+                        <td colSpan={7}>
+                          <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "center", margin: 0 }}>
+                            <strong>Scheduled for</strong>
+                            <input type="date" value={schedDate} onChange={e => setSchedDate(e.target.value)} style={{ flex: "0 0 auto", width: 170 }} />
+                            <select value={schedTime} onChange={e => setSchedTime(e.target.value)}>
+                              <option value="">No specific time</option>
+                              {TIME_OPTIONS.map(t => <option key={t} value={t}>{fmtTime(t)}</option>)}
+                            </select>
+                            <button className="btn-primary" onClick={() => saveSchedule(w)} disabled={!schedDate}>Save</button>
+                            {w.scheduledDate && <button className="btn-ghost" onClick={() => clearSchedule(w)}>Clear</button>}
+                            <button className="btn-ghost" onClick={() => setSchedulingFor(null)}>Cancel</button>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
                     {isOpen && (
                       <tr className="wo-sheet-detail-row">
                         <td colSpan={7}>
