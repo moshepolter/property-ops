@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-5";
+const APP_BUILD = "sync-fix-6";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -2286,7 +2286,7 @@ function allDatedItems(data, tenantName, buildingName) {
   });
   data.tenants.forEach(t => {
     tenantFollowUps(t).forEach(f => {
-      if (f.date) items.push({ key: `f-${f.id}`, date: f.date, type: "Follow-up", label: t.name, sub: buildingName(t.buildingId), note: f.note, tab: "rent" });
+      if (f.date) items.push({ key: `f-${f.id}`, targetId: t.id, date: f.date, type: "Follow-up", label: t.name, sub: buildingName(t.buildingId), note: f.note, tab: "rent" });
     });
   });
   (data.quickNotes || []).forEach(n => {
@@ -2342,7 +2342,7 @@ function DashboardCalendar({ data, buildingName, tenantName, setTab, goTo }) {
   const selectedLabel = refDate === today ? "Today" : new Date(refDate + "T00:00:00").toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
 
   const Row = (item) => (
-    <button key={item.key} className="dash-detail-item" onClick={() => goTo(item.tab, item.key.slice(item.key.indexOf("-") + 1))}>
+    <button key={item.key} className="dash-detail-item" onClick={() => goTo(item.tab, item.targetId || item.key.slice(item.key.indexOf("-") + 1))}>
       <span className="pill pill-danger">{item.type}</span>
       <div className="followup-item-main">
         <div className="followup-item-name">{item.label}{item.sub ? <span className="row-muted"> — {item.sub}</span> : null}</div>
@@ -2878,7 +2878,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
             allDated.filter(i => i.date < today && i.type !== "Follow-up").length === 0
               ? <div className="hint">Nothing overdue.</div>
               : allDated.filter(i => i.date < today && i.type !== "Follow-up").sort((a, b) => a.date.localeCompare(b.date)).map(item => (
-                <div key={item.key} className="dash-detail-item" onClick={() => goTo(item.tab, item.key.slice(item.key.indexOf("-") + 1))}>
+                <div key={item.key} className="dash-detail-item" onClick={() => goTo(item.tab, item.targetId || item.key.slice(item.key.indexOf("-") + 1))}>
                   <span className="pill pill-danger">{item.type}</span>
                   <div className="followup-item-main">
                     <div className="followup-item-name">{item.label}{item.sub ? <span className="row-muted"> — {item.sub}</span> : null}</div>
@@ -2918,7 +2918,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
             overdueTenants.length === 0
               ? <div className="hint">No tenants behind on rent.</div>
               : overdueTenants.map(t => (
-                <button key={t.id} className="dash-detail-item" onClick={() => setTab("rent")}>
+                <button key={t.id} className="dash-detail-item" onClick={() => goTo("rent", t.id)}>
                   <span className={`pill ${t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status}</span>
                   <div className="followup-item-main">
                     <div className="followup-item-name">{t.name}<span className="row-muted"> — {buildingName(t.buildingId)}</span></div>
@@ -3080,7 +3080,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
             label={<>New tenants missing contact info <span className="dash-panel-sub">(replaced a moved-out tenant)</span></>} items={newTenantsNeedingContact} tab="rent" setTab={setTab}
             itemKey={t => t.id}
             renderItem={t => (
-              <div className="followup-item-main">
+              <div className="followup-item-main" style={{ cursor: "pointer" }} onClick={() => goTo("rent", t.id)}>
                 <div className="followup-item-name">{t.name || "(no name on file)"} <span className="row-muted">— Unit {data.units.find(u => u.id === t.unitId)?.unitNumber || "—"} {buildingName(t.buildingId)}</span></div>
               </div>
             )}
@@ -3123,7 +3123,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
                 {isExpanded && (
                   <div className="dash-building-detail">
                     {bTenantsLateList.map(t => (
-                      <button key={t.id} className="dash-detail-item" onClick={(e) => { e.stopPropagation(); setTab("rent"); }}>
+                      <button key={t.id} className="dash-detail-item" onClick={(e) => { e.stopPropagation(); goTo("rent", t.id); }}>
                         <span className="pill pill-danger">{t.status}</span>
                         <div className="followup-item-main"><div className="followup-item-name">{t.name}{t.balance ? ` — $${t.balance}` : ""}</div></div>
                       </button>
@@ -3227,6 +3227,16 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
     });
   };
   const [expandedUnit, setExpandedUnit] = useState(null);
+  // Name typed into a unit's "Add tenant" box, keyed by unit id.
+  const [newNameFor, setNewNameFor] = useState({});
+  // Same fields the Rent page's own "Add tenant" creates, so a tenant added here
+  // behaves identically everywhere else (rent roll, follow-ups, dashboard).
+  const addTenantToUnit = (buildingId, unitId) => {
+    const name = (newNameFor[unitId] || "").trim();
+    if (!name) return;
+    add("tenants", { buildingId, unitId, name, phone: "", balance: "", rentAmount: "", status: "Current", email: "", notes: [], followUps: [], payments: [] });
+    setNewNameFor(prev => ({ ...prev, [unitId]: "" }));
+  };
   const [unitSearch, setUnitSearch] = useState("");
   const [section, setSection] = useState("buildings");
   const [pendingDelete, setPendingDelete] = useState(null);
@@ -3565,7 +3575,14 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                           {tenants.length === 0 && <div className="hint">No tenant on file for this unit yet.</div>}
                           {tenants.map(t => (
                             <div key={t.id} className="unit-detail-tenant">
-                              <div className="unit-detail-row"><strong>{t.name || "(no name on file)"}</strong>{t.movedOut && <span className="pill pill-warn" style={{ marginLeft: 6 }}>Moved Out</span>}</div>
+                              <div className="unit-detail-row" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 2 }}>
+                                <span className="row-muted" style={{ fontSize: 12 }}>Tenant name:</span>
+                                <input
+                                  className="sheet-input" style={{ width: 220, border: "1px solid var(--border)", borderRadius: 4 }}
+                                  placeholder="Tenant name" value={t.name || ""} onChange={e => update("tenants", t.id, { name: e.target.value })}
+                                />
+                                {t.movedOut && <span className="pill pill-warn">Moved Out</span>}
+                              </div>
                               {t.phone && <div className="unit-detail-row">Phone: {t.phone}</div>}
                               {t.email && <div className="unit-detail-row">Email: {t.email}</div>}
                               <div className="unit-detail-row">Balance: {t.balance ? `$${t.balance}` : "—"} · Status: <span className={`pill ${t.status === "Current" ? "pill-ok" : t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status || "Current"}</span></div>
@@ -3579,12 +3596,25 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                               )}
                             </div>
                           ))}
+                          {!tenants.some(t => !t.movedOut) && (
+                            <div className="unit-detail-row" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+                              <input
+                                className="sheet-input" style={{ width: 220, border: "1px solid var(--border)", borderRadius: 4 }}
+                                placeholder="Tenant name" value={newNameFor[u.id] || ""}
+                                onChange={e => setNewNameFor(prev => ({ ...prev, [u.id]: e.target.value }))}
+                                onKeyDown={e => e.key === "Enter" && addTenantToUnit(b.id, u.id)}
+                              />
+                              <button className="btn-ghost" disabled={!(newNameFor[u.id] || "").trim()} onClick={() => addTenantToUnit(b.id, u.id)}>
+                                <Plus size={14} /> Add tenant
+                              </button>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
                   );
                 })}
-                <button className="btn-ghost" style={{ marginTop: 8 }} onClick={() => add("units", { buildingId: b.id, unitNumber: "" })}>
+                <button className="btn-ghost" style={{ marginTop: 8 }} onClick={() => { const id = add("units", { buildingId: b.id, unitNumber: "" }); setExpandedUnit(id); }}>
                   <Plus size={14} /> Add unit
                 </button>
               </div>
@@ -3677,11 +3707,21 @@ function RentTab({ data: rawData, add, update, remove, buildingName, setData, de
 
   useEffect(() => {
     if (!deepLink || deepLink.tab !== "rent") return;
-    const target = data.tenants.find(t => t.id === deepLink.id);
+    // Look in rawData, not the scoped copy, so a tenant in one of the "Mitch's
+    // father" buildings (kept out of the main list) is found too.
+    const target = rawData.tenants.find(t => t.id === deepLink.id);
     if (target) {
       setSection("sheet");
       setStatusFilter("All"); // a filter that excludes this tenant would otherwise hide them even with their building expanded
-      setExpandedBuildings(prev => new Set(prev).add(target.buildingId));
+      if (!mainBuildingIds.has(target.buildingId)) {
+        setExcludedSectionOpen(true); // they live in the "Mitch's father" section at the bottom
+      } else if (target.movedOut) {
+        setMainView("movedOut"); // moved-out tenants have their own view, grouped as "movedOut_<building>"
+        setExpandedBuildings(prev => new Set(prev).add("movedOut_" + target.buildingId));
+      } else {
+        setMainView("current");
+        setExpandedBuildings(prev => new Set(prev).add(target.buildingId));
+      }
       setHighlightTenantId(target.id);
       setTimeout(() => {
         document.getElementById(`tenant-row-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
