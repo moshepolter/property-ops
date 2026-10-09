@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-6";
+const APP_BUILD = "sync-fix-7";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -1923,6 +1923,32 @@ function PropertyOpsAppInner() {
           ? { id: v.id, agency: "HPD", buildingId: v.buildingId, unitId: v.unitId, violationNumber: v.violationNumber, status: "Certified" }
           : v),
       }));
+    }
+  }, [loaded, user]);
+
+  // One-time: merge duplicate HPD violations (same violation number) into one.
+  // Keeps the fullest record, carries over notes, drops the rest.
+  const dedupedHpdOnce = useRef(false);
+  useEffect(() => {
+    if (!loaded || !user || dedupedHpdOnce.current) return;
+    dedupedHpdOnce.current = true;
+    const groups = new Map();
+    (data.violations || []).forEach(v => {
+      if (v.agency !== "HPD" || !v.violationNumber) return;
+      const k = String(v.violationNumber);
+      groups.set(k, [...(groups.get(k) || []), v]);
+    });
+    const drop = new Set(), replace = new Map();
+    groups.forEach(list => {
+      if (list.length < 2) return;
+      const keep = list.slice().sort((a, b) => (Array.isArray(b.notes) ? b.notes.length : 0) - (Array.isArray(a.notes) ? a.notes.length : 0) || Object.keys(b).length - Object.keys(a).length)[0];
+      const notes = [];
+      list.forEach(v => (Array.isArray(v.notes) ? v.notes : []).forEach(n => { if (!notes.some(x => JSON.stringify(x) === JSON.stringify(n))) notes.push(n); }));
+      list.forEach(v => { if (v.id !== keep.id) drop.add(v.id); });
+      if (Array.isArray(keep.notes) && notes.length !== keep.notes.length) replace.set(keep.id, { ...keep, notes });
+    });
+    if (drop.size || replace.size) {
+      setData(d => ({ ...d, violations: (d.violations || []).filter(v => !drop.has(v.id)).map(v => replace.get(v.id) || v) }));
     }
   }, [loaded, user]);
 
@@ -6158,8 +6184,14 @@ function HpdViolationsImportSection({ data, add, update, onImported }) {
   const runImport = () => {
     if (!preview) return;
     let created = 0, alreadyOnFile = 0, skipped = 0;
+    // Violation numbers already on file (re-checked now, not at preview time)
+    // plus ones added in this very run — so the same violation can never be
+    // saved twice, even if it appears twice in one report.
+    const seenNumbers = new Set((data.violations || []).filter(ev => ev.agency === "HPD").map(ev => String(ev.violationNumber)));
     for (const row of preview.rows) {
       if (!row.include) { skipped++; continue; }
+      if (seenNumbers.has(String(row.violationId))) { alreadyOnFile++; continue; }
+      seenNumbers.add(String(row.violationId));
       // Already on file — left completely untouched. This runs weekly, and
       // an existing violation is likely already being worked (a vendor
       // called, a note added, status moved along) — re-importing shouldn't
@@ -6173,7 +6205,13 @@ function HpdViolationsImportSection({ data, add, update, onImported }) {
         cureDeadline: isoFromMDY(row.certByDate) || "",
         status: row.mappedStatus, isLead: row.isLead, isMoldOver10: row.isMoldOver10,
       };
-      add("violations", { ...fields, id: uid(), fineAmount: "", company: "", otherAgency: "", vendorId: "", notes: [] });
+      // Already-certified HPD violations are saved in the slim shape (just
+      // enough to recognise them on the next report) to save storage.
+      if (fields.status === "Certified") {
+        add("violations", { id: uid(), agency: "HPD", buildingId: fields.buildingId, unitId: fields.unitId, violationNumber: fields.violationNumber, status: "Certified" });
+      } else {
+        add("violations", { ...fields, id: uid(), fineAmount: "", company: "", otherAgency: "", vendorId: "", notes: [] });
+      }
       created++;
     }
     setResult({ created, alreadyOnFile, skipped });
