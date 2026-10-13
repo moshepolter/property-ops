@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-7";
+const APP_BUILD = "sync-fix-9";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -2252,7 +2252,7 @@ const TAB_LABELS = {
   inspections: "Appointments", quicknotes: "Quick Notes / Reminder",
 };
 
-function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, extraAction }) {
+function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, extraAction, limit = 8 }) {
   const [open, setOpen] = useState(false);
   if (items.length === 0) return null;
   return (
@@ -2265,10 +2265,10 @@ function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, 
       </button>
       {open && (
         <div className="followup-panel-body">
-          {items.slice(0, 8).map((it, i) => (
+          {items.slice(0, limit).map((it, i) => (
             <div className="followup-item" key={itemKey ? itemKey(it) : i}>{renderItem(it)}</div>
           ))}
-          {items.length > 8 && <div className="hint" style={{ margin: "4px 0" }}>+ {items.length - 8} more</div>}
+          {items.length > limit && <div className="hint" style={{ margin: "4px 0" }}>+ {items.length - limit} more</div>}
           <div className="row" style={{ marginTop: 8, gap: 8 }}>
             <button className="btn-ghost" onClick={() => setTab(tab)}>
               View in {TAB_LABELS[tab] || tab}
@@ -2298,6 +2298,12 @@ function allDatedItems(data, tenantName, buildingName) {
   data.courtCases.forEach(c => {
     if (c.archived) return;
     if (c.nextCourtDate) items.push({ key: `c-${c.id}`, date: c.nextCourtDate, type: "Court date", label: tenantName(c.tenantId), sub: buildingName(c.buildingId), tab: "court" });
+    // Notes dated in the future (e.g. "Eviction" on Oct 28) are scheduled items too.
+    // Skip one that just repeats the case's own next court date.
+    (c.log || []).forEach(l => {
+      if (!l || !l.date || l.date <= todayISO() || l.date === c.nextCourtDate) return;
+      items.push({ key: `cl-${c.id}-${l.id}`, targetId: c.id, date: l.date, type: "Court note", label: tenantName(c.tenantId), note: l.note, sub: buildingName(c.buildingId), tab: "court" });
+    });
     if (c.result === "Stipulation (payment plan)" && c.nextPaymentDue) items.push({ key: `p-${c.id}`, date: c.nextPaymentDue, type: "Payment due", label: tenantName(c.tenantId), sub: buildingName(c.buildingId), tab: "court" });
   });
   data.workOrders.forEach(w => {
@@ -2476,6 +2482,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
   const [testEmailStatus, setTestEmailStatus] = useState(null); // null | "sending" | "sent" | "error"
   const [expandedBuilding, setExpandedBuilding] = useState(null);
   const [statOpen, setStatOpen] = useState(null);
+  const [showAllFollowUps, setShowAllFollowUps] = useState(false);
   const [quickNoteText, setQuickNoteText] = useState("");
   const submitQuickNote = () => {
     if (!quickNoteText.trim()) return;
@@ -2619,7 +2626,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
     const hasOpenCourt = data.courtCases.some(c => c.buildingId === b.id && !c.archived);
     return !hasViolation && !hasLateTenant && !hasOpenWO && !hasOpenCourt;
   }).map(b => b.id));
-  const rosterEntries = followUpEntries.slice(0, 8);
+  const rosterEntries = showAllFollowUps ? followUpEntries : followUpEntries.slice(0, 8);
 
   const exportAllData = () => {
     const buildingMap = Object.fromEntries(data.buildings.map(b => [b.id, shortAddress(b.address)]));
@@ -2972,7 +2979,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
                   </div>
                   <div className="dash-roster-meta">
                     {t.phone && <a href={`tel:${t.phone}`} className="dash-roster-phone" onClick={(e) => e.stopPropagation()} title={t.phone}><Phone size={14} /></a>}
-                    <span className="pill pill-muted">{fmtDate(f.date)}</span>
+                    <span className={`pill ${f.date < today ? "pill-danger" : "pill-muted"}`}>{fmtDate(f.date)}</span>
                     <IconBtn
                       title="Done — remove this follow-up"
                       onClick={() => setData(d => ({
@@ -2985,10 +2992,10 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
                   </div>
                 </div>
               ))}
-              {followUpEntries.length > rosterEntries.length && (
-                <div className="row-muted" style={{ fontSize: 12, marginTop: 4 }}>
-                  + {followUpEntries.length - rosterEntries.length} more not shown here
-                </div>
+              {followUpEntries.length > 8 && (
+                <button className="btn-ghost" style={{ marginTop: 4 }} onClick={() => setShowAllFollowUps(x => !x)}>
+                  {showAllFollowUps ? "Show fewer" : `Show all ${followUpEntries.length}`}
+                </button>
               )}
               <button className="btn-ghost" style={{ marginTop: 6 }} onClick={() => setTab("rent")}>View in Rent Collection</button>
             </div>
@@ -3079,12 +3086,15 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
 
           <AttentionPanel
             icon={<Pencil size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label={<>Quick notes to organize <span className="dash-panel-sub">(shows once due, or always if no reminder set)</span></>} items={quickNoteItems} tab="quicknotes" setTab={setTab}
+            label={<>Quick notes to organize <span className="dash-panel-sub">(shows once due, or always if no reminder set)</span></>} items={quickNoteItems} tab="quicknotes" setTab={setTab} limit={200}
             itemKey={n => n.id}
             renderItem={n => (
-              <div className="followup-item-main">
-                <div className="followup-item-name">{n.text}{n.buildingId ? ` — ${buildingName(n.buildingId)}` : ""}</div>
-                <div className="followup-item-note">{n.reminderDate ? `Reminder: ${fmtDate(n.reminderDate)}` : fmtDate(n.date)}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div className="followup-item-main" style={{ flex: 1 }}>
+                  <div className="followup-item-name">{n.text}{n.buildingId ? ` — ${buildingName(n.buildingId)}` : ""}</div>
+                  <div className="followup-item-note">{n.reminderDate ? `Reminder: ${fmtDate(n.reminderDate)}${n.reminderDate < today ? " — overdue, stays here until checked off" : ""}` : fmtDate(n.date)}</div>
+                </div>
+                <IconBtn title="Done — check this off" onClick={() => update("quickNotes", n.id, { done: true })}><CheckCircle2 size={16} /></IconBtn>
               </div>
             )}
           />
@@ -6516,6 +6526,8 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
       fields.result = "Stipulation (payment plan)";
       if (entry.stipTerms) fields.stipulationTerms = entry.stipTerms;
       if (entry.stipNextDue) fields.nextPaymentDue = entry.stipNextDue;
+    } else if (entry.quickType === "eviction") {
+      noteText = "Eviction";
     } else if (entry.quickType === "dismissed") {
       noteText = "Case dismissed"; fields.result = "Case dismissed";
     } else if (entry.quickType === "judgmentLandlord") {
@@ -6848,6 +6860,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                   {[
                     { key: "adjourned", label: "Adjourned" },
                     { key: "stipulation", label: "Stipulation" },
+                    { key: "eviction", label: "Eviction" },
                     { key: "dismissed", label: "Case dismissed" },
                     { key: "judgmentLandlord", label: "Judgment (landlord)" },
                     { key: "judgmentTenant", label: "Judgment (tenant)" },
