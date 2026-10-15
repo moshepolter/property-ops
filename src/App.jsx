@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-11";
+const APP_BUILD = "sync-fix-12";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -6989,7 +6989,16 @@ function EroTab({ data, add, update, remove, buildingName, vendorName, deepLink,
   const [buildingFilter, setBuildingFilter] = useState("All");
   const [search, setSearch] = useState("");
   const [highlightId, setHighlightId] = useState(null);
+  const [noteDrafts, setNoteDrafts] = useState({});
   const list0 = data.emergencyRepairs || [];
+  const addEroNote = (e) => {
+    const text = (noteDrafts[e.id] || "").trim();
+    if (!text) return;
+    // Sends only the notes list, so adding a note can't put back anything else
+    // that was changed on this ERO from another device.
+    update("emergencyRepairs", e.id, { notes: [...(e.notes || []), { id: uid(), date: todayISO(), timestamp: Date.now(), text }] });
+    setNoteDrafts({ ...noteDrafts, [e.id]: "" });
+  };
 
   useEffect(() => {
     if (!deepLink || deepLink.tab !== "ero") return;
@@ -7144,6 +7153,21 @@ function EroTab({ data, add, update, remove, buildingName, vendorName, deepLink,
                 {!done
                   ? <button className="btn-ghost" onClick={() => update("emergencyRepairs", e.id, { status: "Completed", completedDate: todayISO() })}><CheckCircle2 size={14} /> Mark completed</button>
                   : <button className="btn-ghost" onClick={() => update("emergencyRepairs", e.id, { status: "Open", completedDate: "" })}>Reopen</button>}
+              </div>
+              <div className="row" style={{ marginTop: 6 }}><strong>Notes</strong></div>
+              {(e.notes || []).length === 0 && <div className="hint">No notes yet.</div>}
+              {(e.notes || []).slice().sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).map((n, i) => (
+                <div className="row row-muted" key={n.id || i} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                  <span style={{ minWidth: 90, fontSize: 12 }}>{fmtDate(n.date)}</span>
+                  <span style={{ flex: 1 }}>{n.text}</span>
+                  <button className="checklist-remove" title="Remove this note" onClick={() => update("emergencyRepairs", e.id, { notes: (e.notes || []).filter(x => x !== n) })}><X size={12} /></button>
+                </div>
+              ))}
+              <div className="inline-form" style={{ marginTop: 6 }}>
+                <input placeholder="Add a note — calls, HPD contact, vendor updates…" value={noteDrafts[e.id] || ""}
+                  onChange={ev => setNoteDrafts({ ...noteDrafts, [e.id]: ev.target.value })}
+                  onKeyDown={ev => ev.key === "Enter" && addEroNote(e)} />
+                <button className="btn-ghost" onClick={() => addEroNote(e)}>Add note</button>
               </div>
             </div>
           </div>
