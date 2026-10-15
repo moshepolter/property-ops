@@ -40,7 +40,7 @@ import {
   Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat, Home, Phone, Mail,
   CalendarClock, ScrollText, MessageSquare, Archive as ArchiveIcon, DollarSign, StickyNote,
   Plus, X, Camera, Download, LayoutDashboard, ChevronDown, ChevronRight, ChevronLeft,
-  Trash2, Pencil, Upload, Menu, Printer, CheckCircle2, Ticket
+  Trash2, Pencil, Upload, Menu, Printer, CheckCircle2, Ticket, Siren
 } from "lucide-react";
 
 /* ============================== constants ============================== */
@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-9";
+const APP_BUILD = "sync-fix-11";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -287,7 +287,7 @@ const emptyData = () => ({
   buildings: [], units: [], tenants: [], vendors: [], workOrders: [],
   violations: [], courtCases: [], inspections: [], appointments: [],
   localLaws: [], bossReminders: [], customAppointmentTypes: [], customInspectionTypes: [],
-  customOtherAgencies: [], quickNotes: [], importHistory: [], caseStageOptions: [],
+  customOtherAgencies: [], quickNotes: [], importHistory: [], caseStageOptions: [], emergencyRepairs: [], collections: [],
 });
 
 // Every field in emptyData() is an array of records with an id. When a
@@ -2002,8 +2002,10 @@ function PropertyOpsAppInner() {
     { key: "rent", label: "Rent Collection", icon: <Users size={16} /> },
     { key: "workorders", label: "Work Orders", icon: <Wrench size={16} /> },
     { key: "violations", label: "Violations", icon: <AlertTriangle size={16} /> },
+    { key: "ero", label: "Emergency Repairs", icon: <Siren size={16} /> },
     { key: "vendors", label: "Vendors", icon: <HardHat size={16} /> },
     { key: "court", label: "Court Cases", icon: <Gavel size={16} /> },
+    { key: "collections", label: "Collections", icon: <DollarSign size={16} /> },
     { key: "inspections", label: "Appointments", icon: <CalendarClock size={16} /> },
     { key: "laws", label: "NYC Local Laws", icon: <ScrollText size={16} /> },
     { key: "reminders", label: "Boss Reminders", icon: <MessageSquare size={16} /> },
@@ -2147,8 +2149,10 @@ function PropertyOpsAppInner() {
             {tab === "rent" && <RentTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} deepLink={deepLink} setDeepLink={setDeepLink} />}
             {tab === "workorders" && <WorkOrdersTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} tenantName={tenantName} deepLink={deepLink} setDeepLink={setDeepLink} />}
             {tab === "violations" && <ViolationsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} setData={setData} deepLink={deepLink} setDeepLink={setDeepLink} />}
+            {tab === "ero" && <EroTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} vendorName={vendorName} deepLink={deepLink} setDeepLink={setDeepLink} />}
             {tab === "vendors" && <VendorsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
             {tab === "court" && <CourtTab data={data} add={add} update={update} remove={remove} setData={setData} tenantName={tenantName} buildingName={buildingName} deepLink={deepLink} setDeepLink={setDeepLink} />}
+            {tab === "collections" && <CollectionsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} deepLink={deepLink} setDeepLink={setDeepLink} />}
             {tab === "inspections" && <AppointmentsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} deepLink={deepLink} setDeepLink={setDeepLink} />}
             {tab === "laws" && <LocalLawsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
             {tab === "reminders" && <RemindersTab data={data} add={add} update={update} remove={remove} />}
@@ -2249,7 +2253,7 @@ function SearchResults({ results, buildingName, onClose, setTab }) {
 
 const TAB_LABELS = {
   rent: "Rent Collection", violations: "Violations", court: "Court Cases",
-  inspections: "Appointments", quicknotes: "Quick Notes / Reminder",
+  ero: "Emergency Repairs", collections: "Collections", inspections: "Appointments", quicknotes: "Quick Notes / Reminder",
 };
 
 function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, extraAction, limit = 8 }) {
@@ -2305,6 +2309,11 @@ function allDatedItems(data, tenantName, buildingName) {
       items.push({ key: `cl-${c.id}-${l.id}`, targetId: c.id, date: l.date, type: "Court note", label: tenantName(c.tenantId), note: l.note, sub: buildingName(c.buildingId), tab: "court" });
     });
     if (c.result === "Stipulation (payment plan)" && c.nextPaymentDue) items.push({ key: `p-${c.id}`, date: c.nextPaymentDue, type: "Payment due", label: tenantName(c.tenantId), sub: buildingName(c.buildingId), tab: "court" });
+  });
+  (data.emergencyRepairs || []).forEach(e => {
+    if (e.status !== "Completed" && e.dueByDate) {
+      items.push({ key: `ero-${e.id}`, targetId: e.id, date: e.dueByDate, type: "ERO due", label: `ERO ${e.eroNumber || ""}`.trim(), note: e.description, sub: buildingName(e.buildingId), tab: "ero" });
+    }
   });
   data.workOrders.forEach(w => {
     if (w.courtCaseId && w.dueByDate && w.status !== "Done") {
@@ -2565,6 +2574,9 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
   // arrives — no need to see it every day until then, it'll show up on its own.
   const quickNoteItems = (data.quickNotes || []).filter(n => !n.done && (!n.reminderDate || n.reminderDate <= today));
   const bossReminderItems = data.bossReminders.filter(r => r.status !== "Done");
+  const collectionItems = (data.collections || []).filter(c => !c.archived).sort((a, b) => parseBalance(b.amountOwed) - parseBalance(a.amountOwed));
+  const collectionsTotal = collectionItems.reduce((sum, c) => sum + parseBalance(c.amountOwed), 0);
+  const eroItems = (data.emergencyRepairs || []).filter(e => e.status !== "Completed").sort((a, b) => (a.dueByDate || "9999").localeCompare(b.dueByDate || "9999"));
   // Same snooze rule for tenant follow-ups — only show once due (or overdue),
   // not the whole month in advance.
   const tenantsWithFollowUps = data.tenants.filter(t => tenantFollowUps(t).some(f => f.date && f.date <= today));
@@ -2586,7 +2598,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
 
   const rentPanelCount = overdueTenants.length + allFollowUps;
   const totalViolationsDue = violationAgencyGroups.reduce((sum, g) => sum + g.items.length, 0);
-  const totalAttention = rentPanelCount + recurringItems.length + appointmentItems.length + quickNoteItems.length + totalViolationsDue + bossReminderItems.length + hearingItems.length;
+  const totalAttention = rentPanelCount + recurringItems.length + appointmentItems.length + quickNoteItems.length + totalViolationsDue + bossReminderItems.length + hearingItems.length + eroItems.length + collectionItems.length;
 
   // Top stat row + follow-up roster
   const allDated = allDatedItems(data, tenantName, buildingName);
@@ -2615,6 +2627,8 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       update("quickNotes", id, { done: true });
     } else if (item.key.startsWith("wo-")) {
       update("workOrders", id, { status: "Done" });
+    } else if (item.key.startsWith("ero-")) {
+      update("emergencyRepairs", id, { status: "Completed", completedDate: todayISO() });
     }
   };
   const openWorkOrders = data.workOrders.filter(w => w.status !== "Done");
@@ -3081,6 +3095,33 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
                   {(a.timeFrom || a.timeTo) && <div className="followup-item-note">{fmtTime(a.timeFrom)}{a.timeTo ? ` – ${fmtTime(a.timeTo)}` : ""}</div>}
                 </div>
               </>
+            )}
+          />
+
+          <AttentionPanel
+            icon={<DollarSign size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
+            label={<>Collections <span className="dash-panel-sub">({money(collectionsTotal)} owed by former tenants)</span></>} items={collectionItems} tab="collections" setTab={setTab}
+            itemKey={c => c.id} limit={200}
+            renderItem={c => (
+              <div className="followup-item-main" style={{ cursor: "pointer" }} onClick={() => goTo("collections", c.id)}>
+                <div className="followup-item-name">{c.tenantName} <span className="row-muted">— {buildingName(c.buildingId)} · {money(parseBalance(c.amountOwed))}</span></div>
+                <div className="followup-item-note">{c.movedOutDate ? `Moved out ${fmtDate(c.movedOutDate)} · ` : ""}{c.lawyer ? `Lawyer: ${c.lawyer}` : "No lawyer yet"} · {c.stage || "stage not set"}</div>
+              </div>
+            )}
+          />
+
+          <AttentionPanel
+            icon={<Siren size={18} className="attention-icon" style={{ color: "var(--danger)" }} />}
+            label={<>Open emergency repair orders <span className="dash-panel-sub">(shows until completed)</span></>} items={eroItems} tab="ero" setTab={setTab}
+            itemKey={e => e.id} limit={200}
+            renderItem={e => (
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div className="followup-item-main" style={{ flex: 1, cursor: "pointer" }} onClick={() => goTo("ero", e.id)}>
+                  <div className="followup-item-name">ERO {e.eroNumber || ""} <span className="row-muted">— {buildingName(e.buildingId)}</span></div>
+                  <div className="followup-item-note">{e.dueByDate ? `Due ${fmtDate(e.dueByDate)}${e.dueByDate < today ? " — overdue" : ""}` : "No due date"}{e.hpdContacted ? "" : " · HPD not contacted yet"}</div>
+                </div>
+                <IconBtn title="Mark completed" onClick={() => update("emergencyRepairs", e.id, { status: "Completed", completedDate: todayISO() })}><CheckCircle2 size={16} /></IconBtn>
+              </div>
             )}
           />
 
@@ -6935,6 +6976,364 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
           )}
         </div>
       );})}
+    </div>
+  );
+}
+
+/* ============================== emergency repair orders (ERO) ============================== */
+
+function EroTab({ data, add, update, remove, buildingName, vendorName, deepLink, setDeepLink }) {
+  const [form, setForm] = useState(null);
+  const [formOriginal, setFormOriginal] = useState(null);
+  const [view, setView] = useState("active");
+  const [buildingFilter, setBuildingFilter] = useState("All");
+  const [search, setSearch] = useState("");
+  const [highlightId, setHighlightId] = useState(null);
+  const list0 = data.emergencyRepairs || [];
+
+  useEffect(() => {
+    if (!deepLink || deepLink.tab !== "ero") return;
+    const target = list0.find(e => e.id === deepLink.id);
+    if (target) {
+      setView(target.status === "Completed" ? "done" : "active");
+      setBuildingFilter("All"); setSearch("");
+      setHighlightId(target.id);
+      setTimeout(() => document.getElementById(`ero-row-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 100);
+      setTimeout(() => setHighlightId(null), 2500);
+    }
+    setDeepLink(null);
+  }, [deepLink]);
+
+  const blank = () => ({
+    id: uid(), eroNumber: "", buildingId: data.buildings[0]?.id || "", unitId: "", violationIds: [],
+    description: "", vendorId: "", handledBy: "", dateIssued: todayISO(), dueByDate: "",
+    hpdContacted: false, hpdContactedDate: "", status: "Open", completedDate: "",
+  });
+  const openEdit = (e) => { const f = { violationIds: [], ...e }; setForm(f); setFormOriginal(f); };
+
+  const submit = () => {
+    if (!form.eroNumber.trim() && !form.description.trim()) return;
+    const exists = list0.some(e => e.id === form.id);
+    const f = { ...form };
+    if (f.hpdContacted && !f.hpdContactedDate) f.hpdContactedDate = todayISO();
+    if (!f.hpdContacted) f.hpdContactedDate = "";
+    if (exists) {
+      const patch = changedFieldsOnly(formOriginal, f);
+      if (Object.keys(patch).length > 0) update("emergencyRepairs", f.id, patch);
+    } else add("emergencyRepairs", f);
+    setForm(null);
+  };
+
+  const list = list0
+    .filter(e => view === "active" ? e.status !== "Completed" : e.status === "Completed")
+    .filter(e => buildingFilter === "All" || e.buildingId === buildingFilter)
+    .filter(e => {
+      if (!search.trim()) return true;
+      const q = search.trim().toLowerCase();
+      const vNums = (e.violationIds || []).map(id => data.violations.find(v => v.id === id)?.violationNumber || "").join(" ");
+      return [e.eroNumber, e.description, buildingName(e.buildingId), e.vendorId ? vendorName(e.vendorId) : "", e.handledBy, vNums]
+        .some(x => (x || "").toString().toLowerCase().includes(q));
+    })
+    .slice()
+    .sort((a, b) => (a.dueByDate || "9999-99-99").localeCompare(b.dueByDate || "9999-99-99"));
+
+  const formViolations = form ? data.violations.filter(v => v.buildingId === form.buildingId && (!isViolationClosed(v) || (form.violationIds || []).includes(v.id))) : [];
+  const toggleViolation = (id) => {
+    const cur = form.violationIds || [];
+    setForm({ ...form, violationIds: cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id] });
+  };
+
+  return (
+    <div>
+      <div className="page-head">
+        <h1 className="page-title">Emergency Repair Orders</h1>
+        <div className="page-actions">
+          <PrintButton label="Emergency Repair Orders" />
+          <button className="btn-primary" onClick={() => { const f = blank(); setForm(f); setFormOriginal(null); }}>
+            <Plus size={14} /> Add ERO
+          </button>
+        </div>
+      </div>
+      <div className="row" style={{ marginBottom: 10, flexWrap: "wrap" }}>
+        <input type="text" placeholder="Search ERO #, violation #, work, building, who…" value={search} onChange={e => setSearch(e.target.value)} style={{ width: "100%", maxWidth: 360 }} />
+        <select value={buildingFilter} onChange={e => setBuildingFilter(e.target.value)} style={{ maxWidth: 220 }}>
+          <option value="All">All buildings</option>
+          {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
+        </select>
+      </div>
+      <div className="filter-row">
+        <button className={`chip ${view === "active" ? "chip-active" : ""}`} onClick={() => setView("active")}>Open</button>
+        <button className={`chip ${view === "done" ? "chip-active" : ""}`} onClick={() => setView("done")}>Completed</button>
+      </div>
+
+      {form && (
+        <div className="form-panel">
+          <Field label="ERO number"><input value={form.eroNumber} onChange={e => setForm({ ...form, eroNumber: e.target.value })} placeholder="ERO #" /></Field>
+          <Field label="Building">
+            <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value, unitId: "", violationIds: [] })}>
+              <option value="">—</option>
+              {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
+            </select>
+          </Field>
+          <Field label="Apt # (optional)">
+            <select value={form.unitId || ""} onChange={e => setForm({ ...form, unitId: e.target.value })}>
+              <option value="">Whole building</option>
+              {data.units.filter(u => u.buildingId === form.buildingId).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber)).map(u => <option key={u.id} value={u.id}>{unitOptionLabel(u, data.tenants)}</option>)}
+            </select>
+          </Field>
+          <Field label="Connected violation(s)">
+            {formViolations.length === 0
+              ? <div className="hint">No violations on file for this building.</div>
+              : <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 180, overflowY: "auto" }}>
+                  {formViolations.map(v => (
+                    <label key={v.id} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13 }}>
+                      <input type="checkbox" checked={(form.violationIds || []).includes(v.id)} onChange={() => toggleViolation(v.id)} />
+                      <span>#{v.violationNumber} <span className="row-muted">{v.agency}{v.description ? ` — ${v.description.slice(0, 70)}` : ""}</span></span>
+                    </label>
+                  ))}
+                </div>}
+          </Field>
+          <Field label="What the work is"><textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></Field>
+          <Field label="Who's taking care of it (vendor)">
+            <select value={form.vendorId || ""} onChange={e => setForm({ ...form, vendorId: e.target.value })}>
+              <option value="">Not assigned</option>
+              {data.vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+            </select>
+          </Field>
+          <Field label="…or someone else (super, in-house, etc.)"><input value={form.handledBy || ""} onChange={e => setForm({ ...form, handledBy: e.target.value })} /></Field>
+          <Field label="ERO issued"><input type="date" value={form.dateIssued || ""} onChange={e => setForm({ ...form, dateIssued: e.target.value })} /></Field>
+          <Field label="Needs to be done by"><input type="date" value={form.dueByDate || ""} onChange={e => setForm({ ...form, dueByDate: e.target.value })} /></Field>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", margin: "6px 0" }}>
+            <input type="checkbox" checked={!!form.hpdContacted} onChange={e => setForm({ ...form, hpdContacted: e.target.checked })} />
+            Reached out to HPD
+          </label>
+          <div className="form-actions">
+            <button className="btn-primary" onClick={submit}>Save</button>
+            <button className="btn-ghost" onClick={() => setForm(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {list.length === 0 && <EmptyState text={view === "active" ? "No open emergency repair orders." : "Nothing marked completed yet."} />}
+      {list.map(e => {
+        const unit = e.unitId ? data.units.find(u => u.id === e.unitId) : null;
+        const vNums = (e.violationIds || []).map(id => data.violations.find(v => v.id === id)).filter(Boolean);
+        const who = e.vendorId ? vendorName(e.vendorId) : (e.handledBy || "");
+        const done = e.status === "Completed";
+        return (
+          <div className={`list-card ${highlightId === e.id ? "sheet-row-deeplinked" : ""}`} key={e.id} id={`ero-row-${e.id}`}>
+            <div className="list-card-head">
+              <div className="list-card-title">ERO {e.eroNumber || "(no number)"} <span className="row-muted">— {buildingName(e.buildingId)}{unit ? ` · Apt ${unit.unitNumber}` : ""}</span></div>
+              {done
+                ? <span className="pill pill-muted">Completed {fmtDate(e.completedDate)}</span>
+                : e.dueByDate && <Flag date={e.dueByDate} label="due" />}
+              <IconBtn title="Edit" onClick={() => openEdit(e)}><Pencil size={14} /></IconBtn>
+              <IconBtn title="Delete" danger onClick={() => { if (window.confirm("Delete this ERO?")) remove("emergencyRepairs", e.id); }}><Trash2 size={14} /></IconBtn>
+            </div>
+            <div className="list-card-body">
+              {e.description && <div className="row">{e.description}</div>}
+              {vNums.length > 0 && <div className="row"><em>Violations:</em> {vNums.map(v => `#${v.violationNumber}`).join(", ")}</div>}
+              <div className="row"><em>Handled by:</em> {who || "not assigned"}</div>
+              <div className="row"><em>Issued:</em> {e.dateIssued ? fmtDate(e.dateIssued) : "—"}{e.dueByDate ? <> · <em>Due:</em> {fmtDate(e.dueByDate)}</> : null}</div>
+              <div className="row" style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input type="checkbox" checked={!!e.hpdContacted}
+                    onChange={ev => update("emergencyRepairs", e.id, { hpdContacted: ev.target.checked, hpdContactedDate: ev.target.checked ? todayISO() : "" })} />
+                  Reached out to HPD{e.hpdContacted && e.hpdContactedDate ? ` (${fmtDate(e.hpdContactedDate)})` : ""}
+                </label>
+                {!done
+                  ? <button className="btn-ghost" onClick={() => update("emergencyRepairs", e.id, { status: "Completed", completedDate: todayISO() })}><CheckCircle2 size={14} /> Mark completed</button>
+                  : <button className="btn-ghost" onClick={() => update("emergencyRepairs", e.id, { status: "Open", completedDate: "" })}>Reopen</button>}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ============================== collections (former tenants, owed money) ============================== */
+
+function CollectionsTab({ data, add, update, remove, buildingName, deepLink, setDeepLink }) {
+  const [form, setForm] = useState(null);
+  const [formOriginal, setFormOriginal] = useState(null);
+  const [view, setView] = useState("active");
+  const [buildingFilter, setBuildingFilter] = useState("All");
+  const [search, setSearch] = useState("");
+  const [highlightId, setHighlightId] = useState(null);
+  const [openId, setOpenId] = useState(null);
+  const [logForm, setLogForm] = useState({});
+  const all = data.collections || [];
+
+  useEffect(() => {
+    if (!deepLink || deepLink.tab !== "collections") return;
+    const target = all.find(c => c.id === deepLink.id);
+    if (target) {
+      setView(target.archived ? "closed" : "active");
+      setBuildingFilter("All"); setSearch("");
+      setOpenId(target.id); setHighlightId(target.id);
+      setTimeout(() => document.getElementById(`coll-row-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 100);
+      setTimeout(() => setHighlightId(null), 2500);
+    }
+    setDeepLink(null);
+  }, [deepLink]);
+
+  const blank = () => ({
+    id: uid(), tenantId: "", tenantName: "", buildingId: data.buildings[0]?.id || "", unitId: "",
+    amountOwed: "", movedOutDate: "", lawyer: "", stage: "", log: [], archived: false,
+  });
+  const openEdit = (c) => { setForm({ ...c }); setFormOriginal({ ...c }); };
+
+  const pickTenant = (id) => {
+    const t = data.tenants.find(x => x.id === id);
+    if (!t) { setForm({ ...form, tenantId: "" }); return; }
+    setForm({
+      ...form, tenantId: t.id, tenantName: t.name || form.tenantName,
+      buildingId: t.buildingId || form.buildingId, unitId: t.unitId || "",
+      amountOwed: form.amountOwed || (parseBalance(t.balance) > 0 ? String(parseBalance(t.balance).toFixed(2)) : ""),
+    });
+  };
+
+  const submit = () => {
+    if (!form.tenantName.trim()) return;
+    if (formOriginal) {
+      const patch = changedFieldsOnly(formOriginal, form);
+      if (Object.keys(patch).length > 0) update("collections", form.id, patch);
+    } else add("collections", form);
+    setForm(null); setFormOriginal(null);
+  };
+
+  const addLog = (c) => {
+    const e = logForm[c.id];
+    if (!e || !(e.note || "").trim()) return;
+    update("collections", c.id, { log: [...(c.log || []), { id: uid(), date: e.date || todayISO(), note: e.note.trim() }] });
+    setLogForm({ ...logForm, [c.id]: { date: todayISO(), note: "" } });
+  };
+
+  const list = all
+    .filter(c => view === "active" ? !c.archived : c.archived)
+    .filter(c => buildingFilter === "All" || c.buildingId === buildingFilter)
+    .filter(c => {
+      if (!search.trim()) return true;
+      const q = search.trim().toLowerCase();
+      return [c.tenantName, c.lawyer, c.stage, buildingName(c.buildingId)].some(x => (x || "").toLowerCase().includes(q));
+    })
+    .slice()
+    .sort((a, b) => parseBalance(b.amountOwed) - parseBalance(a.amountOwed));
+  const totalOwed = list.reduce((s, c) => s + parseBalance(c.amountOwed), 0);
+  const unitsFor = form ? data.units.filter(u => u.buildingId === form.buildingId).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber)) : [];
+  const tenantsFor = form ? data.tenants.filter(t => t.buildingId === form.buildingId) : [];
+
+  return (
+    <div>
+      <div className="page-head">
+        <h1 className="page-title">Collections</h1>
+        <div className="page-actions">
+          <PrintButton label="Collections" />
+          <button className="btn-primary" onClick={() => { setForm(blank()); setFormOriginal(null); }}><Plus size={14} /> Add collection</button>
+        </div>
+      </div>
+      <p className="hint">Former tenants who moved out owing money — how much, who's handling it, and where it's up to. Uses the same "where it's up to" options as Court Cases.</p>
+      <div className="row" style={{ marginBottom: 10, flexWrap: "wrap" }}>
+        <input type="text" placeholder="Search name, lawyer, stage, building…" value={search} onChange={e => setSearch(e.target.value)} style={{ width: "100%", maxWidth: 360 }} />
+        <select value={buildingFilter} onChange={e => setBuildingFilter(e.target.value)} style={{ maxWidth: 220 }}>
+          <option value="All">All buildings</option>
+          {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
+        </select>
+      </div>
+      <div className="filter-row">
+        <button className={`chip ${view === "active" ? "chip-active" : ""}`} onClick={() => setView("active")}>Active</button>
+        <button className={`chip ${view === "closed" ? "chip-active" : ""}`} onClick={() => setView("closed")}>Closed</button>
+        <span className="hint" style={{ marginLeft: 8 }}>{list.length} · {money(totalOwed)} owed</span>
+      </div>
+
+      {form && (
+        <div className="form-panel">
+          <Field label="Building">
+            <select value={form.buildingId} onChange={e => setForm({ ...form, buildingId: e.target.value, unitId: "", tenantId: "" })}>
+              <option value="">—</option>
+              {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
+            </select>
+          </Field>
+          <Field label="Pick from tenants on file (optional — fills in name and balance)">
+            <select value={form.tenantId || ""} onChange={e => pickTenant(e.target.value)}>
+              <option value="">—</option>
+              {tenantsFor.map(t => <option key={t.id} value={t.id}>{t.name || "(no name)"}{t.movedOut ? " (moved out)" : ""}</option>)}
+            </select>
+          </Field>
+          <Field label="Name"><input value={form.tenantName} onChange={e => setForm({ ...form, tenantName: e.target.value })} /></Field>
+          <Field label="Apt # (optional)">
+            <select value={form.unitId || ""} onChange={e => setForm({ ...form, unitId: e.target.value })}>
+              <option value="">—</option>
+              {unitsFor.map(u => <option key={u.id} value={u.id}>{u.unitNumber}</option>)}
+            </select>
+          </Field>
+          <Field label="Amount owed ($)"><input inputMode="decimal" value={form.amountOwed} onChange={e => setForm({ ...form, amountOwed: e.target.value })} /></Field>
+          <Field label="Date moved out"><input type="date" value={form.movedOutDate || ""} onChange={e => setForm({ ...form, movedOutDate: e.target.value })} /></Field>
+          <Field label="Lawyer handling it"><input value={form.lawyer || ""} onChange={e => setForm({ ...form, lawyer: e.target.value })} /></Field>
+          <Field label="Where it's up to">
+            <CaseStagePicker
+              options={data.caseStageOptions} value={form.stage || ""}
+              onPick={(label) => setForm({ ...form, stage: label })}
+              onAdd={(label) => add("caseStageOptions", { label })}
+              onRemove={(o) => remove("caseStageOptions", o.id)}
+            />
+          </Field>
+          <div className="form-actions">
+            <button className="btn-primary" onClick={submit}>Save</button>
+            <button className="btn-ghost" onClick={() => { setForm(null); setFormOriginal(null); }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {list.length === 0 && <EmptyState text={view === "active" ? "No active collections." : "Nothing closed yet."} />}
+      {list.map(c => {
+        const unit = c.unitId ? data.units.find(u => u.id === c.unitId) : null;
+        const open = openId === c.id;
+        const log = (c.log || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+        const lf = logForm[c.id] || { date: todayISO(), note: "" };
+        return (
+          <div className={`list-card ${highlightId === c.id ? "sheet-row-deeplinked" : ""}`} key={c.id} id={`coll-row-${c.id}`}>
+            <div className="list-card-head" onClick={() => setOpenId(open ? null : c.id)} style={{ cursor: "pointer" }}>
+              <div className="list-card-title">{c.tenantName} <span className="row-muted">— {buildingName(c.buildingId)}{unit ? ` · Apt ${unit.unitNumber}` : ""}</span></div>
+              <span className="pill pill-danger">{money(parseBalance(c.amountOwed))}</span>
+              <IconBtn title="Edit" onClick={(e) => { e.stopPropagation(); openEdit(c); }}><Pencil size={14} /></IconBtn>
+              <IconBtn title={c.archived ? "Reopen" : "Close — paid, settled or written off"} onClick={(e) => { e.stopPropagation(); update("collections", c.id, { archived: !c.archived }); }}><CheckCircle2 size={14} /></IconBtn>
+              <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); if (window.confirm("Delete this collection?")) remove("collections", c.id); }}><Trash2 size={14} /></IconBtn>
+            </div>
+            <div className="list-card-body">
+              <div className="row"><em>Moved out:</em> {c.movedOutDate ? fmtDate(c.movedOutDate) : "—"} · <em>Lawyer:</em> {c.lawyer || "not assigned"}</div>
+              <div className="row"><em>Up to:</em> {c.stage || "not set"}</div>
+            </div>
+            {open && (
+              <div className="list-card-body" style={{ paddingTop: 0 }}>
+                <div className="row"><strong>Where it's up to</strong></div>
+                <CaseStagePicker
+                  options={data.caseStageOptions} value={c.stage || ""}
+                  onPick={(label) => update("collections", c.id, { stage: label })}
+                  onAdd={(label) => add("caseStageOptions", { label })}
+                  onRemove={(o) => remove("caseStageOptions", o.id)}
+                />
+                <div className="row" style={{ marginTop: 10 }}><strong>Log</strong></div>
+                {log.length === 0 && <div className="hint">Nothing logged yet.</div>}
+                {log.map(l => (
+                  <div className="row" key={l.id} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                    <span style={{ minWidth: 90, color: "var(--ink-soft)", fontSize: 12 }}>{fmtDate(l.date)}</span>
+                    <span style={{ flex: 1 }}>{l.note}</span>
+                    <button className="checklist-remove" title="Remove this entry" onClick={() => update("collections", c.id, { log: (c.log || []).filter(x => x.id !== l.id) })}><X size={12} /></button>
+                  </div>
+                ))}
+                <div className="inline-form" style={{ marginTop: 8, flexWrap: "wrap" }}>
+                  <input type="date" value={lf.date} onChange={e => setLogForm({ ...logForm, [c.id]: { ...lf, date: e.target.value } })} />
+                  <input placeholder="What happened…" value={lf.note} onChange={e => setLogForm({ ...logForm, [c.id]: { ...lf, note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLog(c)} />
+                  <button className="btn-ghost" onClick={() => addLog(c)}>Add</button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
