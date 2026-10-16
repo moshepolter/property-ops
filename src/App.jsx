@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-12";
+const APP_BUILD = "sync-fix-13";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -3281,6 +3281,75 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
 
 /* ============================== buildings ============================== */
 
+// Every piece of tenant info in one place — used for an existing tenant (each
+// change saves straight away, sending only that field) and for the new-tenant
+// form on the Buildings tab (changes collect in a draft until Save).
+// Defined outside the editor so typing in an input never remounts it (which
+// would drop focus after every keystroke).
+function TenantFieldBox({ label, children }) {
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12, minWidth: 140, flex: "1 1 150px" }}>
+      <span className="row-muted">{label}</span>{children}
+    </label>
+  );
+}
+
+function TenantInfoEditor({ value: t, onChange }) {
+  const [occName, setOccName] = useState("");
+  const [occPhone, setOccPhone] = useState("");
+  const [occRel, setOccRel] = useState("");
+  const occupants = Array.isArray(t.occupants) ? t.occupants : [];
+  const addOccupant = () => {
+    if (!occName.trim()) return;
+    onChange({ occupants: [...occupants, { id: uid(), name: occName.trim(), phone: occPhone.trim(), relationship: occRel.trim() }] });
+    setOccName(""); setOccPhone(""); setOccRel("");
+  };
+  const box = { border: "1px solid var(--border)", borderRadius: 4 };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, margin: "4px 0" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        <TenantFieldBox label="Name"><input className="sheet-input" style={box} placeholder="Tenant name" value={t.name || ""} onChange={e => onChange({ name: e.target.value })} /></TenantFieldBox>
+        <TenantFieldBox label="Phone"><input className="sheet-input" style={box} type="tel" value={t.phone || ""} onChange={e => onChange({ phone: e.target.value })} /></TenantFieldBox>
+        <TenantFieldBox label="Email"><input className="sheet-input" style={box} type="email" value={t.email || ""} onChange={e => onChange({ email: e.target.value })} /></TenantFieldBox>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        <TenantFieldBox label="Monthly rent ($)"><input className="sheet-input" style={box} inputMode="decimal" value={t.rentAmount || ""} onChange={e => onChange({ rentAmount: e.target.value })} /></TenantFieldBox>
+        <TenantFieldBox label="Balance owed ($)"><input className="sheet-input" style={box} inputMode="decimal" value={t.balance || ""} onChange={e => onChange({ balance: e.target.value })} /></TenantFieldBox>
+        <TenantFieldBox label="Status">
+          <select style={box} value={t.status || "Current"} onChange={e => onChange({ status: e.target.value })}>
+            {RENT_STATUSES.map(st => <option key={st}>{st}</option>)}
+          </select>
+        </TenantFieldBox>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        <TenantFieldBox label="Moved in"><input className="sheet-input" style={box} type="date" value={t.moveInDate || ""} onChange={e => onChange({ moveInDate: e.target.value })} /></TenantFieldBox>
+        <TenantFieldBox label="Lease ends"><input className="sheet-input" style={box} type="date" value={t.leaseEnd || ""} onChange={e => onChange({ leaseEnd: e.target.value })} /></TenantFieldBox>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, flex: "1 1 150px" }}>
+          <input type="checkbox" checked={!!t.movedOut} onChange={e => onChange({ movedOut: e.target.checked })} /> Moved out
+        </label>
+      </div>
+      <div>
+        <div className="row-muted" style={{ fontSize: 12, marginBottom: 2 }}>Other people in the apartment (roommates, family, emergency contact)</div>
+        {occupants.length === 0 && <div className="hint">None added.</div>}
+        {occupants.map(o => (
+          <div key={o.id} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 3 }}>
+            <input className="sheet-input" style={{ ...box, width: 150 }} placeholder="Name" value={o.name || ""} onChange={e => onChange({ occupants: occupants.map(x => x.id === o.id ? { ...x, name: e.target.value } : x) })} />
+            <input className="sheet-input" style={{ ...box, width: 130 }} placeholder="Phone" type="tel" value={o.phone || ""} onChange={e => onChange({ occupants: occupants.map(x => x.id === o.id ? { ...x, phone: e.target.value } : x) })} />
+            <input className="sheet-input" style={{ ...box, width: 130 }} placeholder="Who (spouse, roommate…)" value={o.relationship || ""} onChange={e => onChange({ occupants: occupants.map(x => x.id === o.id ? { ...x, relationship: e.target.value } : x) })} />
+            <button type="button" className="checklist-remove" title="Remove" onClick={() => onChange({ occupants: occupants.filter(x => x.id !== o.id) })}><X size={12} /></button>
+          </div>
+        ))}
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+          <input className="sheet-input" style={{ ...box, width: 150 }} placeholder="Name" value={occName} onChange={e => setOccName(e.target.value)} onKeyDown={e => e.key === "Enter" && addOccupant()} />
+          <input className="sheet-input" style={{ ...box, width: 130 }} placeholder="Phone" type="tel" value={occPhone} onChange={e => setOccPhone(e.target.value)} onKeyDown={e => e.key === "Enter" && addOccupant()} />
+          <input className="sheet-input" style={{ ...box, width: 130 }} placeholder="Who (spouse, roommate…)" value={occRel} onChange={e => setOccRel(e.target.value)} onKeyDown={e => e.key === "Enter" && addOccupant()} />
+          <button type="button" className="btn-ghost" disabled={!occName.trim()} onClick={addOccupant}><Plus size={14} /> Add person</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
   const [form, setForm] = useState(null);
   // The form panel renders once, near the top of the page — not inline with
@@ -3304,15 +3373,15 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
     });
   };
   const [expandedUnit, setExpandedUnit] = useState(null);
-  // Name typed into a unit's "Add tenant" box, keyed by unit id.
-  const [newNameFor, setNewNameFor] = useState({});
+  // The new-tenant form's draft, for whichever unit it's open on.
+  const [draftTenant, setDraftTenant] = useState(null); // { unitId, buildingId, ...fields }
+  const blankDraft = (buildingId, unitId) => ({ unitId, buildingId, name: "", phone: "", email: "", rentAmount: "", balance: "", status: "Current", moveInDate: "", leaseEnd: "", movedOut: false, occupants: [] });
   // Same fields the Rent page's own "Add tenant" creates, so a tenant added here
   // behaves identically everywhere else (rent roll, follow-ups, dashboard).
-  const addTenantToUnit = (buildingId, unitId) => {
-    const name = (newNameFor[unitId] || "").trim();
-    if (!name) return;
-    add("tenants", { buildingId, unitId, name, phone: "", balance: "", rentAmount: "", status: "Current", email: "", notes: [], followUps: [], payments: [] });
-    setNewNameFor(prev => ({ ...prev, [unitId]: "" }));
+  const saveDraftTenant = () => {
+    if (!draftTenant || !(draftTenant.name || "").trim()) return;
+    add("tenants", { ...draftTenant, name: draftTenant.name.trim(), notes: [], followUps: [], payments: [] });
+    setDraftTenant(null);
   };
   const [unitSearch, setUnitSearch] = useState("");
   const [section, setSection] = useState("buildings");
@@ -3652,17 +3721,8 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                           {tenants.length === 0 && <div className="hint">No tenant on file for this unit yet.</div>}
                           {tenants.map(t => (
                             <div key={t.id} className="unit-detail-tenant">
-                              <div className="unit-detail-row" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 2 }}>
-                                <span className="row-muted" style={{ fontSize: 12 }}>Tenant name:</span>
-                                <input
-                                  className="sheet-input" style={{ width: 220, border: "1px solid var(--border)", borderRadius: 4 }}
-                                  placeholder="Tenant name" value={t.name || ""} onChange={e => update("tenants", t.id, { name: e.target.value })}
-                                />
-                                {t.movedOut && <span className="pill pill-warn">Moved Out</span>}
-                              </div>
-                              {t.phone && <div className="unit-detail-row">Phone: {t.phone}</div>}
-                              {t.email && <div className="unit-detail-row">Email: {t.email}</div>}
-                              <div className="unit-detail-row">Balance: {t.balance ? `$${t.balance}` : "—"} · Status: <span className={`pill ${t.status === "Current" ? "pill-ok" : t.status === "Late" ? "pill-warn" : "pill-danger"}`}>{t.status || "Current"}</span></div>
+                              {t.movedOut && <span className="pill pill-warn">Moved Out</span>}
+                              <TenantInfoEditor value={t} onChange={(patch) => update("tenants", t.id, patch)} />
                               {tenantFollowUps(t).length > 0 && (
                                 <div className="unit-detail-row">
                                   Follow-up{tenantFollowUps(t).length > 1 ? "s" : ""}: {tenantFollowUps(t).map(f => `${fmtDate(f.date)}${f.note ? ` — ${f.note}` : ""}`).join("; ")}
@@ -3674,17 +3734,20 @@ function BuildingsTab({ data, add, update, remove, setData, buildingName }) {
                             </div>
                           ))}
                           {!tenants.some(t => !t.movedOut) && (
-                            <div className="unit-detail-row" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
-                              <input
-                                className="sheet-input" style={{ width: 220, border: "1px solid var(--border)", borderRadius: 4 }}
-                                placeholder="Tenant name" value={newNameFor[u.id] || ""}
-                                onChange={e => setNewNameFor(prev => ({ ...prev, [u.id]: e.target.value }))}
-                                onKeyDown={e => e.key === "Enter" && addTenantToUnit(b.id, u.id)}
-                              />
-                              <button className="btn-ghost" disabled={!(newNameFor[u.id] || "").trim()} onClick={() => addTenantToUnit(b.id, u.id)}>
+                            draftTenant && draftTenant.unitId === u.id ? (
+                              <div className="form-panel" style={{ marginTop: 6 }}>
+                                <strong>New tenant</strong>
+                                <TenantInfoEditor value={draftTenant} onChange={(patch) => setDraftTenant(d => ({ ...d, ...patch }))} />
+                                <div className="form-actions">
+                                  <button className="btn-primary" disabled={!(draftTenant.name || "").trim()} onClick={saveDraftTenant}>Save tenant</button>
+                                  <button className="btn-ghost" onClick={() => setDraftTenant(null)}>Cancel</button>
+                                </div>
+                              </div>
+                            ) : (
+                              <button className="btn-ghost" style={{ marginTop: 6 }} onClick={() => setDraftTenant(blankDraft(b.id, u.id))}>
                                 <Plus size={14} /> Add tenant
                               </button>
-                            </div>
+                            )
                           )}
                         </div>
                       )}
