@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-13";
+const APP_BUILD = "sync-fix-14";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -3057,8 +3057,9 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
               <>
                 <Flag date={v.hearingDate} />
                 <div className="followup-item-main">
-                  <div className="followup-item-name">#{v.violationNumber} <span className="row-muted">— {buildingName(v.buildingId)}</span></div>
-                  {v.hearingCompany && <div className="followup-item-note">{v.hearingCompany}</div>}
+                  <div className="followup-item-name">{buildingName(v.buildingId)}{v.unitId ? ` · Apt ${data.units.find(u => u.id === v.unitId)?.unitNumber || ""}` : ""} <span className="row-muted">— #{v.violationNumber}</span></div>
+                  {v.description && <div className="followup-item-note">{summarizeViolationDescription(v.description)}</div>}
+                  {v.hearingCompany && <div className="followup-item-note">Handled by: {v.hearingCompany}</div>}
                 </div>
               </>
             )}
@@ -5827,6 +5828,56 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
         />
       </div>
 
+      {(() => {
+        // Every open violation with a hearing, soonest court date first (no date last),
+        // in one clear list so you don't have to dig through each agency section.
+        const hearings = data.violations
+          .filter(v => v.hasHearing && !isViolationClosed(v) && (buildingFilter === "All" || v.buildingId === buildingFilter))
+          .slice()
+          .sort((a, b) => (a.hearingDate || "9999-99-99").localeCompare(b.hearingDate || "9999-99-99"));
+        if (hearings.length === 0) return null;
+        const jump = (v) => {
+          setAgency("All"); setView("active"); setDueFilter("all"); setSearch("");
+          setExpandedGroups(prev => new Set(prev).add(v.agency));
+          setExpandedRow(v.id); setHighlightViolationId(v.id);
+          setTimeout(() => document.getElementById(`violation-row-${v.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 150);
+          setTimeout(() => setHighlightViolationId(null), 2500);
+        };
+        return (
+          <div className="form-panel" style={{ marginBottom: 12 }}>
+            <div style={{ fontWeight: 700, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+              <Gavel size={15} /> Hearings ({hearings.length}) <span className="row-muted" style={{ fontWeight: 400, fontSize: 12 }}>— in order of court date</span>
+            </div>
+            {hearings.map(v => {
+              const d = v.hearingDate ? daysUntil(v.hearingDate) : null;
+              const dt = v.hearingDate ? new Date(v.hearingDate + "T00:00:00") : null;
+              const tone = d === null ? "var(--ink-soft)" : d < 0 ? "var(--danger)" : d <= 7 ? "var(--warn)" : "var(--navy)";
+              const unit = v.unitId ? data.units.find(u => u.id === v.unitId) : null;
+              return (
+                <div key={v.id} onClick={() => jump(v)} style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "8px 0", borderTop: "1px solid var(--border)", cursor: "pointer" }}>
+                  <div style={{ minWidth: 64, textAlign: "center", color: tone }}>
+                    {dt ? (
+                      <>
+                        <div style={{ fontSize: 11, textTransform: "uppercase" }}>{dt.toLocaleDateString("en-US", { month: "short" })}</div>
+                        <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1 }}>{dt.getDate()}</div>
+                        <div style={{ fontSize: 11 }}>{dt.toLocaleDateString("en-US", { weekday: "short" })}</div>
+                      </>
+                    ) : <div style={{ fontSize: 12, fontWeight: 600 }}>No date</div>}
+                    {d !== null && <div style={{ fontSize: 10, marginTop: 2 }}>{d < 0 ? `${-d}d ago` : d === 0 ? "today" : `in ${d}d`}</div>}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600 }}>{buildingName(v.buildingId)}{unit ? ` · Apt ${unit.unitNumber}` : ""}</div>
+                    <div style={{ fontSize: 13 }}><span className="pill pill-muted" style={{ marginRight: 6 }}>{v.agency}</span>#{v.violationNumber}{v.class ? ` · Class ${v.class}` : ""}</div>
+                    {v.description && <div className="row-muted" style={{ fontSize: 12, marginTop: 2 }}>{summarizeViolationDescription(v.description)}</div>}
+                    {v.hearingCompany && <div style={{ fontSize: 12, marginTop: 2 }}>Handled by: {v.hearingCompany}</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
+
       {data.buildings.length > 1 && (
         <div className="filter-row">
           <button className={`chip ${buildingFilter === "All" ? "chip-active" : ""}`} onClick={() => setBuildingFilter("All")}>All buildings</button>
@@ -6661,7 +6712,23 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
       tenantId: form.tenantId, buildingId: form.buildingId, unitId: form.unitId, caseNumber: form.caseNumber,
       stage: form.stage, nextCourtDate: form.nextCourtDate, result: form.result,
       stipulationTerms: form.stipulationTerms || "", nextPaymentDue: form.nextPaymentDue || "",
+      sentLease: !!form.sentLease, sentLedger: !!form.sentLedger, sentToLawyerDate: form.sentToLawyerDate || "",
     };
+    // Sent the lawyer the lease and/or ledger → a reminder lands on the dashboard
+    // 15 days after the send date to confirm the petition is being started.
+    const newCaseId = form.id || uid();
+    if ((fields.sentLease || fields.sentLedger) && fields.sentToLawyerDate) {
+      const remDate = addDays(fields.sentToLawyerDate, 15);
+      const existingRem = form.petitionReminderId ? (data.quickNotes || []).find(n => n.id === form.petitionReminderId) : null;
+      if (existingRem) {
+        if (!existingRem.done && existingRem.reminderDate !== remDate) update("quickNotes", existingRem.id, { reminderDate: remDate });
+        fields.petitionReminderId = existingRem.id;
+      } else {
+        const qid = uid();
+        add("quickNotes", { id: qid, text: `Confirm petition is being started — ${tenantName(form.tenantId)}, ${buildingName(form.buildingId)}`, date: todayISO(), done: false, reminderDate: remDate, buildingId: form.buildingId });
+        fields.petitionReminderId = qid;
+      }
+    }
     if (form.id) {
       // Only what this form actually changed — "where it's up to" can also be set
       // from the card itself while this form is open, and sending every field
@@ -6670,7 +6737,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
       if (Object.keys(patch).length > 0) update("courtCases", form.id, patch);
     }
     else add("courtCases", {
-      ...fields, archived: false, documents: [],
+      ...fields, id: newCaseId, archived: false, documents: [],
     });
     setForm(null);
   };
@@ -6722,7 +6789,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
               <button className="btn-ghost" style={{ color: "var(--danger)" }} onClick={() => setConfirmingDeleteAll(true)}><Trash2 size={14} /> Delete all</button>
             )
           )}
-          <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", unitId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: "", stipulationTerms: "", nextPaymentDue: "" })}>
+          <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", unitId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: "", stipulationTerms: "", nextPaymentDue: "", sentLease: false, sentLedger: false, sentToLawyerDate: "" })}>
             <Plus size={14} /> Add case
           </button>
         </div>
@@ -6873,6 +6940,20 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
             />
           </Field>
           <Field label="Court date"><input type="date" value={form.nextCourtDate} onChange={e => setForm({ ...form, nextCourtDate: e.target.value })} /></Field>
+          <Field label="Sent to lawyer">
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input type="checkbox" checked={!!form.sentLease} onChange={e => setForm({ ...form, sentLease: e.target.checked, sentToLawyerDate: form.sentToLawyerDate || (e.target.checked ? todayISO() : "") })} /> Lease
+              </label>
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input type="checkbox" checked={!!form.sentLedger} onChange={e => setForm({ ...form, sentLedger: e.target.checked, sentToLawyerDate: form.sentToLawyerDate || (e.target.checked ? todayISO() : "") })} /> Ledger
+              </label>
+              {(form.sentLease || form.sentLedger) && <input type="date" value={form.sentToLawyerDate || ""} onChange={e => setForm({ ...form, sentToLawyerDate: e.target.value })} />}
+            </div>
+            {(form.sentLease || form.sentLedger) && form.sentToLawyerDate && (
+              <div className="hint" style={{ marginTop: 4 }}>A reminder will show on your dashboard on {fmtDate(addDays(form.sentToLawyerDate, 15))} (15 days later) to confirm the petition is being started.</div>
+            )}
+          </Field>
           <Field label="Result">
             <select value={form.result} onChange={e => setForm({ ...form, result: e.target.value })}>
               {COURT_RESULTS.map(r => <option key={r}>{r}</option>)}
@@ -6934,6 +7015,11 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                 <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("courtCases", c.id); }}><Trash2 size={14} /></IconBtn>
               </div>
               <div className="list-card-body">
+                {(c.sentLease || c.sentLedger) && (
+                  <div className="row row-muted" style={{ marginBottom: 6 }}>
+                    Sent to lawyer: {[c.sentLease && "Lease", c.sentLedger && "Ledger"].filter(Boolean).join(" + ")}{c.sentToLawyerDate ? ` on ${fmtDate(c.sentToLawyerDate)} · petition check ${fmtDate(addDays(c.sentToLawyerDate, 15))}` : ""}
+                  </div>
+                )}
                 <div className="row"><strong>Where it's up to</strong></div>
                 <CaseStagePicker
                   options={data.caseStageOptions}
