@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-14";
+const APP_BUILD = "sync-fix-15";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -389,6 +389,17 @@ function flagFor(dateStr) {
 // a missing court date is).
 function dateDue(d) { const days = daysUntil(d); return days === null || days <= 7; }
 function dateDueStrict(d) { const days = daysUntil(d); return days !== null && days <= 7; }
+// Petition check-in date: 21 days after the lease/ledger went to the lawyer; if
+// that lands on a Saturday or Sunday it moves to the following Monday.
+function petitionReminderDate(sentDate) {
+  if (!sentDate) return "";
+  let d = addDays(sentDate, 21);
+  const dow = new Date(d + "T00:00:00").getDay();
+  if (dow === 6) d = addDays(d, 2);
+  else if (dow === 0) d = addDays(d, 1);
+  return d;
+}
+
 function fmtDate(dateStr) {
   if (!dateStr) return "—";
   const d = new Date(dateStr + "T00:00:00");
@@ -6715,10 +6726,10 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
       sentLease: !!form.sentLease, sentLedger: !!form.sentLedger, sentToLawyerDate: form.sentToLawyerDate || "",
     };
     // Sent the lawyer the lease and/or ledger → a reminder lands on the dashboard
-    // 15 days after the send date to confirm the petition is being started.
+    // 21 days after the send date to confirm the petition is being started.
     const newCaseId = form.id || uid();
     if ((fields.sentLease || fields.sentLedger) && fields.sentToLawyerDate) {
-      const remDate = addDays(fields.sentToLawyerDate, 15);
+      const remDate = petitionReminderDate(fields.sentToLawyerDate);
       const existingRem = form.petitionReminderId ? (data.quickNotes || []).find(n => n.id === form.petitionReminderId) : null;
       if (existingRem) {
         if (!existingRem.done && existingRem.reminderDate !== remDate) update("quickNotes", existingRem.id, { reminderDate: remDate });
@@ -6951,7 +6962,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
               {(form.sentLease || form.sentLedger) && <input type="date" value={form.sentToLawyerDate || ""} onChange={e => setForm({ ...form, sentToLawyerDate: e.target.value })} />}
             </div>
             {(form.sentLease || form.sentLedger) && form.sentToLawyerDate && (
-              <div className="hint" style={{ marginTop: 4 }}>A reminder will show on your dashboard on {fmtDate(addDays(form.sentToLawyerDate, 15))} (15 days later) to confirm the petition is being started.</div>
+              <div className="hint" style={{ marginTop: 4 }}>A reminder will show on your dashboard on {fmtDate(petitionReminderDate(form.sentToLawyerDate))} (21 days later, moved to Monday if it lands on a weekend) to confirm the petition is being started.</div>
             )}
           </Field>
           <Field label="Result">
@@ -7017,7 +7028,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
               <div className="list-card-body">
                 {(c.sentLease || c.sentLedger) && (
                   <div className="row row-muted" style={{ marginBottom: 6 }}>
-                    Sent to lawyer: {[c.sentLease && "Lease", c.sentLedger && "Ledger"].filter(Boolean).join(" + ")}{c.sentToLawyerDate ? ` on ${fmtDate(c.sentToLawyerDate)} · petition check ${fmtDate(addDays(c.sentToLawyerDate, 15))}` : ""}
+                    Sent to lawyer: {[c.sentLease && "Lease", c.sentLedger && "Ledger"].filter(Boolean).join(" + ")}{c.sentToLawyerDate ? ` on ${fmtDate(c.sentToLawyerDate)} · petition check ${fmtDate(petitionReminderDate(c.sentToLawyerDate))}` : ""}
                   </div>
                 )}
                 <div className="row"><strong>Where it's up to</strong></div>
