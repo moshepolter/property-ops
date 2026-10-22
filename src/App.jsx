@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-15";
+const APP_BUILD = "sync-fix-16";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -6863,36 +6863,53 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
             <div className="print-subtitle">As of {fmtDate(todayISO())}</div>
           </div>
         </div>
-        <div className="print-stats-row">
-          <div className="print-stat"><div className="print-stat-num">{list.length}</div><div>Total cases</div></div>
-          <div className="print-stat"><div className="print-stat-num">{list.filter(c => c.nextCourtDate).length}</div><div>With a court date</div></div>
-          <div className="print-stat"><div className="print-stat-num">{list.filter(c => c.result === "Stipulation (payment plan)").length}</div><div>Payment plans</div></div>
-        </div>
-        {[...new Set(list.map(c => c.buildingId))].map(bId => {
-          const items = list.filter(c => c.buildingId === bId);
+        {(() => {
+          // Balance comes from the tenant's record; the two newest log entries are the
+          // last two updates entered on the case.
+          const owedOf = (c) => { const t = c.tenantId ? data.tenants.find(x => x.id === c.tenantId) : null; return t ? parseBalance(t.balance) : 0; };
+          const lastTwo = (c) => (c.log || []).map((l, i) => ({ ...l, _i: i })).sort((x, y) => (y.date || "").localeCompare(x.date || "") || y._i - x._i).slice(0, 2);
+          const grand = list.reduce((sum, c) => sum + owedOf(c), 0);
           return (
-            <div className="print-section" key={bId || "unknown"}>
-              <div className="print-section-head">
-                <span>{buildingName(bId)}</span>
-                <span>{items.length} case{items.length === 1 ? "" : "s"}</span>
+            <>
+              <div className="print-stats-row">
+                <div className="print-stat"><div className="print-stat-num">{list.length}</div><div>Total cases</div></div>
+                <div className="print-stat"><div className="print-stat-num">{money(grand)}</div><div>Total owed</div></div>
               </div>
-              <table className="print-table">
-                <thead><tr><th>Tenant</th><th>Case #</th><th>Next court date</th><th>Stage</th><th>Result</th></tr></thead>
-                <tbody>
-                  {items.map(c => (
-                    <tr key={c.id}>
-                      <td>{c.tenantId ? tenantName(c.tenantId) : (c.rawName || "(no tenant matched)")}</td>
-                      <td>{c.caseNumber || "—"}</td>
-                      <td>{c.nextCourtDate ? fmtDate(c.nextCourtDate) : "not set"}</td>
-                      <td>{c.stage || "—"}</td>
-                      <td>{c.result || "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+              {[...new Set(list.map(c => c.buildingId))].map(bId => {
+                const items = list.filter(c => c.buildingId === bId).slice().sort((x, y) => owedOf(y) - owedOf(x));
+                const bTotal = items.reduce((sum, c) => sum + owedOf(c), 0);
+                return (
+                  <div className="print-section" key={bId || "unknown"}>
+                    <div className="print-section-head">
+                      <span>{buildingName(bId)}</span>
+                      <span>{items.length} case{items.length === 1 ? "" : "s"} · {money(bTotal)} owed</span>
+                    </div>
+                    <table className="print-table">
+                      <thead><tr><th style={{ width: "22%" }}>Tenant</th><th style={{ width: "14%", textAlign: "right" }}>Owes</th><th>Last 2 updates</th></tr></thead>
+                      <tbody>
+                        {items.map(c => {
+                          const ups = lastTwo(c);
+                          return (
+                            <tr key={c.id} style={{ breakInside: "avoid" }}>
+                              <td style={{ fontWeight: 600 }}>{c.tenantId ? tenantName(c.tenantId) : (c.rawName || "(no tenant matched)")}</td>
+                              <td className="print-table-amount">{money(owedOf(c))}</td>
+                              <td>
+                                {ups.length === 0
+                                  ? <span style={{ color: "#888" }}>No updates yet</span>
+                                  : ups.map(u => <div key={u.id || u._i} style={{ marginBottom: 3 }}><strong>{fmtDate(u.date)}</strong> — {u.note}</div>)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })}
+              <div className="print-grand-total">Total owed across all cases: {money(grand)}</div>
+            </>
           );
-        })}
+        })()}
         <div className="print-footer">
           <span>Property Ops — Court Cases</span>
           <span>Generated {fmtDate(todayISO())}</span>
