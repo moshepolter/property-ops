@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-16";
+const APP_BUILD = "sync-fix-18";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -6868,6 +6868,11 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
           // last two updates entered on the case.
           const owedOf = (c) => { const t = c.tenantId ? data.tenants.find(x => x.id === c.tenantId) : null; return t ? parseBalance(t.balance) : 0; };
           const lastTwo = (c) => (c.log || []).map((l, i) => ({ ...l, _i: i })).sort((x, y) => (y.date || "").localeCompare(x.date || "") || y._i - x._i).slice(0, 2);
+          const aptOf = (c) => {
+            const t = c.tenantId ? data.tenants.find(x => x.id === c.tenantId) : null;
+            const u = data.units.find(x => x.id === (c.unitId || (t && t.unitId)));
+            return u ? u.unitNumber : "—";
+          };
           const grand = list.reduce((sum, c) => sum + owedOf(c), 0);
           return (
             <>
@@ -6885,12 +6890,13 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                       <span>{items.length} case{items.length === 1 ? "" : "s"} · {money(bTotal)} owed</span>
                     </div>
                     <table className="print-table">
-                      <thead><tr><th style={{ width: "22%" }}>Tenant</th><th style={{ width: "14%", textAlign: "right" }}>Owes</th><th>Last 2 updates</th></tr></thead>
+                      <thead><tr><th style={{ width: "7%" }}>Apt</th><th style={{ width: "20%" }}>Tenant</th><th style={{ width: "14%", textAlign: "right" }}>Owes</th><th>Last 2 updates</th></tr></thead>
                       <tbody>
                         {items.map(c => {
                           const ups = lastTwo(c);
                           return (
                             <tr key={c.id} style={{ breakInside: "avoid" }}>
+                              <td style={{ fontWeight: 600 }}>{aptOf(c)}</td>
                               <td style={{ fontWeight: 600 }}>{c.tenantId ? tenantName(c.tenantId) : (c.rawName || "(no tenant matched)")}</td>
                               <td className="print-table-amount">{money(owedOf(c))}</td>
                               <td>
@@ -7005,7 +7011,9 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
 
       {section === "cases" && list.length === 0 && <EmptyState text={view === "active" ? "No open court cases." : "Nothing closed yet."} />}
       {section === "cases" && list.map(c => {
-        const sortedLog = [...(c.log || [])].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+        // Newest date first; entries sharing a date keep the order they were added in
+      // (the most recently added on top), instead of falling out in arbitrary order.
+      const sortedLog = (c.log || []).map((l, i) => ({ ...l, _i: i })).sort((a, b) => (b.date || "").localeCompare(a.date || "") || b._i - a._i);
         const latestLog = sortedLog[0];
         const isOpen = detailsFor === c.id;
         return (
@@ -7043,21 +7051,6 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                 <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("courtCases", c.id); }}><Trash2 size={14} /></IconBtn>
               </div>
               <div className="list-card-body">
-                {(c.sentLease || c.sentLedger) && (
-                  <div className="row row-muted" style={{ marginBottom: 6 }}>
-                    Sent to lawyer: {[c.sentLease && "Lease", c.sentLedger && "Ledger"].filter(Boolean).join(" + ")}{c.sentToLawyerDate ? ` on ${fmtDate(c.sentToLawyerDate)} · petition check ${fmtDate(petitionReminderDate(c.sentToLawyerDate))}` : ""}
-                  </div>
-                )}
-                <div className="row"><strong>Where it's up to</strong></div>
-                <CaseStagePicker
-                  options={data.caseStageOptions}
-                  value={c.stage || ""}
-                  onPick={(label) => update("courtCases", c.id, { stage: label })}
-                  onAdd={(label) => add("caseStageOptions", { label })}
-                  onRemove={(o) => remove("caseStageOptions", o.id)}
-                />
-              </div>
-              <div className="list-card-body" style={{ paddingTop: 0 }}>
                 <div className="row"><strong>Log</strong></div>
                 {sortedLog.length === 0
                   ? <div className="hint" style={{ marginBottom: 6 }}>Nothing logged yet — add the first entry below, or import from an attorney report.</div>
@@ -7128,6 +7121,21 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                     </div>
                   </div>
                 )}
+              </div>
+              <div className="list-card-body" style={{ paddingTop: 0 }}>
+                {(c.sentLease || c.sentLedger) && (
+                  <div className="row row-muted" style={{ marginBottom: 6 }}>
+                    Sent to lawyer: {[c.sentLease && "Lease", c.sentLedger && "Ledger"].filter(Boolean).join(" + ")}{c.sentToLawyerDate ? ` on ${fmtDate(c.sentToLawyerDate)} · petition check ${fmtDate(petitionReminderDate(c.sentToLawyerDate))}` : ""}
+                  </div>
+                )}
+                <div className="row"><strong>Where it's up to</strong></div>
+                <CaseStagePicker
+                  options={data.caseStageOptions}
+                  value={c.stage || ""}
+                  onPick={(label) => update("courtCases", c.id, { stage: label })}
+                  onAdd={(label) => add("caseStageOptions", { label })}
+                  onRemove={(o) => remove("caseStageOptions", o.id)}
+                />
               </div>
               {c.result === "Stipulation (payment plan)" && (
                 <div className="list-card-body">
@@ -7492,7 +7500,7 @@ function CollectionsTab({ data, add, update, remove, buildingName, deepLink, set
       {list.map(c => {
         const unit = c.unitId ? data.units.find(u => u.id === c.unitId) : null;
         const open = openId === c.id;
-        const log = (c.log || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+        const log = (c.log || []).map((l, i) => ({ ...l, _i: i })).sort((a, b) => (b.date || "").localeCompare(a.date || "") || b._i - a._i);
         const lf = logForm[c.id] || { date: todayISO(), note: "" };
         return (
           <div className={`list-card ${highlightId === c.id ? "sheet-row-deeplinked" : ""}`} key={c.id} id={`coll-row-${c.id}`}>
