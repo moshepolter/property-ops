@@ -40,7 +40,7 @@ import {
   Search, Building2, Users, Wrench, AlertTriangle, Gavel, HardHat, Home, Phone, Mail,
   CalendarClock, ScrollText, MessageSquare, Archive as ArchiveIcon, DollarSign, StickyNote,
   Plus, X, Camera, Download, LayoutDashboard, ChevronDown, ChevronRight, ChevronLeft,
-  Trash2, Pencil, Upload, Menu, Printer, CheckCircle2, Ticket, Siren
+  Trash2, Pencil, Upload, Menu, Printer, CheckCircle2, Ticket, Siren, BellRing
 } from "lucide-react";
 
 /* ============================== constants ============================== */
@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-18";
+const APP_BUILD = "sync-fix-20";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -287,7 +287,7 @@ const emptyData = () => ({
   buildings: [], units: [], tenants: [], vendors: [], workOrders: [],
   violations: [], courtCases: [], inspections: [], appointments: [],
   localLaws: [], bossReminders: [], customAppointmentTypes: [], customInspectionTypes: [],
-  customOtherAgencies: [], quickNotes: [], importHistory: [], caseStageOptions: [], emergencyRepairs: [], collections: [],
+  customOtherAgencies: [], quickNotes: [], importHistory: [], caseStageOptions: [], emergencyRepairs: [], collections: [], smokeCoDetectors: [],
 });
 
 // Every field in emptyData() is an array of records with an id. When a
@@ -2019,6 +2019,7 @@ function PropertyOpsAppInner() {
     { key: "collections", label: "Collections", icon: <DollarSign size={16} /> },
     { key: "inspections", label: "Appointments", icon: <CalendarClock size={16} /> },
     { key: "laws", label: "NYC Local Laws", icon: <ScrollText size={16} /> },
+    { key: "smokeco", label: "Smoke / CO", icon: <BellRing size={16} /> },
     { key: "reminders", label: "Boss Reminders", icon: <MessageSquare size={16} /> },
     { key: "quicknotes", label: "Quick Notes / Reminder", icon: <Pencil size={16} /> },
   ];
@@ -2165,6 +2166,7 @@ function PropertyOpsAppInner() {
             {tab === "court" && <CourtTab data={data} add={add} update={update} remove={remove} setData={setData} tenantName={tenantName} buildingName={buildingName} deepLink={deepLink} setDeepLink={setDeepLink} />}
             {tab === "collections" && <CollectionsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} deepLink={deepLink} setDeepLink={setDeepLink} />}
             {tab === "inspections" && <AppointmentsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} deepLink={deepLink} setDeepLink={setDeepLink} />}
+            {tab === "smokeco" && <SmokeCoTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
             {tab === "laws" && <LocalLawsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
             {tab === "reminders" && <RemindersTab data={data} add={add} update={update} remove={remove} />}
             {tab === "quicknotes" && <QuickNotesTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} deepLink={deepLink} setDeepLink={setDeepLink} />}
@@ -2678,6 +2680,10 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       "Monthly Rent": t.rentAmount || "",
       "Months Behind": (parseBalance(t.rentAmount) > 0 && parseBalance(t.balance) > 0) ? (parseBalance(t.balance) / parseBalance(t.rentAmount)).toFixed(1) : "",
       Status: t.status || "",
+      "Moved In": t.moveInDate ? fmtDate(t.moveInDate) : "",
+      "Lease Ends": t.leaseEnd ? fmtDate(t.leaseEnd) : "",
+      "Moved Out": t.movedOut ? "Yes" : "",
+      "Other People in Apt": (Array.isArray(t.occupants) ? t.occupants : []).map(o => `${o.name || ""}${o.relationship ? ` (${o.relationship})` : ""}${o.phone ? ` ${o.phone}` : ""}`.trim()).join(" | "),
       Notes: (Array.isArray(t.notes) ? t.notes : []).map(n => `${fmtDate(n.date)}: ${n.text}`).join(" | "),
       "Payment History": (Array.isArray(t.payments) ? t.payments : []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(p => `${fmtDate(p.date)}: $${p.amount}${p.note ? ` (${p.note})` : ""}`).join(" | "),
       "Follow-ups": tenantFollowUps(t).map(f => `${fmtDate(f.date)}${f.note ? `: ${f.note}` : ""}`).join(" | "),
@@ -2692,6 +2698,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       Description: v.description || "",
       "Cure Deadline": v.cureDeadline ? fmtDate(v.cureDeadline) : "",
       "Fine Amount": v.fineAmount || "",
+      Hearing: v.hasHearing ? (v.hearingDate ? fmtDate(v.hearingDate) : "Yes (no date)") : "",
       Company: v.company || "",
       Status: v.status || "",
       Vendor: vendorMap[v.vendorId] || "",
@@ -2727,6 +2734,9 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       "Stipulation Terms": c.stipulationTerms || "",
       "Next Payment Due": c.nextPaymentDue ? fmtDate(c.nextPaymentDue) : "",
       Status: c.archived ? "Closed" : "Active",
+      "Sent to Lawyer": [c.sentLease && "Lease", c.sentLedger && "Ledger"].filter(Boolean).join(" + "),
+      "Sent to Lawyer Date": c.sentToLawyerDate ? fmtDate(c.sentToLawyerDate) : "",
+      "Owes (tenant balance)": c.tenantId ? ((data.tenants.find(t => t.id === c.tenantId) || {}).balance || "") : "",
       Log: (c.log || []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(l => `${fmtDate(l.date)}: ${l.note}`).join(" | "),
     })));
 
@@ -2769,6 +2779,41 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       Building: n.buildingId ? (buildingMap[n.buildingId] || "") : "",
       Done: n.done ? "Yes" : "No",
     })));
+
+    addSheet("Emergency Repairs", (data.emergencyRepairs || []).map(e => ({
+      "ERO #": e.eroNumber || "",
+      Building: buildingMap[e.buildingId] || "",
+      Unit: unitMap[e.unitId] || "",
+      "Connected Violations": (e.violationIds || []).map(id => (data.violations.find(v => v.id === id) || {}).violationNumber).filter(Boolean).join(", "),
+      Work: e.description || "",
+      "Handled By": e.vendorId ? (vendorMap[e.vendorId] || "") : (e.handledBy || ""),
+      Issued: e.dateIssued ? fmtDate(e.dateIssued) : "",
+      "Due By": e.dueByDate ? fmtDate(e.dueByDate) : "",
+      "Reached Out to HPD": e.hpdContacted ? (e.hpdContactedDate ? `Yes (${fmtDate(e.hpdContactedDate)})` : "Yes") : "No",
+      Status: e.status || "",
+      Completed: e.completedDate ? fmtDate(e.completedDate) : "",
+      Notes: (e.notes || []).slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)).map(n => `${fmtDate(n.date)}: ${n.text}`).join(" | "),
+    })));
+
+    addSheet("Collections", (data.collections || []).map(c => ({
+      Tenant: c.tenantId ? (tenantMap[c.tenantId] || c.tenantName || "") : (c.tenantName || ""),
+      Building: buildingMap[c.buildingId] || "",
+      Unit: unitMap[c.unitId] || "",
+      "Amount Owed": c.amountOwed || "",
+      "Moved Out": c.movedOutDate ? fmtDate(c.movedOutDate) : "",
+      Lawyer: c.lawyer || "",
+      "Where It's Up To": c.stage || "",
+      Status: c.archived ? "Closed" : "Active",
+      Log: (c.log || []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(l => `${fmtDate(l.date)}: ${l.note}`).join(" | "),
+    })));
+
+    addSheet("Smoke-CO", (data.smokeCoDetectors || []).map(r => ({
+      Building: buildingMap[r.buildingId] || "",
+      Apt: unitMap[r.unitId] || "",
+      "Date Installed": r.installedDate ? fmtDate(r.installedDate) : "",
+    })));
+
+    addSheet("Case Stage Options", (data.caseStageOptions || []).map(o => ({ Option: o.label || "" })));
 
     XLSX.writeFile(wb, `property-ops-backup-${today}.xlsx`);
   };
@@ -6676,7 +6721,8 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
 
   const addLogEntry = (c) => {
     const entry = logForm[c.id];
-    if (!entry || !entry.quickType) return;
+    if (!entry) return;
+    if (!entry.quickType) entry.quickType = "other"; // plain note, no chip picked
     // "Other note" is the one type with no built-in label of its own — it
     // needs actual text typed in, since there's nothing else to log.
     if (entry.quickType === "other" && !(entry.note || "").trim()) return;
@@ -7087,7 +7133,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                     </button>
                   ))}
                 </div>
-                {logForm[c.id]?.quickType && (
+                {(
                   <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
                     {logForm[c.id].quickType === "adjourned" && (
                       <label className="hint" style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -7116,7 +7162,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                     )}
                     <div className="inline-form" style={{ flexWrap: "wrap" }}>
                       <input type="date" value={logForm[c.id]?.date || todayISO()} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], date: e.target.value } })} />
-                      <input placeholder="Any extra detail (optional)…" value={logForm[c.id]?.note || ""} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLogEntry(c)} />
+                      <input placeholder={logForm[c.id]?.quickType && logForm[c.id].quickType !== "other" ? "Any extra detail (optional)…" : "Type a note / update…"} value={logForm[c.id]?.note || ""} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLogEntry(c)} />
                       <button className="btn-ghost" onClick={() => addLogEntry(c)}>Add</button>
                     </div>
                   </div>
@@ -7166,6 +7212,80 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
 }
 
 /* ============================== emergency repair orders (ERO) ============================== */
+
+function SmokeCoTab({ data, add, update, remove, buildingName }) {
+  // Deliberately simple: building, apartment, date installed. Not linked to
+  // tenants and not shown on the Dashboard.
+  const [buildingId, setBuildingId] = useState("");
+  const [unitId, setUnitId] = useState("");
+  const [installed, setInstalled] = useState(todayISO());
+  const [filter, setFilter] = useState("All");
+  const unitsFor = (bid) => data.units.filter(u => u.buildingId === bid).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber));
+  const unitLabel = (id) => data.units.find(u => u.id === id)?.unitNumber || "—";
+  const canAdd = buildingId && unitId && installed;
+  const addOne = () => {
+    if (!canAdd) return;
+    add("smokeCoDetectors", { id: uid(), buildingId, unitId, installedDate: installed });
+    setUnitId(""); // keep building + date so a whole building can be entered quickly
+  };
+  const all = data.smokeCoDetectors || [];
+  const shown = all.filter(r => filter === "All" || r.buildingId === filter);
+  const byBuilding = data.buildings
+    .map(b => ({ b, rows: shown.filter(r => r.buildingId === b.id).sort((x, y) => compareUnits(unitLabel(x.unitId), unitLabel(y.unitId))) }))
+    .filter(g => g.rows.length > 0);
+  return (
+    <div>
+      <div className="page-head">
+        <h1 className="page-title">Smoke / CO Detectors</h1>
+        <div className="page-actions"><PrintButton label="Smoke / CO Detectors" /></div>
+      </div>
+      <div className="form-panel" style={{ marginBottom: 12 }}>
+        <div className="inline-form" style={{ flexWrap: "wrap" }}>
+          <select value={buildingId} onChange={e => { setBuildingId(e.target.value); setUnitId(""); }}>
+            <option value="">Building…</option>
+            {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
+          </select>
+          <select value={unitId} onChange={e => setUnitId(e.target.value)} disabled={!buildingId}>
+            <option value="">Apt…</option>
+            {unitsFor(buildingId).map(u => <option key={u.id} value={u.id}>{u.unitNumber}</option>)}
+          </select>
+          <label className="hint" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            Installed:
+            <input type="date" value={installed} onChange={e => setInstalled(e.target.value)} />
+          </label>
+          <button className="btn-primary" disabled={!canAdd} onClick={addOne}><Plus size={14} /> Add</button>
+        </div>
+      </div>
+      <div className="row" style={{ marginBottom: 10 }}>
+        <select value={filter} onChange={e => setFilter(e.target.value)} style={{ maxWidth: 220 }}>
+          <option value="All">All buildings</option>
+          {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
+        </select>
+      </div>
+      {byBuilding.length === 0 && <EmptyState text="No smoke / CO installs logged yet." />}
+      {byBuilding.map(({ b, rows }) => (
+        <div className="list-card" key={b.id}>
+          <div className="list-card-head">
+            <div className="list-card-title">{shortAddress(b.address)}</div>
+            <span className="pill pill-muted">{rows.length} apt{rows.length === 1 ? "" : "s"}</span>
+          </div>
+          <div className="list-card-body">
+            {rows.map(r => (
+              <div className="row" key={r.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ minWidth: 70 }}><strong>Apt {unitLabel(r.unitId)}</strong></span>
+                <label className="hint" style={{ display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
+                  Installed:
+                  <input type="date" value={r.installedDate || ""} onChange={e => update("smokeCoDetectors", r.id, { installedDate: e.target.value })} />
+                </label>
+                <IconBtn title="Delete" danger onClick={() => { if (window.confirm("Delete this entry?")) remove("smokeCoDetectors", r.id); }}><Trash2 size={14} /></IconBtn>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function EroTab({ data, add, update, remove, buildingName, vendorName, deepLink, setDeepLink }) {
   const [form, setForm] = useState(null);
