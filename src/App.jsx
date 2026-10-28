@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-22";
+const APP_BUILD = "sync-fix-23";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -7698,17 +7698,18 @@ function CollectionsTab({ data, add, update, remove, buildingName, deepLink, set
             <div className="list-card-body">
               <div className="row"><em>Moved out:</em> {c.movedOutDate ? fmtDate(c.movedOutDate) : "—"} · <em>Lawyer:</em> {c.lawyer || "not assigned"}</div>
               <div className="row"><em>Up to:</em> {c.stage || "not set"}</div>
+              {log[0]
+                ? <div className="row"><em>{log[0].date > todayISO() ? "Scheduled" : "Latest"} ({fmtDate(log[0].date)}):</em> {log[0].note}</div>
+                : <div className="hint">No log entries yet.</div>}
+              <div className="inline-form" style={{ marginTop: 6, flexWrap: "wrap" }} onClick={(e) => e.stopPropagation()}>
+                <input type="date" value={lf.date} onChange={e => setLogForm({ ...logForm, [c.id]: { ...lf, date: e.target.value } })} />
+                <input placeholder="Add a note / update…" value={lf.note} onChange={e => setLogForm({ ...logForm, [c.id]: { ...lf, note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLog(c)} />
+                <button className="btn-ghost" onClick={() => addLog(c)}>Add</button>
+              </div>
             </div>
             {open && (
               <div className="list-card-body" style={{ paddingTop: 0 }}>
-                <div className="row"><strong>Where it's up to</strong></div>
-                <CaseStagePicker
-                  options={data.caseStageOptions} value={c.stage || ""}
-                  onPick={(label) => update("collections", c.id, { stage: label })}
-                  onAdd={(label) => add("caseStageOptions", { label })}
-                  onRemove={(o) => remove("caseStageOptions", o.id)}
-                />
-                <div className="row" style={{ marginTop: 10 }}><strong>Log</strong></div>
+                <div className="row"><strong>Log</strong></div>
                 {log.length === 0 && <div className="hint">Nothing logged yet.</div>}
                 {log.map(l => (
                   <div className="row" key={l.id} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
@@ -7717,11 +7718,13 @@ function CollectionsTab({ data, add, update, remove, buildingName, deepLink, set
                     <button className="checklist-remove" title="Remove this entry" onClick={() => update("collections", c.id, { log: (c.log || []).filter(x => x.id !== l.id) })}><X size={12} /></button>
                   </div>
                 ))}
-                <div className="inline-form" style={{ marginTop: 8, flexWrap: "wrap" }}>
-                  <input type="date" value={lf.date} onChange={e => setLogForm({ ...logForm, [c.id]: { ...lf, date: e.target.value } })} />
-                  <input placeholder="What happened…" value={lf.note} onChange={e => setLogForm({ ...logForm, [c.id]: { ...lf, note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLog(c)} />
-                  <button className="btn-ghost" onClick={() => addLog(c)}>Add</button>
-                </div>
+                <div className="row" style={{ marginTop: 10 }}><strong>Where it's up to</strong></div>
+                <CaseStagePicker
+                  options={data.caseStageOptions} value={c.stage || ""}
+                  onPick={(label) => update("collections", c.id, { stage: label })}
+                  onAdd={(label) => add("caseStageOptions", { label })}
+                  onRemove={(o) => remove("caseStageOptions", o.id)}
+                />
               </div>
             )}
           </div>
