@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-20";
+const APP_BUILD = "sync-fix-22";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -2689,6 +2689,34 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       "Follow-ups": tenantFollowUps(t).map(f => `${fmtDate(f.date)}${f.note ? `: ${f.note}` : ""}`).join(" | "),
     })));
 
+    // The Rent Collection page as it appears on screen: one row per tenant, in
+    // building / unit order, with the aging columns, flags and a grand total.
+    const rentRows = data.tenants
+      .slice()
+      .sort((a, b) => {
+        const bi = data.buildings.findIndex(x => x.id === a.buildingId) - data.buildings.findIndex(x => x.id === b.buildingId);
+        return bi || compareUnits(unitMap[a.unitId] || "", unitMap[b.unitId] || "");
+      })
+      .map(t => ({
+        Building: buildingMap[t.buildingId] || "",
+        Unit: unitMap[t.unitId] || "",
+        Tenant: t.name || "",
+        Phone: t.phone || "",
+        Status: t.status || "",
+        "0-30 Days": t.aging ? t.aging.bucket1 : "",
+        "31-60 Days": t.aging ? t.aging.bucket2 : "",
+        "61+ Days": t.aging ? t.aging.bucket61 : "",
+        "Total Owed": parseBalance(t.balance),
+        "In Court": (data.courtCases || []).some(c => c.tenantId === t.id && !c.archived) ? "Yes" : "",
+        "Call Back": t.callBack ? "Yes" : "",
+        "Voucher Program": t.voucherProgram ? "Yes" : "",
+        Notes: (Array.isArray(t.notes) ? t.notes : []).map(n => `${fmtDate(n.date)}: ${n.text}`).join(" | "),
+        "Follow-ups": tenantFollowUps(t).map(f => `${fmtDate(f.date)}${f.note ? `: ${f.note}` : ""}`).join(" | "),
+        "Payment History": (Array.isArray(t.payments) ? t.payments : []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(pm => `${fmtDate(pm.date)}: $${pm.amount}${pm.note ? ` (${pm.note})` : ""}`).join(" | "),
+      }));
+    rentRows.push({ Building: "TOTAL OWED", "Total Owed": rentRows.reduce((sum, r) => sum + (Number(r["Total Owed"]) || 0), 0) });
+    addSheet("Rent Collection", rentRows);
+
     addSheet("Violations", data.violations.map(v => ({
       Building: buildingMap[v.buildingId] || "",
       Unit: unitMap[v.unitId] || "",
@@ -5160,7 +5188,6 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
       setVendorFilter("All");
       setBuildingFilter("All");
       setSearch("");
-      setExpandedRow(target.id);
       setHighlightWoId(target.id);
       setTimeout(() => {
         document.getElementById(`wo-row-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -5179,7 +5206,6 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
     }
     else {
       add("workOrders", form); // form.id was pre-generated when the form opened
-      setExpandedRow(form.id); // so photos/notes can be added immediately, no re-opening needed
     }
     setForm(null);
   };
@@ -5207,7 +5233,19 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
         .some(f => (f || "").toString().toLowerCase().includes(q));
     })
     .slice()
-    .sort((a, b) => (b.dateOpened || "").localeCompare(a.dateOpened || ""));
+    .sort((a, b) => {
+      // Most urgent first: anything tied to a court case, soonest due date on top;
+      // then emergencies/urgent; then newest opened.
+      const ac = (a.isCourtConnected || a.courtCaseId) ? 0 : 1, bc = (b.isCourtConnected || b.courtCaseId) ? 0 : 1;
+      if (ac !== bc) return ac - bc;
+      if (ac === 0) {
+        const d = (a.dueByDate || "9999-99-99").localeCompare(b.dueByDate || "9999-99-99");
+        if (d !== 0) return d;
+      }
+      const pr = (w) => (w.priority === "Emergency" ? 0 : w.priority === "Urgent" ? 1 : 2);
+      if (pr(a) !== pr(b)) return pr(a) - pr(b);
+      return (b.dateOpened || "").localeCompare(a.dateOpened || "");
+    });
 
   const toggleSelected = (id) => {
     setSelected(prev => {
@@ -5417,13 +5455,16 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
           <table className="sheet wo-sheet">
             <thead>
               <tr>
-                <th style={{ width: 28 }}></th>
                 <th>Apt</th>
                 <th>Building</th>
                 <th>Description</th>
                 <th>Vendor</th>
-                <th>Priority / Status</th>
-                <th style={{ width: 150 }}></th>
+                <th>Priority</th>
+                <th>Status</th>
+                <th>Court / Due by</th>
+                <th>Scheduled</th>
+                <th>Notes</th>
+                <th style={{ width: 190 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -5435,33 +5476,52 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
                 const shortDesc = w.items && w.items.length > 0 ? w.items.map(it => it.description).join(", ") : w.description;
                 return (
                   <React.Fragment key={w.id}>
-                    <tr className={`wo-sheet-row ${highlightWoId === w.id ? "sheet-row-deeplinked" : ""}`} id={`wo-row-${w.id}`} onClick={() => setExpandedRow(isOpen ? null : w.id)}>
-                      <td className="wo-sheet-expand">{isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</td>
+                    <tr className={`wo-sheet-row ${highlightWoId === w.id ? "sheet-row-deeplinked" : ""}`} id={`wo-row-${w.id}`}>
                       <td className="wo-sheet-apt" data-label="Apt">{unit ? (unit.unitNumber || "—") : <span className="row-muted">—</span>}</td>
                       <td className="wo-sheet-building" data-label="Building">{buildingName(w.buildingId)}</td>
                       <td className="wo-sheet-desc" data-label="Description">
                         <div className="wo-sheet-desc-text">{shortDesc}</div>
-                        {unitTenant && <div className="wo-sheet-tenant">{unitTenant.name}</div>}
+                        {unitTenant && (
+                          <div className="wo-sheet-tenant">
+                            {unitTenant.name}
+                            {(unitTenant.phone || "").split(";").map(s2 => s2.trim()).filter(Boolean).map((num, i) => (
+                              <a key={i} href={`tel:${num}`} className="wo-tenant-phone" style={{ marginLeft: 6 }}>{num}</a>
+                            ))}
+                          </div>
+                        )}
                       </td>
                       <td className="wo-sheet-vendor" data-label="Vendor">
                         {w.items && w.items.length > 0
                           ? w.items.filter(it => it.vendorId).map(it => <div key={it.id}>{vendorName(it.vendorId)}</div>)
                           : (w.vendorId ? vendorName(w.vendorId) : <span className="row-muted">Unassigned</span>)}
                       </td>
-                      <td className="wo-sheet-status" data-label="Status">
-                        {w.priority !== "Routine" && <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span>}
-                        {view === "active" && w.status !== "Open" && <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>}
-                        {w.courtCaseId && <span className="pill pill-accent"><Gavel size={11} /> Court</span>}
-                        {w.courtCaseId && w.dueByDate && w.status !== "Done" && <Flag date={w.dueByDate} label="due by" />}
-                        {w.scheduledDate && w.status !== "Done" && (() => {
+                      <td data-label="Priority">
+                        {w.priority && w.priority !== "Routine" ? <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span> : <span className="row-muted">Routine</span>}
+                      </td>
+                      <td data-label="Status">
+                        <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>
+                      </td>
+                      <td data-label="Court / Due by">
+                        {(w.courtCaseId || w.isCourtConnected) && <span className="pill pill-accent"><Gavel size={11} /> Court</span>}
+                        {(w.courtCaseId || w.isCourtConnected) && w.dueByDate && w.status !== "Done" && <Flag date={w.dueByDate} label="due by" />}
+                        {!(w.courtCaseId || w.isCourtConnected) && <span className="row-muted">—</span>}
+                      </td>
+                      <td data-label="Scheduled">
+                        {w.scheduledDate && w.status !== "Done" ? (() => {
                           const d = daysUntil(w.scheduledDate);
                           const when = d === 0 ? "today" : d === 1 ? "tomorrow" : scheduleText(w.scheduledDate);
                           return (
                             <span className={`pill ${d < 0 ? "pill-danger" : d === 0 ? "pill-warn" : "pill-accent"}`} title={scheduleText(w.scheduledDate, w.scheduledTime)}>
-                              <CalendarClock size={11} /> {d < 0 ? "Was scheduled " : "Scheduled "}{when}{w.scheduledTime ? ` · ${fmtTime(w.scheduledTime)}` : ""}
+                              <CalendarClock size={11} /> {d < 0 ? "Was " : ""}{when}{w.scheduledTime ? ` · ${fmtTime(w.scheduledTime)}` : ""}
                             </span>
                           );
-                        })()}
+                        })() : <span className="row-muted">—</span>}
+                      </td>
+                      <td data-label="Notes" style={{ fontSize: 12, minWidth: 160 }}>
+                        {sortedNotes.length === 0 ? <span className="row-muted">—</span> : sortedNotes.map((n, i) => (
+                          <div key={i}><span className="row-muted">{fmtDate(n.date)}</span> {n.text}</div>
+                        ))}
+                        {(w.photos || []).length > 0 && <div className="row-muted">{(w.photos || []).length} photo{(w.photos || []).length === 1 ? "" : "s"}</div>}
                       </td>
                       <td className="wo-sheet-actions" onClick={(e) => e.stopPropagation()}>
                         <input type="checkbox" checked={selected.has(w.id)} onChange={() => toggleSelected(w.id)} title="Select for batch copy" />
@@ -5471,6 +5531,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
                           onClick={() => update("workOrders", w.id, { status: w.status === "Done" ? "Open" : "Done" })}
                         ><CheckCircle2 size={14} /></IconBtn>
                         <IconBtn title={w.scheduledDate ? "Scheduled — change or clear" : "Schedule"} onClick={() => openSchedule(w)}><CalendarClock size={14} /></IconBtn>
+                        <IconBtn title="Add note / photos" onClick={() => setExpandedRow(isOpen ? null : w.id)}><StickyNote size={14} /></IconBtn>
                         <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={() => copyOne(w)}><ScrollText size={14} /></IconBtn>
                         <IconBtn title="Edit" onClick={() => { const f = { ...w, isCourtConnected: w.isCourtConnected || !!w.courtCaseId }; setFormOriginal(f); setForm(f); }}><Pencil size={14} /></IconBtn>
                         <IconBtn title="Delete" danger onClick={() => remove("workOrders", w.id)}><Trash2 size={14} /></IconBtn>
@@ -5478,7 +5539,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
                     </tr>
                     {schedulingFor === w.id && (
                       <tr className="wo-sheet-detail-row">
-                        <td colSpan={7}>
+                        <td colSpan={10}>
                           <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "center", margin: 0 }}>
                             <strong>Scheduled for</strong>
                             <input type="date" value={schedDate} onChange={e => setSchedDate(e.target.value)} style={{ flex: "0 0 auto", width: 170 }} />
@@ -5495,7 +5556,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
                     )}
                     {isOpen && (
                       <tr className="wo-sheet-detail-row">
-                        <td colSpan={7}>
+                        <td colSpan={10}>
                           {unitTenant && (
                             <div className="wo-tenant-info">
                               <strong>{unitTenant.name}</strong>
@@ -5529,9 +5590,6 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
                               <button className="btn-primary" onClick={() => addNote(w)}>Save</button>
                             </div>
                           )}
-                          {sortedNotes.map((n, i) => (
-                            <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
-                          ))}
                         </td>
                       </tr>
                     )}
@@ -7135,7 +7193,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                 </div>
                 {(
                   <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
-                    {logForm[c.id].quickType === "adjourned" && (
+                    {logForm[c.id]?.quickType === "adjourned" && (
                       <label className="hint" style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         Adjourned to:
                         <input
@@ -7144,7 +7202,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                         />
                       </label>
                     )}
-                    {logForm[c.id].quickType === "stipulation" && (
+                    {logForm[c.id]?.quickType === "stipulation" && (
                       <>
                         <textarea
                           placeholder="Terms — e.g. $200/month starting 10/1 on top of current rent, for 6 months"
@@ -7162,7 +7220,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                     )}
                     <div className="inline-form" style={{ flexWrap: "wrap" }}>
                       <input type="date" value={logForm[c.id]?.date || todayISO()} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], date: e.target.value } })} />
-                      <input placeholder={logForm[c.id]?.quickType && logForm[c.id].quickType !== "other" ? "Any extra detail (optional)…" : "Type a note / update…"} value={logForm[c.id]?.note || ""} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLogEntry(c)} />
+                      <input placeholder={logForm[c.id]?.quickType && logForm[c.id]?.quickType !== "other" ? "Any extra detail (optional)…" : "Type a note / update…"} value={logForm[c.id]?.note || ""} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLogEntry(c)} />
                       <button className="btn-ghost" onClick={() => addLogEntry(c)}>Add</button>
                     </div>
                   </div>
@@ -7230,9 +7288,9 @@ function SmokeCoTab({ data, add, update, remove, buildingName }) {
   };
   const all = data.smokeCoDetectors || [];
   const shown = all.filter(r => filter === "All" || r.buildingId === filter);
-  const byBuilding = data.buildings
-    .map(b => ({ b, rows: shown.filter(r => r.buildingId === b.id).sort((x, y) => compareUnits(unitLabel(x.unitId), unitLabel(y.unitId))) }))
-    .filter(g => g.rows.length > 0);
+  // Spreadsheet order: by building (in the order buildings are listed), then apartment.
+  const bIndex = (id) => data.buildings.findIndex(b => b.id === id);
+  const sortedRows = shown.slice().sort((x, y) => (bIndex(x.buildingId) - bIndex(y.buildingId)) || compareUnits(unitLabel(x.unitId), unitLabel(y.unitId)));
   return (
     <div>
       <div className="page-head">
@@ -7262,27 +7320,33 @@ function SmokeCoTab({ data, add, update, remove, buildingName }) {
           {data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}
         </select>
       </div>
-      {byBuilding.length === 0 && <EmptyState text="No smoke / CO installs logged yet." />}
-      {byBuilding.map(({ b, rows }) => (
-        <div className="list-card" key={b.id}>
-          <div className="list-card-head">
-            <div className="list-card-title">{shortAddress(b.address)}</div>
-            <span className="pill pill-muted">{rows.length} apt{rows.length === 1 ? "" : "s"}</span>
-          </div>
-          <div className="list-card-body">
-            {rows.map(r => (
-              <div className="row" key={r.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ minWidth: 70 }}><strong>Apt {unitLabel(r.unitId)}</strong></span>
-                <label className="hint" style={{ display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
-                  Installed:
-                  <input type="date" value={r.installedDate || ""} onChange={e => update("smokeCoDetectors", r.id, { installedDate: e.target.value })} />
-                </label>
-                <IconBtn title="Delete" danger onClick={() => { if (window.confirm("Delete this entry?")) remove("smokeCoDetectors", r.id); }}><Trash2 size={14} /></IconBtn>
-              </div>
-            ))}
-          </div>
+      {shown.length === 0 && <EmptyState text="No smoke / CO installs logged yet." />}
+      {shown.length > 0 && (
+        <div className="sheet-wrap">
+          <table className="sheet">
+            <thead>
+              <tr>
+                <th>Building</th>
+                <th>Apt</th>
+                <th>Date installed</th>
+                <th style={{ width: 40 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedRows.map(r => (
+                <tr key={r.id}>
+                  <td data-label="Building" style={{ fontWeight: 600 }}>{buildingName(r.buildingId)}</td>
+                  <td data-label="Apt">{unitLabel(r.unitId)}</td>
+                  <td data-label="Date installed">{r.installedDate ? fmtDate(r.installedDate) : ""}</td>
+                  <td style={{ textAlign: "center" }}>
+                    <IconBtn title="Delete this row" danger onClick={() => { if (window.confirm("Delete this entry?")) remove("smokeCoDetectors", r.id); }}><Trash2 size={14} /></IconBtn>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
-      ))}
+      )}
     </div>
   );
 }
@@ -8381,7 +8445,7 @@ function Styles() {
       }
       .sheet-row-selected td { background: transparent; }
 
-      .wo-sheet-row { cursor: pointer; }
+      .wo-sheet-row { cursor: default; }
       .wo-sheet-row:nth-child(even) { background: var(--bg); }
       .wo-sheet-row:hover { background: #E8F0FE; }
       .wo-sheet-row td { padding: 10px 12px; vertical-align: top; }
