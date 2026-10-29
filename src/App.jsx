@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-23";
+const APP_BUILD = "sync-fix-24";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -423,6 +423,16 @@ function isInFollowUpWindow(dateStr) {
 // Tenants can now have several follow-ups instead of just one. Old records
 // only had followUpDate/followUpNote — read those in as a single-item list
 // so nothing already saved gets lost.
+// Notes newest first: by date, then by the moment each was added, then by
+// position in the list — so several notes added the same day always show the
+// one added last on top, even for older notes saved without a timestamp.
+function newestFirst(notes) {
+  return (Array.isArray(notes) ? notes : [])
+    .map((n, i) => ({ n, i }))
+    .sort((a, b) => (b.n.date || "").localeCompare(a.n.date || "") || ((b.n.timestamp || 0) - (a.n.timestamp || 0)) || (b.i - a.i))
+    .map(x => x.n);
+}
+
 function tenantFollowUps(t) {
   if (Array.isArray(t.followUps)) return t.followUps;
   // Every tenant on the old single-follow-up format used to get the exact same
@@ -5470,7 +5480,7 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
             <tbody>
               {list.map(w => {
                 const isOpen = expandedRow === w.id;
-                const sortedNotes = [...(w.notes || [])].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+                const sortedNotes = newestFirst(w.notes);
                 const unit = w.unitId ? data.units.find(u => u.id === w.unitId) : null;
                 const unitTenant = w.unitId ? data.tenants.find(t => t.unitId === w.unitId && !t.movedOut) : null;
                 const shortDesc = w.items && w.items.length > 0 ? w.items.map(it => it.description).join(", ") : w.description;
@@ -5892,7 +5902,7 @@ function ViolationsTab({ data, add, update, remove, buildingName, vendorName, se
                 <button className="btn-primary" onClick={() => addNote(v)}>Save</button>
               </div>
             )}
-            {[...(v.notes || [])].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).map((n, i) => (
+            {newestFirst(v.notes).map((n, i) => (
               <div key={i} className="row row-muted">{fmtDate(n.date)} — {n.text}</div>
             ))}
           </div>
@@ -7525,7 +7535,7 @@ function EroTab({ data, add, update, remove, buildingName, vendorName, deepLink,
               </div>
               <div className="row" style={{ marginTop: 6 }}><strong>Notes</strong></div>
               {(e.notes || []).length === 0 && <div className="hint">No notes yet.</div>}
-              {(e.notes || []).slice().sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).map((n, i) => (
+              {newestFirst(e.notes).map((n, i) => (
                 <div className="row row-muted" key={n.id || i} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                   <span style={{ minWidth: 90, fontSize: 12 }}>{fmtDate(n.date)}</span>
                   <span style={{ flex: 1 }}>{n.text}</span>
@@ -7698,9 +7708,14 @@ function CollectionsTab({ data, add, update, remove, buildingName, deepLink, set
             <div className="list-card-body">
               <div className="row"><em>Moved out:</em> {c.movedOutDate ? fmtDate(c.movedOutDate) : "—"} · <em>Lawyer:</em> {c.lawyer || "not assigned"}</div>
               <div className="row"><em>Up to:</em> {c.stage || "not set"}</div>
-              {log[0]
-                ? <div className="row"><em>{log[0].date > todayISO() ? "Scheduled" : "Latest"} ({fmtDate(log[0].date)}):</em> {log[0].note}</div>
-                : <div className="hint">No log entries yet.</div>}
+              {log.length === 0 && <div className="hint">No log entries yet.</div>}
+              {log.map(l => (
+                <div className="row" key={l.id} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                  <span style={{ minWidth: 90, color: "var(--ink-soft)", fontSize: 12 }}>{fmtDate(l.date)}</span>
+                  <span style={{ flex: 1 }}>{l.date > todayISO() && <span className="pill pill-warn" style={{ marginRight: 6, fontSize: 10 }}>Scheduled</span>}{l.note}</span>
+                  <button className="checklist-remove" title="Remove this entry" onClick={(ev) => { ev.stopPropagation(); update("collections", c.id, { log: (c.log || []).filter(x => x.id !== l.id) }); }}><X size={12} /></button>
+                </div>
+              ))}
               <div className="inline-form" style={{ marginTop: 6, flexWrap: "wrap" }} onClick={(e) => e.stopPropagation()}>
                 <input type="date" value={lf.date} onChange={e => setLogForm({ ...logForm, [c.id]: { ...lf, date: e.target.value } })} />
                 <input placeholder="Add a note / update…" value={lf.note} onChange={e => setLogForm({ ...logForm, [c.id]: { ...lf, note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLog(c)} />
@@ -7709,15 +7724,6 @@ function CollectionsTab({ data, add, update, remove, buildingName, deepLink, set
             </div>
             {open && (
               <div className="list-card-body" style={{ paddingTop: 0 }}>
-                <div className="row"><strong>Log</strong></div>
-                {log.length === 0 && <div className="hint">Nothing logged yet.</div>}
-                {log.map(l => (
-                  <div className="row" key={l.id} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                    <span style={{ minWidth: 90, color: "var(--ink-soft)", fontSize: 12 }}>{fmtDate(l.date)}</span>
-                    <span style={{ flex: 1 }}>{l.note}</span>
-                    <button className="checklist-remove" title="Remove this entry" onClick={() => update("collections", c.id, { log: (c.log || []).filter(x => x.id !== l.id) })}><X size={12} /></button>
-                  </div>
-                ))}
                 <div className="row" style={{ marginTop: 10 }}><strong>Where it's up to</strong></div>
                 <CaseStagePicker
                   options={data.caseStageOptions} value={c.stage || ""}
