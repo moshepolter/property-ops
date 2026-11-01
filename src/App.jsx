@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 // PDF upload support for RIS reports. Requires: npm install pdfjs-dist
@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-24";
+const APP_BUILD = "sync-fix-26";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -389,6 +389,18 @@ function flagFor(dateStr) {
 // a missing court date is).
 function dateDue(d) { const days = daysUntil(d); return days === null || days <= 7; }
 function dateDueStrict(d) { const days = daysUntil(d); return days !== null && days <= 7; }
+// A date that lands on a Saturday or Sunday moves to the following Monday.
+function nextWeekdayISO(d) {
+  if (!d) return "";
+  const dow = new Date(d + "T00:00:00").getDay();
+  if (dow === 6) return addDays(d, 2);
+  if (dow === 0) return addDays(d, 1);
+  return d;
+}
+// The day after a payment is due: follow up with the attorney on whether the tenant paid.
+function paymentFollowUpDate(due) { return due ? nextWeekdayISO(addDays(due, 1)) : ""; }
+// Two weeks after the petition was served: has the tenant answered / start a default judgment.
+function defaultJudgmentReminderDate(servedDate) { return servedDate ? nextWeekdayISO(addDays(servedDate, 14)) : ""; }
 // Petition check-in date: 21 days after the lease/ledger went to the lawyer; if
 // that lands on a Saturday or Sunday it moves to the following Monday.
 function petitionReminderDate(sentDate) {
@@ -2276,7 +2288,7 @@ function SearchResults({ results, buildingName, onClose, setTab }) {
 
 const TAB_LABELS = {
   rent: "Rent Collection", violations: "Violations", court: "Court Cases",
-  ero: "Emergency Repairs", collections: "Collections", inspections: "Appointments", quicknotes: "Quick Notes / Reminder",
+  ero: "Emergency Repairs", collections: "Collections", inspections: "Appointments", quicknotes: "Quick Notes / Reminder", dashboard: "Dashboard",
 };
 
 function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, extraAction, limit = 8 }) {
@@ -2332,6 +2344,14 @@ function allDatedItems(data, tenantName, buildingName) {
       items.push({ key: `cl-${c.id}-${l.id}`, targetId: c.id, date: l.date, type: "Court note", label: tenantName(c.tenantId), note: l.note, sub: buildingName(c.buildingId), tab: "court" });
     });
     if (c.result === "Stipulation (payment plan)" && c.nextPaymentDue) items.push({ key: `p-${c.id}`, date: c.nextPaymentDue, type: "Payment due", label: tenantName(c.tenantId), sub: buildingName(c.buildingId), tab: "court" });
+    // The day after a payment is due: follow up with the attorney on whether the tenant paid.
+    if (c.result === "Stipulation (payment plan)" && c.nextPaymentDue && c.payFollowDismissed !== c.nextPaymentDue) {
+      items.push({ key: `pf-${c.id}`, targetId: c.id, date: paymentFollowUpDate(c.nextPaymentDue), type: "Payment follow-up", label: tenantName(c.tenantId), note: `Follow up with the attorney — did the tenant pay (due ${fmtDate(c.nextPaymentDue)})?`, sub: buildingName(c.buildingId), tab: "court" });
+    }
+    // Kept after the due date itself was checked off the dashboard.
+    if (c.payFollowUpDate) {
+      items.push({ key: `pfs-${c.id}`, targetId: c.id, date: c.payFollowUpDate, type: "Payment follow-up", label: tenantName(c.tenantId), note: "Follow up with the attorney — did the tenant pay?", sub: buildingName(c.buildingId), tab: "court" });
+    }
   });
   (data.emergencyRepairs || []).forEach(e => {
     if (e.status !== "Completed" && e.dueByDate) {
@@ -2358,7 +2378,19 @@ function allDatedItems(data, tenantName, buildingName) {
       items.push({ key: `n-${n.id}`, date: n.reminderDate, type: "Reminder", label: n.text, sub: n.buildingId ? buildingName(n.buildingId) : "", tab: "quicknotes" });
     }
   });
-  return items;
+  // Anything scheduled for a Saturday gets a second reminder on the Monday after.
+  const weekend = [];
+  items.forEach(i => {
+    if (!i.date) return;
+    const dt0 = new Date(i.date + "T00:00:00");
+    if (isNaN(dt0) || dt0.getDay() !== 6) return;
+    weekend.push({
+      ...i, key: `sat-${i.key}`, targetId: i.targetId || i.key.slice(i.key.indexOf("-") + 1),
+      date: addDays(i.date, 2), type: "Weekend reminder",
+      note: `Was scheduled for Saturday ${fmtDate(i.date)} — ${i.type}${i.note ? `: ${i.note}` : ""}`,
+    });
+  });
+  return items.concat(weekend);
 }
 
 function monthGridDays(refDate) {
@@ -2619,13 +2651,16 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
     data.tenants.some(other => other.unitId === t.unitId && other.movedOut)
   );
 
+  const allDated = allDatedItems(data, tenantName, buildingName);
+  // Saturday items reminded on the Monday itself, and payment follow-ups with the attorney.
+  const weekendItems = allDated.filter(i => i.type === "Weekend reminder" && i.date === today);
+  const payFollowItems = allDated.filter(i => i.type === "Payment follow-up" && i.date <= today).sort((a, b) => a.date.localeCompare(b.date));
   const rentPanelCount = overdueTenants.length + allFollowUps;
   const totalViolationsDue = violationAgencyGroups.reduce((sum, g) => sum + g.items.length, 0);
-  const totalAttention = rentPanelCount + recurringItems.length + appointmentItems.length + quickNoteItems.length + totalViolationsDue + bossReminderItems.length + hearingItems.length + eroItems.length + collectionItems.length;
+  const totalAttention = rentPanelCount + recurringItems.length + appointmentItems.length + quickNoteItems.length + totalViolationsDue + bossReminderItems.length + hearingItems.length + eroItems.length + collectionItems.length + weekendItems.length + payFollowItems.length;
 
   // Top stat row + follow-up roster
-  const allDated = allDatedItems(data, tenantName, buildingName);
-  const overdueCount = allDated.filter(i => i.date < today && i.type !== "Follow-up").length;
+  const overdueCount = allDated.filter(i => i.date < today && i.type !== "Follow-up" && i.type !== "Weekend reminder").length;
   // Each item type in the Overdue list is a different kind of record with
   // its own notion of "done" — a violation's cure deadline is cleared by
   // marking it certified/resolved, a hearing by clearing the hearing flag,
@@ -2642,8 +2677,16 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       update("violations", id, { hasHearing: false });
     } else if (item.key.startsWith("c-")) {
       update("courtCases", id, { nextCourtDate: "" });
+    } else if (item.key.startsWith("pfs-")) {
+      update("courtCases", id, { payFollowUpDate: "" });
+    } else if (item.key.startsWith("pf-")) {
+      const cc = rawData.courtCases.find(x => x.id === id);
+      if (cc) update("courtCases", id, { payFollowDismissed: cc.nextPaymentDue || "" });
     } else if (item.key.startsWith("p-")) {
-      update("courtCases", id, { nextPaymentDue: "" });
+      // Clearing the due date keeps the "follow up with the attorney" reminder alive.
+      const cc = rawData.courtCases.find(x => x.id === id);
+      const keep = cc && cc.nextPaymentDue && cc.payFollowDismissed !== cc.nextPaymentDue ? paymentFollowUpDate(cc.nextPaymentDue) : "";
+      update("courtCases", id, { nextPaymentDue: "", ...(keep ? { payFollowUpDate: keep } : {}) });
     } else if (item.key.startsWith("a-")) {
       update("appointments", id, { completed: true });
     } else if (item.key.startsWith("n-")) {
@@ -2774,6 +2817,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       Status: c.archived ? "Closed" : "Active",
       "Sent to Lawyer": [c.sentLease && "Lease", c.sentLedger && "Ledger"].filter(Boolean).join(" + "),
       "Sent to Lawyer Date": c.sentToLawyerDate ? fmtDate(c.sentToLawyerDate) : "",
+      "Petition Served": c.petitionServed ? (c.petitionServedDate ? fmtDate(c.petitionServedDate) : "Yes") : "",
       "Owes (tenant balance)": c.tenantId ? ((data.tenants.find(t => t.id === c.tenantId) || {}).balance || "") : "",
       Log: (c.log || []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(l => `${fmtDate(l.date)}: ${l.note}`).join(" | "),
     })));
@@ -3016,9 +3060,9 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       {statOpen && (
         <div className="dash-stat-detail">
           {statOpen === "overdue" && (
-            allDated.filter(i => i.date < today && i.type !== "Follow-up").length === 0
+            allDated.filter(i => i.date < today && i.type !== "Follow-up" && i.type !== "Weekend reminder").length === 0
               ? <div className="hint">Nothing overdue.</div>
-              : allDated.filter(i => i.date < today && i.type !== "Follow-up").sort((a, b) => a.date.localeCompare(b.date)).map(item => (
+              : allDated.filter(i => i.date < today && i.type !== "Follow-up" && i.type !== "Weekend reminder").sort((a, b) => a.date.localeCompare(b.date)).map(item => (
                 <div key={item.key} className="dash-detail-item" onClick={() => goTo(item.tab, item.targetId || item.key.slice(item.key.indexOf("-") + 1))}>
                   <span className="pill pill-danger">{item.type}</span>
                   <div className="followup-item-main">
@@ -3113,6 +3157,36 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
         <div className="all-clear"><CheckCircle2 size={18} /> Nothing needs attention right now.</div>
       ) : (
         <>
+
+          {weekendItems.length > 0 && (
+            <AttentionPanel
+              icon={<CalendarClock size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
+              label={<>Scheduled for Saturday <span className="dash-panel-sub">(reminder for today)</span></>} items={weekendItems} tab="dashboard" setTab={setTab}
+              itemKey={i => i.key}
+              renderItem={i => (
+                <div className="followup-item-main" style={{ cursor: "pointer" }} onClick={() => goTo(i.tab, i.targetId)}>
+                  <div className="followup-item-name">{i.label}{i.sub ? <span className="row-muted"> — {i.sub}</span> : null}</div>
+                  {i.note && <div className="followup-item-note">{i.note}</div>}
+                </div>
+              )}
+            />
+          )}
+
+          <AttentionPanel
+            icon={<Gavel size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
+            label={<>Payment follow-ups with the attorney <span className="dash-panel-sub">(day after a payment was due)</span></>} items={payFollowItems} tab="court" setTab={setTab}
+            itemKey={i => i.key}
+            renderItem={i => (
+              <>
+                <Flag date={i.date} />
+                <div className="followup-item-main" style={{ cursor: "pointer" }} onClick={() => goTo("court", i.targetId)}>
+                  <div className="followup-item-name">{i.label}{i.sub ? <span className="row-muted"> — {i.sub}</span> : null}</div>
+                  {i.note && <div className="followup-item-note">{i.note}</div>}
+                </div>
+                <IconBtn title="Done — followed up" onClick={() => completeDatedItem(i)}><CheckCircle2 size={14} /></IconBtn>
+              </>
+            )}
+          />
 
           {violationAgencyGroups.length > 0 && (
             <div className="followup-panel">
@@ -5151,6 +5225,35 @@ function ImportSection({ data, setData, buildingName, allowedTypes }) {
 
 /* ============================== work orders ============================== */
 
+// One cell of the Work Orders spreadsheet: you just type in it. The change is
+// saved when you click away or press Enter (Shift+Enter = new line in a text
+// cell). onCommit may return false to say "that didn't match anything" — the
+// cell then flashes red and goes back to what it was.
+function WoCell({ value, onCommit, type = "text", multiline = false, placeholder = "", align, narrow }) {
+  const [v, setV] = useState(value ?? "");
+  const [focus, setFocus] = useState(false);
+  const [bad, setBad] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => { if (!focus) setV(value ?? ""); }, [value, focus]);
+  useLayoutEffect(() => {
+    if (multiline && ref.current) { ref.current.style.height = "auto"; ref.current.style.height = ref.current.scrollHeight + "px"; }
+  }, [v, multiline]);
+  const commit = () => {
+    setFocus(false);
+    if (v === (value ?? "")) return;
+    const ok = onCommit(v);
+    if (ok === false) { setV(value ?? ""); setBad(true); setTimeout(() => setBad(false), 1400); }
+  };
+  const common = {
+    ref, value: v, placeholder, className: `wo-cell${bad ? " wo-cell-bad" : ""}`,
+    onChange: e => setV(e.target.value), onFocus: () => setFocus(true), onBlur: commit,
+    style: { textAlign: align, minWidth: narrow },
+  };
+  return multiline
+    ? <textarea rows={1} {...common} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.currentTarget.blur(); } }} />
+    : <input type={type} {...common} onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }} />;
+}
+
 function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, tenantName, deepLink, setDeepLink }) {
   const [form, setForm] = useState(null);
   const [view, setView] = useState("active");
@@ -5187,6 +5290,48 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
     update("workOrders", w.id, { scheduledDate: "", scheduledTime: "" });
     setSchedulingFor(null);
   };
+
+  // Typing-based lookups for the spreadsheet cells.
+  const norm = (x) => String(x || "").trim().toLowerCase();
+  const findBuildingByText = (t) => {
+    const q = norm(t); if (!q) return null;
+    const exact = data.buildings.find(b => norm(buildingName(b.id)) === q || norm(shortAddress(b.address)) === q || norm(b.address) === q);
+    if (exact) return exact;
+    const hits = data.buildings.filter(b => norm(b.address).includes(q) || norm(buildingName(b.id)).includes(q));
+    return hits.length === 1 ? hits[0] : (hits.length > 1 ? hits.find(b => norm(b.address).startsWith(q)) || null : null);
+  };
+  const findUnitByText = (buildingId, t) => {
+    const q = norm(t).replace(/^(apt|apartment|unit|#)\s*/, "");
+    return data.units.find(u => u.buildingId === buildingId && norm(u.unitNumber) === q) || null;
+  };
+  const findVendorByText = (t) => {
+    const q = norm(t); if (!q) return null;
+    const exact = data.vendors.find(v => norm(v.name) === q);
+    if (exact) return exact;
+    const hits = data.vendors.filter(v => norm(v.name).includes(q));
+    return hits.length === 1 ? hits[0] : null;
+  };
+  const blankRow = () => ({ apt: "", building: buildingFilter !== "All" ? buildingName(buildingFilter) : "", description: "", vendor: "", priority: "", due: "", court: false });
+  const [newRow, setNewRow] = useState(blankRow);
+  const [newRowError, setNewRowError] = useState("");
+  const addNewRow = () => {
+    if (!newRow.description.trim()) { setNewRowError("Type a description"); return; }
+    const b = findBuildingByText(newRow.building);
+    if (!b) { setNewRowError("Building not found"); return; }
+    let unitId = "";
+    if (newRow.apt.trim()) { const u = findUnitByText(b.id, newRow.apt); if (!u) { setNewRowError("Apt not found in that building"); return; } unitId = u.id; }
+    let vendorId = "";
+    if (newRow.vendor.trim()) { const v = findVendorByText(newRow.vendor); if (!v) { setNewRowError("Vendor not found"); return; } vendorId = v.id; }
+    let priority = "Routine";
+    if (newRow.priority.trim()) { const p = WO_PRIORITIES.find(x => x.toLowerCase().startsWith(newRow.priority.trim().toLowerCase())); if (!p) { setNewRowError("Priority: Routine, Urgent or Emergency"); return; } priority = p; }
+    add("workOrders", {
+      id: uid(), buildingId: b.id, unitId, vendorId, description: newRow.description.trim(), status: "Open", priority,
+      dateOpened: todayISO(), isCourtConnected: !!newRow.court, courtCaseId: "", dueByDate: newRow.due || "", accessDate: "", accessGranted: null, items: [],
+    });
+    setNewRow({ ...blankRow(), building: newRow.building });
+    setNewRowError("");
+  };
+  const newRowKey = (e) => { if (e.key === "Enter") addNewRow(); };
 
   useEffect(() => {
     if (!deepLink || deepLink.tab !== "workorders") return;
@@ -5459,157 +5604,185 @@ function WorkOrdersTab({ data, add, update, remove, buildingName, vendorName, te
         </div>
       )}
 
-      {list.length === 0 && <EmptyState text={view === "active" ? "No open work orders here." : "Nothing marked done yet."} />}
-      {list.length > 0 && (
-        <div className="sheet-wrap wo-sheet-wrap">
-          <table className="sheet wo-sheet">
-            <thead>
-              <tr>
-                <th>Apt</th>
-                <th>Building</th>
-                <th>Description</th>
-                <th>Vendor</th>
-                <th>Priority</th>
-                <th>Status</th>
-                <th>Court / Due by</th>
-                <th>Scheduled</th>
-                <th>Notes</th>
-                <th style={{ width: 190 }}></th>
+      {list.length === 0 && view !== "active" && <EmptyState text="Nothing marked done yet." />}
+      <div className="hint" style={{ marginBottom: 6 }}>Just type in any cell — it saves when you click away or press Enter. Building, apt and vendor can be typed as a few letters of the name.</div>
+      <div className="sheet-wrap wo-sheet-wrap">
+        <table className="sheet wo-sheet">
+          <thead>
+            <tr>
+              <th>Apt</th>
+              <th>Building</th>
+              <th>Description</th>
+              <th>Vendor</th>
+              <th>Priority</th>
+              <th>Status</th>
+              <th>Court</th>
+              <th>Due by</th>
+              <th>Scheduled</th>
+              <th>Notes</th>
+              <th style={{ width: 170 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {view === "active" && (
+              <tr className="wo-sheet-row wo-new-row">
+                <td className="wo-edit" data-label="Apt"><input className="wo-cell" placeholder="Apt" value={newRow.apt} onChange={e => setNewRow({ ...newRow, apt: e.target.value })} onKeyDown={newRowKey} /></td>
+                <td className="wo-edit" data-label="Building"><input className="wo-cell" placeholder="Building" value={newRow.building} onChange={e => setNewRow({ ...newRow, building: e.target.value })} onKeyDown={newRowKey} /></td>
+                <td className="wo-edit" data-label="Description"><input className="wo-cell" placeholder="New work order — type here" value={newRow.description} onChange={e => setNewRow({ ...newRow, description: e.target.value })} onKeyDown={newRowKey} /></td>
+                <td className="wo-edit" data-label="Vendor"><input className="wo-cell" placeholder="Vendor" value={newRow.vendor} onChange={e => setNewRow({ ...newRow, vendor: e.target.value })} onKeyDown={newRowKey} /></td>
+                <td className="wo-edit" data-label="Priority"><input className="wo-cell" placeholder="Routine" value={newRow.priority} onChange={e => setNewRow({ ...newRow, priority: e.target.value })} onKeyDown={newRowKey} /></td>
+                <td className="wo-edit" data-label="Status"><span className="row-muted" style={{ padding: "8px 10px", display: "block" }}>Open</span></td>
+                <td className="wo-edit" data-label="Court"><input type="checkbox" style={{ margin: 10 }} checked={newRow.court} onChange={e => setNewRow({ ...newRow, court: e.target.checked })} title="Connected to a court case" /></td>
+                <td className="wo-edit" data-label="Due by"><input className="wo-cell" type="date" value={newRow.due} onChange={e => setNewRow({ ...newRow, due: e.target.value })} onKeyDown={newRowKey} /></td>
+                <td className="wo-edit" data-label="Scheduled"></td>
+                <td className="wo-edit" data-label="Notes">{newRowError && <span style={{ color: "var(--danger, #B3261E)", fontSize: 12, padding: "8px 10px", display: "block" }}>{newRowError}</span>}</td>
+                <td className="wo-sheet-actions"><button className="btn-primary" onClick={addNewRow}><Plus size={14} /> Add</button></td>
               </tr>
-            </thead>
-            <tbody>
-              {list.map(w => {
-                const isOpen = expandedRow === w.id;
-                const sortedNotes = newestFirst(w.notes);
-                const unit = w.unitId ? data.units.find(u => u.id === w.unitId) : null;
-                const unitTenant = w.unitId ? data.tenants.find(t => t.unitId === w.unitId && !t.movedOut) : null;
-                const shortDesc = w.items && w.items.length > 0 ? w.items.map(it => it.description).join(", ") : w.description;
-                return (
-                  <React.Fragment key={w.id}>
-                    <tr className={`wo-sheet-row ${highlightWoId === w.id ? "sheet-row-deeplinked" : ""}`} id={`wo-row-${w.id}`}>
-                      <td className="wo-sheet-apt" data-label="Apt">{unit ? (unit.unitNumber || "—") : <span className="row-muted">—</span>}</td>
-                      <td className="wo-sheet-building" data-label="Building">{buildingName(w.buildingId)}</td>
-                      <td className="wo-sheet-desc" data-label="Description">
-                        <div className="wo-sheet-desc-text">{shortDesc}</div>
-                        {unitTenant && (
-                          <div className="wo-sheet-tenant">
-                            {unitTenant.name}
-                            {(unitTenant.phone || "").split(";").map(s2 => s2.trim()).filter(Boolean).map((num, i) => (
-                              <a key={i} href={`tel:${num}`} className="wo-tenant-phone" style={{ marginLeft: 6 }}>{num}</a>
-                            ))}
-                          </div>
-                        )}
-                      </td>
-                      <td className="wo-sheet-vendor" data-label="Vendor">
-                        {w.items && w.items.length > 0
-                          ? w.items.filter(it => it.vendorId).map(it => <div key={it.id}>{vendorName(it.vendorId)}</div>)
-                          : (w.vendorId ? vendorName(w.vendorId) : <span className="row-muted">Unassigned</span>)}
-                      </td>
-                      <td data-label="Priority">
-                        {w.priority && w.priority !== "Routine" ? <span className={`pill ${w.priority === "Emergency" ? "pill-danger" : "pill-warn"}`}>{w.priority}</span> : <span className="row-muted">Routine</span>}
-                      </td>
-                      <td data-label="Status">
-                        <span className={`pill ${w.status === "Done" ? "pill-ok" : "pill-muted"}`}>{w.status}</span>
-                      </td>
-                      <td data-label="Court / Due by">
-                        {(w.courtCaseId || w.isCourtConnected) && <span className="pill pill-accent"><Gavel size={11} /> Court</span>}
-                        {(w.courtCaseId || w.isCourtConnected) && w.dueByDate && w.status !== "Done" && <Flag date={w.dueByDate} label="due by" />}
-                        {!(w.courtCaseId || w.isCourtConnected) && <span className="row-muted">—</span>}
-                      </td>
-                      <td data-label="Scheduled">
-                        {w.scheduledDate && w.status !== "Done" ? (() => {
-                          const d = daysUntil(w.scheduledDate);
-                          const when = d === 0 ? "today" : d === 1 ? "tomorrow" : scheduleText(w.scheduledDate);
-                          return (
-                            <span className={`pill ${d < 0 ? "pill-danger" : d === 0 ? "pill-warn" : "pill-accent"}`} title={scheduleText(w.scheduledDate, w.scheduledTime)}>
-                              <CalendarClock size={11} /> {d < 0 ? "Was " : ""}{when}{w.scheduledTime ? ` · ${fmtTime(w.scheduledTime)}` : ""}
-                            </span>
-                          );
-                        })() : <span className="row-muted">—</span>}
-                      </td>
-                      <td data-label="Notes" style={{ fontSize: 12, minWidth: 160 }}>
-                        {sortedNotes.length === 0 ? <span className="row-muted">—</span> : sortedNotes.map((n, i) => (
-                          <div key={i}><span className="row-muted">{fmtDate(n.date)}</span> {n.text}</div>
-                        ))}
-                        {(w.photos || []).length > 0 && <div className="row-muted">{(w.photos || []).length} photo{(w.photos || []).length === 1 ? "" : "s"}</div>}
-                      </td>
-                      <td className="wo-sheet-actions" onClick={(e) => e.stopPropagation()}>
-                        <input type="checkbox" checked={selected.has(w.id)} onChange={() => toggleSelected(w.id)} title="Select for batch copy" />
-                        <IconBtn
-                          title={w.status === "Done" ? "Done — click to reopen" : "Mark done"}
-                          active={w.status === "Done"}
-                          onClick={() => update("workOrders", w.id, { status: w.status === "Done" ? "Open" : "Done" })}
-                        ><CheckCircle2 size={14} /></IconBtn>
-                        <IconBtn title={w.scheduledDate ? "Scheduled — change or clear" : "Schedule"} onClick={() => openSchedule(w)}><CalendarClock size={14} /></IconBtn>
-                        <IconBtn title="Add note / photos" onClick={() => setExpandedRow(isOpen ? null : w.id)}><StickyNote size={14} /></IconBtn>
-                        <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={() => copyOne(w)}><ScrollText size={14} /></IconBtn>
-                        <IconBtn title="Edit" onClick={() => { const f = { ...w, isCourtConnected: w.isCourtConnected || !!w.courtCaseId }; setFormOriginal(f); setForm(f); }}><Pencil size={14} /></IconBtn>
-                        <IconBtn title="Delete" danger onClick={() => remove("workOrders", w.id)}><Trash2 size={14} /></IconBtn>
+            )}
+            {list.map(w => {
+              const isOpen = expandedRow === w.id;
+              const sortedNotes = newestFirst(w.notes);
+              const unit = w.unitId ? data.units.find(u => u.id === w.unitId) : null;
+              const unitTenant = w.unitId ? data.tenants.find(t => t.unitId === w.unitId && !t.movedOut) : null;
+              const hasItems = w.items && w.items.length > 0;
+              const isCourt = !!(w.isCourtConnected || w.courtCaseId);
+              const setItem = (idx, patch) => {
+                const items = w.items.map((x, xi) => xi === idx ? { ...x, ...patch } : x);
+                update("workOrders", w.id, { items, description: items.map(it => it.description).join(", ") });
+              };
+              return (
+                <React.Fragment key={w.id}>
+                  <tr className={`wo-sheet-row ${highlightWoId === w.id ? "sheet-row-deeplinked" : ""}`} id={`wo-row-${w.id}`}>
+                    <td className="wo-edit" data-label="Apt">
+                      <WoCell value={unit ? (unit.unitNumber || "") : ""} placeholder="—" narrow={50} onCommit={t => {
+                        if (!t.trim()) { update("workOrders", w.id, { unitId: "" }); return true; }
+                        const u = findUnitByText(w.buildingId, t);
+                        if (!u) return false;
+                        update("workOrders", w.id, { unitId: u.id }); return true;
+                      }} />
+                    </td>
+                    <td className="wo-edit" data-label="Building">
+                      <WoCell value={buildingName(w.buildingId)} narrow={110} onCommit={t => {
+                        const b = findBuildingByText(t);
+                        if (!b) return false;
+                        let unitId = "";
+                        if (unit) { const same = data.units.find(u => u.buildingId === b.id && String(u.unitNumber).toLowerCase() === String(unit.unitNumber).toLowerCase()); unitId = same ? same.id : ""; }
+                        update("workOrders", w.id, { buildingId: b.id, unitId }); return true;
+                      }} />
+                    </td>
+                    <td className="wo-edit wo-sheet-desc" data-label="Description">
+                      {hasItems
+                        ? w.items.map((it, idx) => <WoCell key={it.id} multiline value={it.description} onCommit={t => { setItem(idx, { description: t }); return true; }} />)
+                        : <WoCell multiline value={w.description || ""} onCommit={t => { update("workOrders", w.id, { description: t }); return true; }} />}
+                      {unitTenant && (
+                        <div className="wo-sheet-tenant" style={{ padding: "0 10px 6px" }}>
+                          {unitTenant.name}
+                          {(unitTenant.phone || "").split(";").map(s2 => s2.trim()).filter(Boolean).map((num, i) => (
+                            <a key={i} href={`tel:${num}`} className="wo-tenant-phone" style={{ marginLeft: 6 }}>{num}</a>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                    <td className="wo-edit" data-label="Vendor">
+                      {hasItems
+                        ? w.items.map((it, idx) => <WoCell key={it.id} value={it.vendorId ? vendorName(it.vendorId) : ""} placeholder="—" narrow={100} onCommit={t => {
+                            if (!t.trim()) { setItem(idx, { vendorId: "" }); return true; }
+                            const v = findVendorByText(t); if (!v) return false; setItem(idx, { vendorId: v.id }); return true;
+                          }} />)
+                        : <WoCell value={w.vendorId ? vendorName(w.vendorId) : ""} placeholder="—" narrow={100} onCommit={t => {
+                            if (!t.trim()) { update("workOrders", w.id, { vendorId: "" }); return true; }
+                            const v = findVendorByText(t); if (!v) return false; update("workOrders", w.id, { vendorId: v.id }); return true;
+                          }} />}
+                    </td>
+                    <td className="wo-edit" data-label="Priority">
+                      <WoCell value={w.priority || "Routine"} narrow={80} onCommit={t => {
+                        const p = WO_PRIORITIES.find(x => x.toLowerCase().startsWith(t.trim().toLowerCase()));
+                        if (!p || !t.trim()) return false;
+                        update("workOrders", w.id, { priority: p }); return true;
+                      }} />
+                    </td>
+                    <td className="wo-edit" data-label="Status">
+                      <WoCell value={w.status || ""} narrow={90} onCommit={t => {
+                        const st = WO_STATUSES.find(x => x.toLowerCase().startsWith(t.trim().toLowerCase()));
+                        if (!st || !t.trim()) return false;
+                        update("workOrders", w.id, { status: st }); return true;
+                      }} />
+                    </td>
+                    <td className="wo-edit" data-label="Court">
+                      <input type="checkbox" style={{ margin: 10 }} checked={isCourt} title="Connected to a court case"
+                        onChange={e => update("workOrders", w.id, e.target.checked ? { isCourtConnected: true } : { isCourtConnected: false, courtCaseId: "", dueByDate: "", accessDate: "", accessGranted: null })} />
+                      {isCourt && w.dueByDate && w.status !== "Done" && <div style={{ padding: "0 8px 6px" }}><Flag date={w.dueByDate} label="due by" /></div>}
+                    </td>
+                    <td className="wo-edit" data-label="Due by">
+                      <WoCell type="date" value={w.dueByDate || ""} onCommit={t => { update("workOrders", w.id, { dueByDate: t }); return true; }} />
+                    </td>
+                    <td className="wo-edit" data-label="Scheduled">
+                      <WoCell type="date" value={w.scheduledDate || ""} onCommit={t => { update("workOrders", w.id, t ? { scheduledDate: t } : { scheduledDate: "", scheduledTime: "" }); return true; }} />
+                      {w.scheduledDate && w.scheduledTime && <div className="row-muted" style={{ padding: "0 10px 6px", fontSize: 11 }}>{fmtTime(w.scheduledTime)}</div>}
+                    </td>
+                    <td className="wo-edit" data-label="Notes" style={{ minWidth: 170 }}>
+                      <WoCell multiline value="" placeholder="Add note…" onCommit={t => {
+                        if (!t.trim()) return true;
+                        update("workOrders", w.id, { notes: [...(w.notes || []), { date: todayISO(), timestamp: Date.now(), text: t.trim() }] });
+                        return true;
+                      }} />
+                      {sortedNotes.map((n, i) => (
+                        <div key={i} style={{ fontSize: 12, padding: "0 10px 4px" }}><span className="row-muted">{fmtDate(n.date)}</span> {n.text}</div>
+                      ))}
+                      {(w.photos || []).length > 0 && <div className="row-muted" style={{ padding: "0 10px 6px", fontSize: 12 }}>{(w.photos || []).length} photo{(w.photos || []).length === 1 ? "" : "s"}</div>}
+                    </td>
+                    <td className="wo-sheet-actions" onClick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" checked={selected.has(w.id)} onChange={() => toggleSelected(w.id)} title="Select for batch copy" />
+                      <IconBtn
+                        title={w.status === "Done" ? "Done — click to reopen" : "Mark done"}
+                        active={w.status === "Done"}
+                        onClick={() => update("workOrders", w.id, { status: w.status === "Done" ? "Open" : "Done" })}
+                      ><CheckCircle2 size={14} /></IconBtn>
+                      <IconBtn title={w.scheduledDate ? "Set a time" : "Schedule"} onClick={() => openSchedule(w)}><CalendarClock size={14} /></IconBtn>
+                      <IconBtn title="Photos" onClick={() => setExpandedRow(isOpen ? null : w.id)}><StickyNote size={14} /></IconBtn>
+                      <IconBtn title={copiedId === w.id ? "Copied!" : "Copy for texting/emailing"} onClick={() => copyOne(w)}><ScrollText size={14} /></IconBtn>
+                      <IconBtn title="Link to a court case / more" onClick={() => { const f = { ...w, isCourtConnected: w.isCourtConnected || !!w.courtCaseId }; setFormOriginal(f); setForm(f); window.scrollTo({ top: 0, behavior: "smooth" }); }}><Pencil size={14} /></IconBtn>
+                      <IconBtn title="Delete" danger onClick={() => remove("workOrders", w.id)}><Trash2 size={14} /></IconBtn>
+                    </td>
+                  </tr>
+                  {schedulingFor === w.id && (
+                    <tr className="wo-sheet-detail-row">
+                      <td colSpan={11}>
+                        <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "center", margin: 0 }}>
+                          <strong>Scheduled for</strong>
+                          <input type="date" value={schedDate} onChange={e => setSchedDate(e.target.value)} style={{ flex: "0 0 auto", width: 170 }} />
+                          <select value={schedTime} onChange={e => setSchedTime(e.target.value)}>
+                            <option value="">No specific time</option>
+                            {TIME_OPTIONS.map(t => <option key={t} value={t}>{fmtTime(t)}</option>)}
+                          </select>
+                          <button className="btn-primary" onClick={() => saveSchedule(w)} disabled={!schedDate}>Save</button>
+                          {w.scheduledDate && <button className="btn-ghost" onClick={() => clearSchedule(w)}>Clear</button>}
+                          <button className="btn-ghost" onClick={() => setSchedulingFor(null)}>Cancel</button>
+                        </div>
                       </td>
                     </tr>
-                    {schedulingFor === w.id && (
-                      <tr className="wo-sheet-detail-row">
-                        <td colSpan={10}>
-                          <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "center", margin: 0 }}>
-                            <strong>Scheduled for</strong>
-                            <input type="date" value={schedDate} onChange={e => setSchedDate(e.target.value)} style={{ flex: "0 0 auto", width: 170 }} />
-                            <select value={schedTime} onChange={e => setSchedTime(e.target.value)}>
-                              <option value="">No specific time</option>
-                              {TIME_OPTIONS.map(t => <option key={t} value={t}>{fmtTime(t)}</option>)}
-                            </select>
-                            <button className="btn-primary" onClick={() => saveSchedule(w)} disabled={!schedDate}>Save</button>
-                            {w.scheduledDate && <button className="btn-ghost" onClick={() => clearSchedule(w)}>Clear</button>}
-                            <button className="btn-ghost" onClick={() => setSchedulingFor(null)}>Cancel</button>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                    {isOpen && (
-                      <tr className="wo-sheet-detail-row">
-                        <td colSpan={10}>
-                          {unitTenant && (
-                            <div className="wo-tenant-info">
-                              <strong>{unitTenant.name}</strong>
-                              {(unitTenant.phone || "").split(";").map(s => s.trim()).filter(Boolean).map((num, i) => (
-                                <a key={i} href={`tel:${num}`} onClick={(e) => e.stopPropagation()} className="wo-tenant-phone"><Phone size={12} /> {num}</a>
-                              ))}
-                              {!unitTenant.phone && <span className="row-muted"> — no phone on file</span>}
-                            </div>
-                          )}
-                          <div className="wo-full-description">
-                            {w.items && w.items.length > 0
-                              ? w.items.map(it => <div key={it.id}>{it.description}{it.vendorId ? ` — ${vendorName(it.vendorId)}` : ""}</div>)
-                              : w.description}
-                          </div>
-                          <PhotoUploader
-                            photos={w.photos}
-                            pathPrefix={`workOrders/${w.id}/photos`}
-                            onAdd={(newPhotos) => update("workOrders", w.id, { photos: [...(w.photos || []), ...newPhotos] })}
-                            onRemove={(p) => {
-                              update("workOrders", w.id, { photos: (w.photos || []).filter(x => x.id !== p.id) });
-                              if (p.storagePath) deleteObject(storageRef(storage, p.storagePath)).catch(() => {});
-                            }}
-                          />
-                          <div className="row" style={{ marginTop: 8 }}>
-                            <strong>Notes</strong>
-                            <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => setNoteFor(noteFor === w.id ? null : w.id)}><Plus size={14} /> Add note</button>
-                          </div>
-                          {noteFor === w.id && (
-                            <div className="inline-form">
-                              <input placeholder="Update…" value={noteText} onChange={e => setNoteText(e.target.value)} onKeyDown={e => e.key === "Enter" && addNote(w)} />
-                              <button className="btn-primary" onClick={() => addNote(w)}>Save</button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+                  )}
+                  {isOpen && (
+                    <tr className="wo-sheet-detail-row">
+                      <td colSpan={11}>
+                        <PhotoUploader
+                          photos={w.photos}
+                          pathPrefix={`workOrders/${w.id}/photos`}
+                          onAdd={(newPhotos) => update("workOrders", w.id, { photos: [...(w.photos || []), ...newPhotos] })}
+                          onRemove={(p) => {
+                            update("workOrders", w.id, { photos: (w.photos || []).filter(x => x.id !== p.id) });
+                            if (p.storagePath) deleteObject(storageRef(storage, p.storagePath)).catch(() => {});
+                          }}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -6838,6 +7011,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
       stage: form.stage, nextCourtDate: form.nextCourtDate, result: form.result,
       stipulationTerms: form.stipulationTerms || "", nextPaymentDue: form.nextPaymentDue || "",
       sentLease: !!form.sentLease, sentLedger: !!form.sentLedger, sentToLawyerDate: form.sentToLawyerDate || "",
+      petitionServed: !!form.petitionServed, petitionServedDate: form.petitionServed ? (form.petitionServedDate || "") : "",
     };
     // Sent the lawyer the lease and/or ledger → a reminder lands on the dashboard
     // 21 days after the send date to confirm the petition is being started.
@@ -6852,6 +7026,21 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
         const qid = uid();
         add("quickNotes", { id: qid, text: `Confirm petition is being started — ${tenantName(form.tenantId)}, ${buildingName(form.buildingId)}`, date: todayISO(), done: false, reminderDate: remDate, buildingId: form.buildingId });
         fields.petitionReminderId = qid;
+      }
+    }
+    // Petition served → two weeks later, a reminder to follow up with the attorney
+    // about whether the tenant answered, and to start a default judgment if not.
+    if (fields.petitionServed && fields.petitionServedDate) {
+      const dDate = defaultJudgmentReminderDate(fields.petitionServedDate);
+      const dText = `Follow up with the attorney — did ${tenantName(form.tenantId)} answer the petition (served ${fmtDate(fields.petitionServedDate)})? If not, start a default judgment — ${buildingName(form.buildingId)}`;
+      const existingDef = form.defaultReminderId ? (data.quickNotes || []).find(n => n.id === form.defaultReminderId) : null;
+      if (existingDef) {
+        if (!existingDef.done && (existingDef.reminderDate !== dDate || existingDef.text !== dText)) update("quickNotes", existingDef.id, { reminderDate: dDate, text: dText });
+        fields.defaultReminderId = existingDef.id;
+      } else {
+        const dqid = uid();
+        add("quickNotes", { id: dqid, text: dText, date: todayISO(), done: false, reminderDate: dDate, buildingId: form.buildingId });
+        fields.defaultReminderId = dqid;
       }
     }
     if (form.id) {
@@ -6914,7 +7103,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
               <button className="btn-ghost" style={{ color: "var(--danger)" }} onClick={() => setConfirmingDeleteAll(true)}><Trash2 size={14} /> Delete all</button>
             )
           )}
-          <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", unitId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: "", stipulationTerms: "", nextPaymentDue: "", sentLease: false, sentLedger: false, sentToLawyerDate: "" })}>
+          <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", unitId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: "", stipulationTerms: "", nextPaymentDue: "", sentLease: false, sentLedger: false, sentToLawyerDate: "", petitionServed: false, petitionServedDate: "" })}>
             <Plus size={14} /> Add case
           </button>
         </div>
@@ -7102,6 +7291,17 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
               <div className="hint" style={{ marginTop: 4 }}>A reminder will show on your dashboard on {fmtDate(petitionReminderDate(form.sentToLawyerDate))} (21 days later, moved to Monday if it lands on a weekend) to confirm the petition is being started.</div>
             )}
           </Field>
+          <Field label="Petition served">
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input type="checkbox" checked={!!form.petitionServed} onChange={e => setForm({ ...form, petitionServed: e.target.checked, petitionServedDate: form.petitionServedDate || (e.target.checked ? todayISO() : "") })} /> Petition has been served
+              </label>
+              {form.petitionServed && <input type="date" value={form.petitionServedDate || ""} onChange={e => setForm({ ...form, petitionServedDate: e.target.value })} />}
+            </div>
+            {form.petitionServed && form.petitionServedDate && (
+              <div className="hint" style={{ marginTop: 4 }}>A reminder will show on your dashboard on {fmtDate(defaultJudgmentReminderDate(form.petitionServedDate))} (2 weeks later, moved to Monday if it lands on a weekend) to follow up with the attorney — did the tenant answer, and should we start a default judgment.</div>
+            )}
+          </Field>
           <Field label="Result">
             <select value={form.result} onChange={e => setForm({ ...form, result: e.target.value })}>
               {COURT_RESULTS.map(r => <option key={r}>{r}</option>)}
@@ -7240,6 +7440,11 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                 {(c.sentLease || c.sentLedger) && (
                   <div className="row row-muted" style={{ marginBottom: 6 }}>
                     Sent to lawyer: {[c.sentLease && "Lease", c.sentLedger && "Ledger"].filter(Boolean).join(" + ")}{c.sentToLawyerDate ? ` on ${fmtDate(c.sentToLawyerDate)} · petition check ${fmtDate(petitionReminderDate(c.sentToLawyerDate))}` : ""}
+                  </div>
+                )}
+                {c.petitionServed && (
+                  <div className="row row-muted" style={{ marginBottom: 6 }}>
+                    Petition served{c.petitionServedDate ? ` on ${fmtDate(c.petitionServedDate)} · default judgment check ${fmtDate(defaultJudgmentReminderDate(c.petitionServedDate))}` : ""}
                   </div>
                 )}
                 <div className="row"><strong>Where it's up to</strong></div>
@@ -8454,6 +8659,12 @@ function Styles() {
       }
       .sheet-row-selected td { background: transparent; }
 
+      .wo-sheet-row td.wo-edit, .wo-new-row td.wo-edit { padding: 0; }
+      .wo-cell { display: block; width: 100%; box-sizing: border-box; border: 1px solid transparent; border-radius: 0; background: transparent; padding: 8px 10px; font: inherit; color: inherit; resize: none; overflow: hidden; }
+      .wo-cell:hover { background: #F6F3EA; }
+      .wo-cell:focus { outline: 2px solid var(--navy); outline-offset: -2px; background: #fff; }
+      .wo-cell-bad { background: #FDE7E4 !important; outline: 2px solid #B3261E; outline-offset: -2px; }
+      .wo-new-row { background: #FBF6EF; }
       .wo-sheet-row { cursor: default; }
       .wo-sheet-row:nth-child(even) { background: var(--bg); }
       .wo-sheet-row:hover { background: #E8F0FE; }
