@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-27";
+const APP_BUILD = "sync-fix-29";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -1307,6 +1307,108 @@ function TypeSelectWithAdd({ value, options, onChange, onAddType }) {
       {options.map(t => <option key={t}>{t}</option>)}
       <option value={ADD_NEW}>+ Add new type…</option>
     </select>
+  );
+}
+
+// Quick "add the case number" box shown right on a court case that has none.
+function CaseNumberQuickAdd({ onSave }) {
+  const [open, setOpen] = useState(false);
+  const [v, setV] = useState("");
+  const stop = (e) => e.stopPropagation();
+  const save = () => { const t = v.trim(); if (!t) return; onSave(t); setOpen(false); setV(""); };
+  if (!open) return <button type="button" className="btn-ghost" onClick={(e) => { stop(e); setOpen(true); }}><Plus size={12} /> Case #</button>;
+  return (
+    <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }} onClick={stop}>
+      <input autoFocus placeholder="Case number" value={v} onChange={e => setV(e.target.value)} style={{ width: 150 }}
+        onKeyDown={e => { if (e.key === "Enter") save(); if (e.key === "Escape") setOpen(false); }} />
+      <button type="button" className="btn-primary" onClick={save} disabled={!v.trim()}>Save</button>
+      <button type="button" className="btn-ghost" onClick={() => setOpen(false)}>Cancel</button>
+    </span>
+  );
+}
+
+// Stage buttons for a court case. Tap a button, pick the date, Save — that
+// becomes "where it's up to" (the last one tapped) and sets its reminder.
+// "Sent to lawyer" (lease/ledger) reminds 21 days later, "Petition served"
+// 14 days later; buttons you add yourself remind after the number of days you
+// give them. Weekend reminders move to Monday.
+function CaseStageBar({ options, current, onApply, onAddOption, onRemoveOption, onClear }) {
+  const [picking, setPicking] = useState(null); // "lawyer" | "petition" | option id
+  const [date, setDate] = useState(todayISO());
+  const [lease, setLease] = useState(true);
+  const [ledger, setLedger] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [newLabel, setNewLabel] = useState("");
+  const [newDays, setNewDays] = useState("");
+  const custom = options || [];
+  const open = (key) => { if (picking === key) { setPicking(null); return; } setPicking(key); setDate(todayISO()); setLease(true); setLedger(false); };
+  const hint = () => {
+    if (!date) return "";
+    if (picking === "lawyer") return `Reminder on ${fmtDate(petitionReminderDate(date))} (21 days) to confirm the petition is being started.`;
+    if (picking === "petition") return `Reminder on ${fmtDate(defaultJudgmentReminderDate(date))} (2 weeks) to follow up with the attorney / start a default judgment.`;
+    const o = custom.find(x => x.id === picking);
+    return o && Number(o.days) > 0 ? `Reminder on ${fmtDate(nextWeekdayISO(addDays(date, Number(o.days))))} (${o.days} days).` : "";
+  };
+  const save = () => {
+    if (!date) return;
+    if (picking === "lawyer") { if (!lease && !ledger) return; onApply({ kind: "lawyer", label: "Sent to lawyer", date, lease, ledger }); }
+    else if (picking === "petition") onApply({ kind: "petition", label: "Petition served", date });
+    else { const o = custom.find(x => x.id === picking); if (!o) return; onApply({ kind: "custom", label: o.label, date, days: Number(o.days) || 0 }); }
+    setPicking(null);
+  };
+  const addButton = () => {
+    const label = newLabel.trim();
+    if (!label) return;
+    onAddOption({ label, days: Number(newDays) > 0 ? Number(newDays) : 0 });
+    setNewLabel(""); setNewDays(""); setAdding(false);
+  };
+  return (
+    <div>
+      <div className="row" style={{ marginBottom: 6 }}>
+        <strong>Where it's up to:</strong>{" "}
+        {current && current.label
+          ? <span>{current.label}{current.date ? ` — ${fmtDate(current.date)}` : ""} {onClear && <button type="button" className="checklist-remove" title="Clear" onClick={onClear}><X size={12} /></button>}</span>
+          : <span className="row-muted">not set</span>}
+      </div>
+      <div className="inline-form" style={{ flexWrap: "wrap", margin: 0 }}>
+        <button type="button" className={`chip ${picking === "lawyer" || current?.label === "Sent to lawyer" ? "chip-active" : ""}`} onClick={() => open("lawyer")}>Sent to lawyer</button>
+        <button type="button" className={`chip ${picking === "petition" || current?.label === "Petition served" ? "chip-active" : ""}`} onClick={() => open("petition")}>Petition served</button>
+        {custom.map(o => (
+          <span key={o.id} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+            <button type="button" className={`chip ${picking === o.id || current?.label === o.label ? "chip-active" : ""}`} onClick={() => open(o.id)}>{o.label}{Number(o.days) > 0 ? ` · ${o.days}d` : ""}</button>
+            {editing && (
+              <button type="button" className="checklist-remove" title="Remove this button"
+                onClick={() => { if (window.confirm(`Remove the "${o.label}" button? Cases already set to it keep it.`)) onRemoveOption(o); }}><X size={12} /></button>
+            )}
+          </span>
+        ))}
+        <button type="button" className="btn-ghost" onClick={() => setAdding(a => !a)}><Plus size={14} /> Add button</button>
+        {custom.length > 0 && <button type="button" className="btn-ghost" onClick={() => setEditing(e => !e)}>{editing ? "Done" : "Edit buttons"}</button>}
+      </div>
+      {picking && (
+        <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "center", marginTop: 6 }}>
+          {picking === "lawyer" && (
+            <>
+              <label style={{ display: "flex", gap: 4, alignItems: "center" }}><input type="checkbox" checked={lease} onChange={e => setLease(e.target.checked)} /> Lease</label>
+              <label style={{ display: "flex", gap: 4, alignItems: "center" }}><input type="checkbox" checked={ledger} onChange={e => setLedger(e.target.checked)} /> Ledger</label>
+            </>
+          )}
+          <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ flex: "0 0 auto", width: 170 }} />
+          <button type="button" className="btn-primary" onClick={save} disabled={!date || (picking === "lawyer" && !lease && !ledger)}>Save</button>
+          <button type="button" className="btn-ghost" onClick={() => setPicking(null)}>Cancel</button>
+          {hint() && <div className="hint" style={{ flexBasis: "100%" }}>{hint()}</div>}
+        </div>
+      )}
+      {adding && (
+        <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "center", marginTop: 6 }}>
+          <input placeholder="Button name, e.g. Judgment entered" value={newLabel} onChange={e => setNewLabel(e.target.value)} onKeyDown={e => e.key === "Enter" && addButton()} />
+          <input placeholder="Remind me after how many days (blank = none)" inputMode="numeric" value={newDays} onChange={e => setNewDays(e.target.value.replace(/\D/g, ""))} style={{ maxWidth: 260 }} />
+          <button type="button" className="btn-primary" onClick={addButton} disabled={!newLabel.trim()}>Add</button>
+          <button type="button" className="btn-ghost" onClick={() => setAdding(false)}>Cancel</button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2817,6 +2919,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       Status: c.archived ? "Closed" : "Active",
       "Sent to Lawyer": [c.sentLease && "Lease", c.sentLedger && "Ledger"].filter(Boolean).join(" + "),
       "Sent to Lawyer Date": c.sentToLawyerDate ? fmtDate(c.sentToLawyerDate) : "",
+      "Stage Date": c.stageDate ? fmtDate(c.stageDate) : "",
       "Petition Served": c.petitionServed ? (c.petitionServedDate ? fmtDate(c.petitionServedDate) : "Yes") : "",
       "Owes (tenant balance)": c.tenantId ? ((data.tenants.find(t => t.id === c.tenantId) || {}).balance || "") : "",
       Log: (c.log || []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(l => `${fmtDate(l.date)}: ${l.note}`).join(" | "),
@@ -2895,7 +2998,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       "Date Installed": r.installedDate ? fmtDate(r.installedDate) : "",
     })));
 
-    addSheet("Case Stage Options", (data.caseStageOptions || []).map(o => ({ Option: o.label || "" })));
+    addSheet("Case Stage Options", (data.caseStageOptions || []).map(o => ({ Option: o.label || "", "Reminder after (days)": o.days || "" })));
 
     XLSX.writeFile(wb, `property-ops-backup-${today}.xlsx`);
   };
@@ -7000,26 +7103,33 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
     setLogForm({ ...logForm, [c.id]: { date: todayISO(), note: "", newCourtDate: "", quickType: null, stipTerms: "", stipNextDue: "" } });
   };
 
-  // "Petition served" button on the case card: saves the date and sets the
-  // reminder two weeks later (follow up with the attorney / default judgment).
-  const [servedFor, setServedFor] = useState(null);
-  const [servedDate, setServedDate] = useState("");
-  const markPetitionServed = (c, date) => {
-    if (!date) return;
-    const dDate = defaultJudgmentReminderDate(date);
-    const dText = `Follow up with the attorney — did ${tenantName(c.tenantId)} answer the petition (served ${fmtDate(date)})? If not, start a default judgment — ${buildingName(c.buildingId)}`;
-    const existing = c.defaultReminderId ? (data.quickNotes || []).find(n => n.id === c.defaultReminderId) : null;
-    const fields = { petitionServed: true, petitionServedDate: date };
-    if (existing) {
-      update("quickNotes", existing.id, { reminderDate: dDate, text: dText, done: false });
-      fields.defaultReminderId = existing.id;
-    } else {
-      const qid = uid();
-      add("quickNotes", { id: qid, text: dText, date: todayISO(), done: false, reminderDate: dDate, buildingId: c.buildingId });
-      fields.defaultReminderId = qid;
+  // A stage button was tapped. buildStage works out what to save on the case and
+  // which dashboard reminder to set; applyStage saves it on an existing case.
+  const buildStage = (c, st) => {
+    const who = `${tenantName(c.tenantId)}, ${buildingName(c.buildingId)}`;
+    const fields = { stage: st.label, stageDate: st.date };
+    let note = null;
+    if (st.kind === "lawyer") {
+      Object.assign(fields, { sentLease: !!st.lease, sentLedger: !!st.ledger, sentToLawyerDate: st.date });
+      note = { key: "petitionReminderId", text: `Confirm petition is being started — ${who}`, reminderDate: petitionReminderDate(st.date) };
+    } else if (st.kind === "petition") {
+      Object.assign(fields, { petitionServed: true, petitionServedDate: st.date });
+      note = { key: "defaultReminderId", text: `Follow up with the attorney — did ${tenantName(c.tenantId)} answer the petition (served ${fmtDate(st.date)})? If not, start a default judgment — ${buildingName(c.buildingId)}`, reminderDate: defaultJudgmentReminderDate(st.date) };
+    } else if (st.days > 0) {
+      note = { key: "", text: `${st.label} (${fmtDate(st.date)}) — follow up: ${who}`, reminderDate: nextWeekdayISO(addDays(st.date, st.days)) };
     }
+    const logEntry = { id: uid(), date: st.date, note: `Stage: ${st.label}${st.kind === "lawyer" ? ` (${[st.lease && "lease", st.ledger && "ledger"].filter(Boolean).join(" + ")})` : ""}`, source: "stage" };
+    return { fields, note, logEntry };
+  };
+  const applyStage = (c, st) => {
+    const { fields, note, logEntry } = buildStage(c, st);
+    if (note) {
+      const existing = note.key && c[note.key] ? (data.quickNotes || []).find(n => n.id === c[note.key]) : null;
+      if (existing) { update("quickNotes", existing.id, { reminderDate: note.reminderDate, text: note.text, done: false }); fields[note.key] = existing.id; }
+      else { const qid = uid(); add("quickNotes", { id: qid, text: note.text, date: todayISO(), done: false, reminderDate: note.reminderDate, buildingId: c.buildingId }); if (note.key) fields[note.key] = qid; }
+    }
+    fields.log = [...(c.log || []), logEntry];
     update("courtCases", c.id, fields);
-    setServedFor(null);
   };
 
   const submit = () => {
@@ -7030,41 +7140,10 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
     // made there back to whatever it was when this form was opened.
     const fields = {
       tenantId: form.tenantId, buildingId: form.buildingId, unitId: form.unitId, caseNumber: form.caseNumber,
-      stage: form.stage, nextCourtDate: form.nextCourtDate, result: form.result,
+      nextCourtDate: form.nextCourtDate, result: form.result,
       stipulationTerms: form.stipulationTerms || "", nextPaymentDue: form.nextPaymentDue || "",
-      sentLease: !!form.sentLease, sentLedger: !!form.sentLedger, sentToLawyerDate: form.sentToLawyerDate || "",
-      petitionServed: !!form.petitionServed, petitionServedDate: form.petitionServed ? (form.petitionServedDate || "") : "",
     };
-    // Sent the lawyer the lease and/or ledger → a reminder lands on the dashboard
-    // 21 days after the send date to confirm the petition is being started.
     const newCaseId = form.id || uid();
-    if ((fields.sentLease || fields.sentLedger) && fields.sentToLawyerDate) {
-      const remDate = petitionReminderDate(fields.sentToLawyerDate);
-      const existingRem = form.petitionReminderId ? (data.quickNotes || []).find(n => n.id === form.petitionReminderId) : null;
-      if (existingRem) {
-        if (!existingRem.done && existingRem.reminderDate !== remDate) update("quickNotes", existingRem.id, { reminderDate: remDate });
-        fields.petitionReminderId = existingRem.id;
-      } else {
-        const qid = uid();
-        add("quickNotes", { id: qid, text: `Confirm petition is being started — ${tenantName(form.tenantId)}, ${buildingName(form.buildingId)}`, date: todayISO(), done: false, reminderDate: remDate, buildingId: form.buildingId });
-        fields.petitionReminderId = qid;
-      }
-    }
-    // Petition served → two weeks later, a reminder to follow up with the attorney
-    // about whether the tenant answered, and to start a default judgment if not.
-    if (fields.petitionServed && fields.petitionServedDate) {
-      const dDate = defaultJudgmentReminderDate(fields.petitionServedDate);
-      const dText = `Follow up with the attorney — did ${tenantName(form.tenantId)} answer the petition (served ${fmtDate(fields.petitionServedDate)})? If not, start a default judgment — ${buildingName(form.buildingId)}`;
-      const existingDef = form.defaultReminderId ? (data.quickNotes || []).find(n => n.id === form.defaultReminderId) : null;
-      if (existingDef) {
-        if (!existingDef.done && (existingDef.reminderDate !== dDate || existingDef.text !== dText)) update("quickNotes", existingDef.id, { reminderDate: dDate, text: dText });
-        fields.defaultReminderId = existingDef.id;
-      } else {
-        const dqid = uid();
-        add("quickNotes", { id: dqid, text: dText, date: todayISO(), done: false, reminderDate: dDate, buildingId: form.buildingId });
-        fields.defaultReminderId = dqid;
-      }
-    }
     if (form.id) {
       // Only what this form actually changed — "where it's up to" can also be set
       // from the card itself while this form is open, and sending every field
@@ -7072,9 +7151,16 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
       const patch = changedFieldsOnly(formOriginal, fields);
       if (Object.keys(patch).length > 0) update("courtCases", form.id, patch);
     }
-    else add("courtCases", {
-      ...fields, id: newCaseId, archived: false, documents: [],
-    });
+    else {
+      // A starting stage picked on the new-case form is applied as the case is created.
+      const base = { ...fields, id: newCaseId, archived: false, documents: [] };
+      if (form.pendingStage) {
+        const { fields: sf, note, logEntry } = buildStage(base, form.pendingStage);
+        Object.assign(base, sf, { log: [logEntry] });
+        if (note) { const qid = uid(); add("quickNotes", { id: qid, text: note.text, date: todayISO(), done: false, reminderDate: note.reminderDate, buildingId: base.buildingId }); if (note.key) base[note.key] = qid; }
+      }
+      add("courtCases", base);
+    }
     setForm(null);
   };
 
@@ -7125,7 +7211,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
               <button className="btn-ghost" style={{ color: "var(--danger)" }} onClick={() => setConfirmingDeleteAll(true)}><Trash2 size={14} /> Delete all</button>
             )
           )}
-          <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", unitId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: "", stipulationTerms: "", nextPaymentDue: "", sentLease: false, sentLedger: false, sentToLawyerDate: "", petitionServed: false, petitionServedDate: "" })}>
+          <button className="btn-primary" onClick={() => setForm({ tenantId: "", buildingId: "", unitId: "", caseNumber: "", nextCourtDate: "", result: "Pending", stage: "", stipulationTerms: "", nextPaymentDue: "", pendingStage: null })}>
             <Plus size={14} /> Add case
           </button>
         </div>
@@ -7290,31 +7376,18 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
           </Field>
           <Field label="Case #"><input value={form.caseNumber} onChange={e => setForm({ ...form, caseNumber: e.target.value })} /></Field>
           <Field label="Court date"><input type="date" value={form.nextCourtDate} onChange={e => setForm({ ...form, nextCourtDate: e.target.value })} /></Field>
-          <Field label="Sent to lawyer">
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
-              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <input type="checkbox" checked={!!form.sentLease} onChange={e => setForm({ ...form, sentLease: e.target.checked, sentToLawyerDate: form.sentToLawyerDate || (e.target.checked ? todayISO() : "") })} /> Lease
-              </label>
-              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <input type="checkbox" checked={!!form.sentLedger} onChange={e => setForm({ ...form, sentLedger: e.target.checked, sentToLawyerDate: form.sentToLawyerDate || (e.target.checked ? todayISO() : "") })} /> Ledger
-              </label>
-              {(form.sentLease || form.sentLedger) && <input type="date" value={form.sentToLawyerDate || ""} onChange={e => setForm({ ...form, sentToLawyerDate: e.target.value })} />}
-            </div>
-            {(form.sentLease || form.sentLedger) && form.sentToLawyerDate && (
-              <div className="hint" style={{ marginTop: 4 }}>A reminder will show on your dashboard on {fmtDate(petitionReminderDate(form.sentToLawyerDate))} (21 days later, moved to Monday if it lands on a weekend) to confirm the petition is being started.</div>
-            )}
-          </Field>
-          <Field label="Petition served">
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
-              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <input type="checkbox" checked={!!form.petitionServed} onChange={e => setForm({ ...form, petitionServed: e.target.checked, petitionServedDate: form.petitionServedDate || (e.target.checked ? todayISO() : "") })} /> Petition has been served
-              </label>
-              {form.petitionServed && <input type="date" value={form.petitionServedDate || ""} onChange={e => setForm({ ...form, petitionServedDate: e.target.value })} />}
-            </div>
-            {form.petitionServed && form.petitionServedDate && (
-              <div className="hint" style={{ marginTop: 4 }}>A reminder will show on your dashboard on {fmtDate(defaultJudgmentReminderDate(form.petitionServedDate))} (2 weeks later, moved to Monday if it lands on a weekend) to follow up with the attorney — did the tenant answer, and should we start a default judgment.</div>
-            )}
-          </Field>
+          {!form.id && (
+            <Field label="Starting stage">
+              <CaseStageBar
+                options={data.caseStageOptions}
+                current={form.pendingStage ? { label: form.pendingStage.label, date: form.pendingStage.date } : null}
+                onApply={(st) => setForm({ ...form, pendingStage: st })}
+                onAddOption={(o) => add("caseStageOptions", o)}
+                onRemoveOption={(o) => remove("caseStageOptions", o.id)}
+                onClear={() => setForm({ ...form, pendingStage: null })}
+              />
+            </Field>
+          )}
           <Field label="Result">
             <select value={form.result} onChange={e => setForm({ ...form, result: e.target.value })}>
               {COURT_RESULTS.map(r => <option key={r}>{r}</option>)}
@@ -7349,6 +7422,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
             {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
             {c.unitId && <span className="pill pill-accent">Apt {data.units.find(u => u.id === c.unitId)?.unitNumber || "—"}</span>}
             <div className="list-card-title">{c.tenantId ? tenantName(c.tenantId) : (c.rawName || "(no tenant matched)")} {c.caseNumber && `· Case #${c.caseNumber}`}</div>
+            {!c.caseNumber && <CaseNumberQuickAdd onSave={(t) => update("courtCases", c.id, { caseNumber: t })} />}
             <span className="pill pill-muted">{buildingName(c.buildingId)}</span>
             {c.nextCourtDate && !c.archived && <Flag date={c.nextCourtDate} label="court date" />}
           </div>
@@ -7460,20 +7534,14 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                     Petition served{c.petitionServedDate ? ` on ${fmtDate(c.petitionServedDate)} · default judgment check ${fmtDate(defaultJudgmentReminderDate(c.petitionServedDate))}` : ""}
                   </div>
                 )}
-                {!c.petitionServed ? (
-                  servedFor === c.id ? (
-                    <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "center", margin: 0 }}>
-                      <strong>Petition served on</strong>
-                      <input type="date" value={servedDate} onChange={e => setServedDate(e.target.value)} style={{ flex: "0 0 auto", width: 170 }} />
-                      <button className="btn-primary" disabled={!servedDate} onClick={() => markPetitionServed(c, servedDate)}>Save</button>
-                      <button className="btn-ghost" onClick={() => setServedFor(null)}>Cancel</button>
-                    </div>
-                  ) : (
-                    <button className="btn-ghost" onClick={() => { setServedFor(c.id); setServedDate(todayISO()); }}><Gavel size={14} /> Petition served</button>
-                  )
-                ) : (
-                  <button className="btn-ghost" onClick={() => update("courtCases", c.id, { petitionServed: false, petitionServedDate: "" })}>Undo petition served</button>
-                )}
+                <CaseStageBar
+                  options={data.caseStageOptions}
+                  current={{ label: c.stage, date: c.stageDate }}
+                  onApply={(st) => applyStage(c, st)}
+                  onAddOption={(o) => add("caseStageOptions", o)}
+                  onRemoveOption={(o) => remove("caseStageOptions", o.id)}
+                  onClear={() => update("courtCases", c.id, { stage: "", stageDate: "" })}
+                />
               </div>
               {c.result === "Stipulation (payment plan)" && (
                 <div className="list-card-body">
