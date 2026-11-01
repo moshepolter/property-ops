@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-29";
+const APP_BUILD = "sync-fix-30";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -7070,6 +7070,8 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
     // "Other note" is the one type with no built-in label of its own — it
     // needs actual text typed in, since there's nothing else to log.
     if (entry.quickType === "other" && !(entry.note || "").trim()) return;
+    if (entry.quickType === "courtDateSet" && !entry.newCourtDate) return;
+    if (entry.quickType === "reminder" && (!entry.remDate || !(entry.note || "").trim())) return;
 
     const extra = (entry.note || "").trim();
     const fields = {};
@@ -7077,6 +7079,14 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
     if (entry.quickType === "adjourned") {
       noteText = "Adjourned" + (entry.newCourtDate ? ` — adjourned to ${fmtDate(entry.newCourtDate)}` : "");
       if (entry.newCourtDate) { fields.nextCourtDate = entry.newCourtDate; fields.result = "Adjourned / next date set"; }
+    } else if (entry.quickType === "courtDateSet") {
+      // The first court date (not an adjournment) — goes straight onto the calendar.
+      noteText = `Court date set for ${fmtDate(entry.newCourtDate)}`;
+      fields.nextCourtDate = entry.newCourtDate;
+    } else if (entry.quickType === "reminder") {
+      // A reminder about this case — shows on the dashboard and calendar on that date.
+      noteText = `Reminder set for ${fmtDate(entry.remDate)}`;
+      add("quickNotes", { id: uid(), text: `Court — ${tenantName(c.tenantId)}, ${buildingName(c.buildingId)}: ${extra}`, date: todayISO(), done: false, reminderDate: entry.remDate, buildingId: c.buildingId });
     } else if (entry.quickType === "stipulation") {
       noteText = "Stipulation agreed" + (entry.stipTerms ? ` — ${entry.stipTerms}` : "");
       fields.result = "Stipulation (payment plan)";
@@ -7100,7 +7110,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
     const newEntry = { id: uid(), date: entry.date || todayISO(), note: noteText, source: "manual" };
     fields.log = [...(c.log || []), newEntry];
     update("courtCases", c.id, fields);
-    setLogForm({ ...logForm, [c.id]: { date: todayISO(), note: "", newCourtDate: "", quickType: null, stipTerms: "", stipNextDue: "" } });
+    setLogForm({ ...logForm, [c.id]: { date: todayISO(), note: "", newCourtDate: "", remDate: "", quickType: null, stipTerms: "", stipNextDue: "" } });
   };
 
   // A stage button was tapped. buildStage works out what to save on the case and
@@ -7470,6 +7480,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                     })}
                 <div className="inline-form" style={{ marginTop: 8, flexWrap: "wrap" }}>
                   {[
+                    { key: "courtDateSet", label: "Court date set" },
                     { key: "adjourned", label: "Adjourned" },
                     { key: "stipulation", label: "Stipulation" },
                     { key: "eviction", label: "Eviction" },
@@ -7477,6 +7488,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                     { key: "judgmentLandlord", label: "Judgment (landlord)" },
                     { key: "judgmentTenant", label: "Judgment (tenant)" },
                     { key: "settled", label: "Settled / withdrawn" },
+                    { key: "reminder", label: "Set reminder" },
                     { key: "other", label: "Other note" },
                   ].map(opt => (
                     <button
@@ -7490,6 +7502,25 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                 </div>
                 {(
                   <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+                    {logForm[c.id]?.quickType === "courtDateSet" && (
+                      <label className="hint" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        Court date:
+                        <input
+                          type="date" value={logForm[c.id]?.newCourtDate || ""}
+                          onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], newCourtDate: e.target.value } })}
+                        />
+                      </label>
+                    )}
+                    {logForm[c.id]?.quickType === "reminder" && (
+                      <label className="hint" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        Remind me on:
+                        <input
+                          type="date" value={logForm[c.id]?.remDate || ""}
+                          onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], remDate: e.target.value } })}
+                        />
+                        <span>— type what for below</span>
+                      </label>
+                    )}
                     {logForm[c.id]?.quickType === "adjourned" && (
                       <label className="hint" style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         Adjourned to:
@@ -7517,7 +7548,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                     )}
                     <div className="inline-form" style={{ flexWrap: "wrap" }}>
                       <input type="date" value={logForm[c.id]?.date || todayISO()} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], date: e.target.value } })} />
-                      <input placeholder={logForm[c.id]?.quickType && logForm[c.id]?.quickType !== "other" ? "Any extra detail (optional)…" : "Type a note / update…"} value={logForm[c.id]?.note || ""} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLogEntry(c)} />
+                      <input placeholder={logForm[c.id]?.quickType === "reminder" ? "What should I remind you about?" : logForm[c.id]?.quickType && logForm[c.id]?.quickType !== "other" ? "Any extra detail (optional)…" : "Type a note / update…"} value={logForm[c.id]?.note || ""} onChange={e => setLogForm({ ...logForm, [c.id]: { ...logForm[c.id], note: e.target.value } })} onKeyDown={e => e.key === "Enter" && addLogEntry(c)} />
                       <button className="btn-ghost" onClick={() => addLogEntry(c)}>Add</button>
                     </div>
                   </div>
