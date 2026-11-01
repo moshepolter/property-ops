@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-26";
+const APP_BUILD = "sync-fix-27";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -7000,6 +7000,28 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
     setLogForm({ ...logForm, [c.id]: { date: todayISO(), note: "", newCourtDate: "", quickType: null, stipTerms: "", stipNextDue: "" } });
   };
 
+  // "Petition served" button on the case card: saves the date and sets the
+  // reminder two weeks later (follow up with the attorney / default judgment).
+  const [servedFor, setServedFor] = useState(null);
+  const [servedDate, setServedDate] = useState("");
+  const markPetitionServed = (c, date) => {
+    if (!date) return;
+    const dDate = defaultJudgmentReminderDate(date);
+    const dText = `Follow up with the attorney — did ${tenantName(c.tenantId)} answer the petition (served ${fmtDate(date)})? If not, start a default judgment — ${buildingName(c.buildingId)}`;
+    const existing = c.defaultReminderId ? (data.quickNotes || []).find(n => n.id === c.defaultReminderId) : null;
+    const fields = { petitionServed: true, petitionServedDate: date };
+    if (existing) {
+      update("quickNotes", existing.id, { reminderDate: dDate, text: dText, done: false });
+      fields.defaultReminderId = existing.id;
+    } else {
+      const qid = uid();
+      add("quickNotes", { id: qid, text: dText, date: todayISO(), done: false, reminderDate: dDate, buildingId: c.buildingId });
+      fields.defaultReminderId = qid;
+    }
+    update("courtCases", c.id, fields);
+    setServedFor(null);
+  };
+
   const submit = () => {
     if (!form.tenantId) return; // a case with no tenant is a silent data-quality trap
     // Only patch the fields this form actually manages — documents and archived
@@ -7267,15 +7289,6 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
             </select>
           </Field>
           <Field label="Case #"><input value={form.caseNumber} onChange={e => setForm({ ...form, caseNumber: e.target.value })} /></Field>
-          <Field label="Where it's up to">
-            <CaseStagePicker
-              options={data.caseStageOptions}
-              value={form.stage || ""}
-              onPick={(label) => setForm({ ...form, stage: label })}
-              onAdd={(label) => add("caseStageOptions", { label })}
-              onRemove={(o) => remove("caseStageOptions", o.id)}
-            />
-          </Field>
           <Field label="Court date"><input type="date" value={form.nextCourtDate} onChange={e => setForm({ ...form, nextCourtDate: e.target.value })} /></Field>
           <Field label="Sent to lawyer">
             <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
@@ -7447,14 +7460,20 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                     Petition served{c.petitionServedDate ? ` on ${fmtDate(c.petitionServedDate)} · default judgment check ${fmtDate(defaultJudgmentReminderDate(c.petitionServedDate))}` : ""}
                   </div>
                 )}
-                <div className="row"><strong>Where it's up to</strong></div>
-                <CaseStagePicker
-                  options={data.caseStageOptions}
-                  value={c.stage || ""}
-                  onPick={(label) => update("courtCases", c.id, { stage: label })}
-                  onAdd={(label) => add("caseStageOptions", { label })}
-                  onRemove={(o) => remove("caseStageOptions", o.id)}
-                />
+                {!c.petitionServed ? (
+                  servedFor === c.id ? (
+                    <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "center", margin: 0 }}>
+                      <strong>Petition served on</strong>
+                      <input type="date" value={servedDate} onChange={e => setServedDate(e.target.value)} style={{ flex: "0 0 auto", width: 170 }} />
+                      <button className="btn-primary" disabled={!servedDate} onClick={() => markPetitionServed(c, servedDate)}>Save</button>
+                      <button className="btn-ghost" onClick={() => setServedFor(null)}>Cancel</button>
+                    </div>
+                  ) : (
+                    <button className="btn-ghost" onClick={() => { setServedFor(c.id); setServedDate(todayISO()); }}><Gavel size={14} /> Petition served</button>
+                  )
+                ) : (
+                  <button className="btn-ghost" onClick={() => update("courtCases", c.id, { petitionServed: false, petitionServedDate: "" })}>Undo petition served</button>
+                )}
               </div>
               {c.result === "Stipulation (payment plan)" && (
                 <div className="list-card-body">
