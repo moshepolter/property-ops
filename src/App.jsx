@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-30";
+const APP_BUILD = "sync-fix-32";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -287,7 +287,7 @@ const emptyData = () => ({
   buildings: [], units: [], tenants: [], vendors: [], workOrders: [],
   violations: [], courtCases: [], inspections: [], appointments: [],
   localLaws: [], bossReminders: [], customAppointmentTypes: [], customInspectionTypes: [],
-  customOtherAgencies: [], quickNotes: [], importHistory: [], caseStageOptions: [], emergencyRepairs: [], collections: [], smokeCoDetectors: [],
+  customOtherAgencies: [], quickNotes: [], importHistory: [], caseStageOptions: [], emergencyRepairs: [], collections: [], smokeCoDetectors: [], unitTurns: [], insurancePolicies: [],
 });
 
 // Every field in emptyData() is an array of records with an id. When a
@@ -2144,7 +2144,8 @@ function PropertyOpsAppInner() {
     { key: "inspections", label: "Appointments", icon: <CalendarClock size={16} /> },
     { key: "laws", label: "NYC Local Laws", icon: <ScrollText size={16} /> },
     { key: "smokeco", label: "Smoke / CO", icon: <BellRing size={16} /> },
-    { key: "reminders", label: "Boss Reminders", icon: <MessageSquare size={16} /> },
+    { key: "unitturn", label: "Unit Turn", icon: <Home size={16} /> },
+    { key: "insurance", label: "Insurance", icon: <ScrollText size={16} /> },
     { key: "quicknotes", label: "Quick Notes / Reminder", icon: <Pencil size={16} /> },
   ];
 
@@ -2292,7 +2293,8 @@ function PropertyOpsAppInner() {
             {tab === "inspections" && <AppointmentsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} setData={setData} deepLink={deepLink} setDeepLink={setDeepLink} />}
             {tab === "smokeco" && <SmokeCoTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
             {tab === "laws" && <LocalLawsTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
-            {tab === "reminders" && <RemindersTab data={data} add={add} update={update} remove={remove} />}
+            {tab === "unitturn" && <UnitTurnTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
+            {tab === "insurance" && <InsuranceTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} />}
             {tab === "quicknotes" && <QuickNotesTab data={data} add={add} update={update} remove={remove} buildingName={buildingName} deepLink={deepLink} setDeepLink={setDeepLink} />}
           </main>
         </div>
@@ -2390,7 +2392,7 @@ function SearchResults({ results, buildingName, onClose, setTab }) {
 
 const TAB_LABELS = {
   rent: "Rent Collection", violations: "Violations", court: "Court Cases",
-  ero: "Emergency Repairs", collections: "Collections", inspections: "Appointments", quicknotes: "Quick Notes / Reminder", dashboard: "Dashboard",
+  ero: "Emergency Repairs", collections: "Collections", inspections: "Appointments", quicknotes: "Quick Notes / Reminder", dashboard: "Dashboard", insurance: "Insurance",
 };
 
 function AttentionPanel({ icon, label, items, tab, setTab, renderItem, itemKey, extraAction, limit = 8 }) {
@@ -2478,6 +2480,18 @@ function allDatedItems(data, tenantName, buildingName) {
   (data.quickNotes || []).forEach(n => {
     if (n.reminderDate && !n.done) {
       items.push({ key: `n-${n.id}`, date: n.reminderDate, type: "Reminder", label: n.text, sub: n.buildingId ? buildingName(n.buildingId) : "", tab: "quicknotes" });
+    }
+  });
+  // Insurance renewals: 2 months before expiry (until the three steps are done),
+  // 1 month before (until chosen & bound), and the expiry date itself.
+  (data.insurancePolicies || []).forEach(p => {
+    if (!p.expirationDate) return;
+    const lbl = `${p.type || "Insurance"}${p.carrier ? ` — ${p.carrier}` : ""}`;
+    const rem = insuranceRemaining(p);
+    if (rem.length) items.push({ key: `ins-${p.id}`, targetId: p.id, date: addMonthsISO(p.expirationDate, -2), type: "Insurance renewal", label: lbl, note: `Expires ${fmtDate(p.expirationDate)} — to do: ${rem.map(r => r.todo).join("; ")}`, tab: "insurance" });
+    if (!p.stepBound) {
+      items.push({ key: `insd-${p.id}`, targetId: p.id, date: addMonthsISO(p.expirationDate, -1), type: "Insurance renewal", label: lbl, note: `Expires ${fmtDate(p.expirationDate)} — compare coverage and price, choose, and bind the renewal`, tab: "insurance" });
+      items.push({ key: `inse-${p.id}`, targetId: p.id, date: p.expirationDate, type: "Insurance renewal", label: lbl, note: "Policy expires today — confirm the renewal is bound, then press Renewed", tab: "insurance" });
     }
   });
   // Anything scheduled for a Saturday gets a second reminder on the Monday after.
@@ -2756,13 +2770,14 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
   const allDated = allDatedItems(data, tenantName, buildingName);
   // Saturday items reminded on the Monday itself, and payment follow-ups with the attorney.
   const weekendItems = allDated.filter(i => i.type === "Weekend reminder" && i.date === today);
+  const insuranceItems = allDated.filter(i => i.type === "Insurance renewal" && i.date <= today).sort((a, b) => a.date.localeCompare(b.date));
   const payFollowItems = allDated.filter(i => i.type === "Payment follow-up" && i.date <= today).sort((a, b) => a.date.localeCompare(b.date));
   const rentPanelCount = overdueTenants.length + allFollowUps;
   const totalViolationsDue = violationAgencyGroups.reduce((sum, g) => sum + g.items.length, 0);
-  const totalAttention = rentPanelCount + recurringItems.length + appointmentItems.length + quickNoteItems.length + totalViolationsDue + bossReminderItems.length + hearingItems.length + eroItems.length + collectionItems.length + weekendItems.length + payFollowItems.length;
+  const totalAttention = rentPanelCount + recurringItems.length + appointmentItems.length + quickNoteItems.length + totalViolationsDue + hearingItems.length + eroItems.length + collectionItems.length + weekendItems.length + payFollowItems.length + insuranceItems.length;
 
   // Top stat row + follow-up roster
-  const overdueCount = allDated.filter(i => i.date < today && i.type !== "Follow-up" && i.type !== "Weekend reminder").length;
+  const overdueCount = allDated.filter(i => i.date < today && i.type !== "Follow-up" && i.type !== "Weekend reminder" && i.type !== "Insurance renewal").length;
   // Each item type in the Overdue list is a different kind of record with
   // its own notion of "done" — a violation's cure deadline is cleared by
   // marking it certified/resolved, a hearing by clearing the hearing flag,
@@ -2992,6 +3007,23 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       Log: (c.log || []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map(l => `${fmtDate(l.date)}: ${l.note}`).join(" | "),
     })));
 
+    addSheet("Insurance", (data.insurancePolicies || []).map(p => ({
+      Policy: p.type || "", Insured: p.insured || "", Covers: p.covers || "", Starts: p.effectiveDate ? fmtDate(p.effectiveDate) : "", Broker: p.broker || "", Carrier: p.carrier || "", "Policy #": p.policyNumber || "", Premium: p.premium || "",
+      Expires: p.expirationDate ? fmtDate(p.expirationDate) : "",
+      "Quotes requested": p.stepQuotes ? fmtDate(p.stepQuotes) : "", "Dec pages & loss runs": p.stepDecs ? fmtDate(p.stepDecs) : "",
+      "Sent to other brokers": p.stepOther ? fmtDate(p.stepOther) : "", "Chosen & bound": p.stepBound ? fmtDate(p.stepBound) : "", Notes: p.notes || "",
+    })));
+    addSheet("Unit Turns", (data.unitTurns || []).map(t => ({
+      Building: buildingMap[t.buildingId] || "", Apt: unitMap[t.unitId] || "", "Previous Tenant": t.prevTenant || "",
+      "Occupancy Ended": t.endedDate ? fmtDate(t.endedDate) : "", "Inspection Date": t.inspectionDate ? fmtDate(t.inspectionDate) : "",
+      "Inspected By": t.inspectedBy === "third" ? "Third party" : "Owner/agent", Inspector: t.inspectorName || "",
+      "Exempt": t.exempt === "hpd" ? "HPD Lead Free exemption" : t.exempt === "tested" ? "Tested, no lead paint" : "No",
+      "Lead Hazards Found": t.hazardsFound === "yes" ? "Yes" : t.hazardsFound === "no" ? "No" : "",
+      "Checklist Done": `${TURN_CHECKLIST_FLAT.filter(i => t.checklist?.[i.key]?.done).length}/${TURN_CHECKLIST_FLAT.length}`,
+      "New Tenant": t.newTenant || "", "Move-in": t.moveInDate ? fmtDate(t.moveInDate) : "",
+      Rooms: (t.rooms || []).map(r => `${r.name}: ${TURN_ROOM_COLS.map(c => `${c.label.split(" ")[0]} ${r[c.key] || "-"}`).join(", ")}`).join(" | "),
+    })));
+
     addSheet("Smoke-CO", (data.smokeCoDetectors || []).map(r => ({
       Building: buildingMap[r.buildingId] || "",
       Apt: unitMap[r.unitId] || "",
@@ -3163,9 +3195,9 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
       {statOpen && (
         <div className="dash-stat-detail">
           {statOpen === "overdue" && (
-            allDated.filter(i => i.date < today && i.type !== "Follow-up" && i.type !== "Weekend reminder").length === 0
+            allDated.filter(i => i.date < today && i.type !== "Follow-up" && i.type !== "Weekend reminder" && i.type !== "Insurance renewal").length === 0
               ? <div className="hint">Nothing overdue.</div>
-              : allDated.filter(i => i.date < today && i.type !== "Follow-up" && i.type !== "Weekend reminder").sort((a, b) => a.date.localeCompare(b.date)).map(item => (
+              : allDated.filter(i => i.date < today && i.type !== "Follow-up" && i.type !== "Weekend reminder" && i.type !== "Insurance renewal").sort((a, b) => a.date.localeCompare(b.date)).map(item => (
                 <div key={item.key} className="dash-detail-item" onClick={() => goTo(item.tab, item.targetId || item.key.slice(item.key.indexOf("-") + 1))}>
                   <span className="pill pill-danger">{item.type}</span>
                   <div className="followup-item-main">
@@ -3291,6 +3323,21 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
             )}
           />
 
+          <AttentionPanel
+            icon={<ScrollText size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
+            label={<>Insurance renewals <span className="dash-panel-sub">(start 2 months before expiry)</span></>} items={insuranceItems} tab="insurance" setTab={setTab}
+            itemKey={i => i.key}
+            renderItem={i => (
+              <>
+                <Flag date={i.date} />
+                <div className="followup-item-main" style={{ cursor: "pointer" }} onClick={() => setTab("insurance")}>
+                  <div className="followup-item-name">{i.label}</div>
+                  {i.note && <div className="followup-item-note">{i.note}</div>}
+                </div>
+              </>
+            )}
+          />
+
           {violationAgencyGroups.length > 0 && (
             <div className="followup-panel">
               <button className="followup-panel-head" onClick={() => setViolationsPanelOpen(o => !o)}>
@@ -3412,18 +3459,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
             )}
           />
 
-          <AttentionPanel
-            icon={<MessageSquare size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
-            label={<>Boss reminders <span className="dash-panel-sub">(shows until checked off)</span></>} items={bossReminderItems} tab="reminders" setTab={setTab}
-            itemKey={r => r.id}
-            renderItem={r => (
-              <div className="followup-item-main">
-                <div className="followup-item-name">{r.text}</div>
-                <div className="followup-item-note">{fmtDate(r.dateRaised)}</div>
-              </div>
-            )}
-          />
-
+          
           <AttentionPanel
             icon={<Home size={18} className="attention-icon" style={{ color: "var(--warn)" }} />}
             label={<>New tenants missing contact info <span className="dash-panel-sub">(replaced a moved-out tenant)</span></>} items={newTenantsNeedingContact} tab="rent" setTab={setTab}
@@ -8270,6 +8306,511 @@ function LocalLawsTab({ data, add, update, remove, buildingName }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+/* ============================== insurance ============================== */
+
+// Same calendar day N months away (clamped to the end of a shorter month).
+function addMonthsISO(d, n) {
+  if (!d) return "";
+  const [y, m, dd] = d.split("-").map(Number);
+  const first = new Date(y, m - 1 + n, 1);
+  const last = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+  first.setDate(Math.min(dd, last));
+  return toLocalISO(first);
+}
+// Renewal steps, in order. The first three get a reminder 2 months before expiry;
+// "chosen & bound" gets one 1 month before expiry.
+const INSURANCE_STEPS = [
+  { key: "stepQuotes", short: "Quotes requested", todo: "ask the current broker for renewal quotes" },
+  { key: "stepDecs", short: "Dec pages & loss runs", todo: "get the declaration pages and loss runs" },
+  { key: "stepOther", short: "Sent to other brokers", todo: "send the information to other brokers for competing quotes" },
+];
+function insuranceRemaining(p) { return INSURANCE_STEPS.filter(st => !p[st.key]); }
+
+// The policies from the Fairmont Insurance Brokers summaries (prepared June 2026).
+const INSURANCE_SEED = [
+  { type: "Package (Property + Liability + Flood)", insured: "Newkirk Group LLC", covers: "1401-1425 Newkirk Ave aka 582-588 Marlborough Rd, Brooklyn 11226", broker: "Fairmont Insurance Brokers LLC, 718-232-3300", carrier: "Utica Mutual Insurance Company", policyNumber: "CPP 5503348", premium: "$34,164.28", effectiveDate: "2026-03-15", expirationDate: "2027-03-15", notes: "Building $12,699,721 ($10,000 ded). Rental income 12 months. Flood $1,000,000 ($25,000 ded). Sewer backup $250,000. General liability $1M occurrence / $2M aggregate. Mortgagees: Hancock JV Bidco LLC & SIG CRE 2023 Venture LLC (c/o Rialto Capital Advisors); Signature Bank ISAOA ATIMA." },
+  { type: "Umbrella", insured: "Newkirk Group LLC", covers: "1401-1425 Newkirk Ave aka 582-588 Marlborough Rd, Brooklyn 11226", broker: "Fairmont Insurance Brokers LLC, 718-232-3300", carrier: "Utica Mutual Insurance Company", policyNumber: "CULP 5510540", premium: "$3,069.00", effectiveDate: "2026-03-15", expirationDate: "2027-03-15", notes: "Limit $2,000,000 / $2,000,000." },
+  { type: "Business Auto", insured: "Newkirk Group LLC", covers: "Business auto", broker: "Fairmont Insurance Brokers LLC, 718-232-3300", carrier: "Utica Mutual Insurance Company", policyNumber: "5505272", premium: "$204.00", effectiveDate: "2026-03-15", expirationDate: "2027-03-15", notes: "Combined single limit $1,000,000." },
+  { type: "Liability", insured: "Shpelrub Realty LLC", covers: "2177 East 21st St, Brooklyn 11229", broker: "Fairmont Insurance Brokers LLC, 718-232-3300", carrier: "Hadron Specialty Insurance Company", policyNumber: "H0208GL000068-01", premium: "$33,382.45", effectiveDate: "2025-12-10", expirationDate: "2026-12-10", notes: "General liability $1M occurrence / $2M aggregate. Lead and mold liability included. Mortgagee: Wells Fargo Bank, NA as Trustee (Benchmark 2020)." },
+  { type: "Property", insured: "Shpelrub Realty LLC", covers: "2177 East 21st St, Brooklyn 11229", broker: "Fairmont Insurance Brokers LLC, 718-232-3300", carrier: "Pennsylvania Manufacturers Association Insurance Co", policyNumber: "8026019317306", premium: "$23,468.98", effectiveDate: "2026-02-08", expirationDate: "2027-02-08", notes: "Building $11,084,160 replacement cost ($10,000 ded). Equipment breakdown $12,056,993. Sewer backup $25,000." },
+  { type: "Liability", insured: "Rafyana Realty Corp", covers: "2822 Brighton 8th St aka 205/217 Neptune Ave, Brooklyn 11235", broker: "Fairmont Insurance Brokers LLC, 718-232-3300", carrier: "Clear Blue Specialty Insurance Company", policyNumber: "BY01-8000193-04", premium: "$21,589.68", effectiveDate: "2025-10-20", expirationDate: "2026-10-20", notes: "General liability $1M occurrence / $2M aggregate. This is the 2025-26 term — press Renewed once the 2026-27 summary arrives." },
+  { type: "Property", insured: "Rafyana Realty Corp", covers: "2822 Brighton 8th St aka 205/217 Neptune Ave, Brooklyn 11235", broker: "Fairmont Insurance Brokers LLC, 718-232-3300", carrier: "National Casualty Company", policyNumber: "RYO0006154", premium: "$17,305.65", effectiveDate: "2025-10-20", expirationDate: "2026-10-20", notes: "Building $5,524,100 ($5,000 ded). Flood excluded. Mortgagee: Northfield Bank. This is the 2025-26 term — press Renewed once the 2026-27 summary arrives." },
+  { type: "Package (Property + Liability)", insured: "Neptune Group LLC", covers: "350-362 Neptune Ave, Brooklyn 11235", broker: "Fairmont Insurance Brokers LLC, 718-232-3300", carrier: "Allianz Global Risks US Insurance Company", policyNumber: "AXMP25000516-00", premium: "$38,871.74", effectiveDate: "2025-12-30", expirationDate: "2026-12-30", notes: "Building $29,035,794 ($10,000 ded). Rental income $2,100,000. Ordinance & law $1,000,000. General liability $1M occurrence / $2M aggregate. Mortgagee: Benchmark 2021-B23 Mortgagee Trust." },
+];
+
+function InsuranceTab({ data, add, update, remove, buildingName }) {
+  const blank = { type: "", insured: "", covers: "", broker: "", carrier: "", policyNumber: "", premium: "", effectiveDate: "", expirationDate: "", notes: "" };
+  const [form, setForm] = useState(null);
+  const [renewing, setRenewing] = useState(null);
+  const [rf, setRf] = useState({});
+  const [mailFor, setMailFor] = useState(null);
+  const [copied, setCopied] = useState("");
+  const today = todayISO();
+  const all = (data.insurancePolicies || []).slice().sort((a, b) => (a.expirationDate || "9999-99-99").localeCompare(b.expirationDate || "9999-99-99"));
+  const missingSeed = INSURANCE_SEED.filter(sd => !all.some(p => (p.policyNumber || "").trim() === sd.policyNumber));
+  const loadSeed = () => {
+    if (!window.confirm(`Add ${missingSeed.length} policies from the Fairmont insurance summaries (Newkirk, Shpelrub, Rafyana, Neptune)?`)) return;
+    missingSeed.forEach(sd => add("insurancePolicies", { id: uid(), ...sd }));
+  };
+  const saveNew = () => {
+    if (!form.type.trim()) return;
+    add("insurancePolicies", { id: uid(), ...form, type: form.type.trim() });
+    setForm(null);
+  };
+  const startRenew = (p) => { setRenewing(p.id); setRf({ effectiveDate: p.expirationDate || "", expirationDate: "", carrier: p.carrier || "", policyNumber: "", broker: p.broker || "", premium: "" }); };
+  const saveRenew = (p) => {
+    if (!rf.expirationDate) return;
+    const old = { expired: p.expirationDate || "", carrier: p.carrier || "", broker: p.broker || "", policyNumber: p.policyNumber || "", premium: p.premium || "", renewedOn: today };
+    update("insurancePolicies", p.id, {
+      effectiveDate: rf.effectiveDate, expirationDate: rf.expirationDate, carrier: rf.carrier, policyNumber: rf.policyNumber, broker: rf.broker, premium: rf.premium,
+      stepQuotes: "", stepDecs: "", stepOther: "", stepBound: "", history: [...(p.history || []), old],
+    });
+    setRenewing(null);
+  };
+  const printAll = () => {
+    if (all.length === 0) { window.alert("No policies to print yet."); return; }
+    const d = (x) => (x ? fmtDate(x) : "");
+    const rows = all.map(p => `<tr>
+      <td class="l"><b>${escHtml(p.type)}</b></td><td class="l">${escHtml(p.insured)}</td><td class="l">${escHtml(p.covers)}</td><td class="l">${escHtml(p.broker)}</td><td class="l">${escHtml(p.carrier)}</td>
+      <td>${escHtml(p.policyNumber)}</td><td>${escHtml(d(p.effectiveDate))}${p.effectiveDate || p.expirationDate ? " –<br>" : ""}<b>${escHtml(d(p.expirationDate))}</b></td><td>${escHtml(p.premium)}</td>
+      <td>${escHtml(p.expirationDate ? d(addMonthsISO(p.expirationDate, -2)) : "")}</td>
+      <td>${escHtml(d(p.stepQuotes))}</td><td>${escHtml(d(p.stepDecs))}</td><td>${escHtml(d(p.stepOther))}</td><td>${escHtml(d(p.stepBound))}</td><td class="l">${escHtml(p.notes)}</td></tr>`).join("");
+    openPrintWindow("Insurance schedule", `<h1>Insurance schedule</h1><div class="sub">Printed ${escHtml(fmtDate(today))} — policies in order of expiration</div>
+      <table style="font-size:9.5px"><tr><th class="l">Policy</th><th class="l">Insured</th><th class="l">Covers</th><th class="l">Broker</th><th class="l">Carrier</th><th>Policy #</th><th>Policy period</th><th>Premium</th><th>Start renewal</th><th>Quotes requested</th><th>Dec pages &amp; loss runs</th><th>Sent to other brokers</th><th>Chosen &amp; bound</th><th class="l">Notes</th></tr>${rows}</table>
+      <div class="note">Renewal process, starting two months before each policy expires: (1) ask the current broker for renewal quotes, (2) request declaration pages and loss runs, (3) send the information to other brokers for competing quotes, then compare coverage and price one month before expiration.</div>`);
+  };
+  const emailFor = (p) => {
+    const what = `${p.type}${p.insured ? ` policy for ${p.insured}` : " policy"}`;
+    const cov = p.covers ? ` (${p.covers})` : "";
+    const cur = `${p.carrier ? ` with ${p.carrier}` : ""}${p.policyNumber ? `, policy number ${p.policyNumber}` : ""}`;
+    const exp = p.expirationDate ? fmtDate(p.expirationDate) : "";
+    const toCurrent = `Subject: Renewal quotes, declaration pages and loss runs — ${p.insured || ""} ${p.type}${p.policyNumber ? ` (${p.policyNumber})` : ""}\n\nHello,\n\nThe ${what}${cov}${cur}${exp ? ` expires on ${exp}` : " is coming up for renewal"}. Please send us:\n\n1. Your renewal quotes\n2. The current declaration pages\n3. Currently valued loss runs for the past five years\n\nWe will also be getting competing quotes from other brokers, so please send these as soon as you can.\n\nThank you,\nMoshe`;
+    const toOthers = `Subject: Quote request — ${p.insured || ""} ${p.type}${exp ? `, effective ${exp}` : ""}\n\nHello,\n\nWe are reviewing the renewal of the ${what}${cov}${p.carrier ? `, currently with ${p.carrier}` : ""}${exp ? `, which expires on ${exp}` : ""}. Attached are the current declaration pages and loss runs.${p.notes ? `\n\nCurrent coverage details: ${p.notes}` : ""}\n\nPlease send a quote with the same or better coverage and tell us where your coverage differs from what we have now, so we can compare coverage and pricing side by side.\n\nThank you,\nMoshe`;
+    return { toCurrent, toOthers };
+  };
+  const copyText = (key, text) => { navigator.clipboard.writeText(text); setCopied(key); setTimeout(() => setCopied(""), 1500); };
+  const th = { whiteSpace: "nowrap" };
+  const F = (label, node) => <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}><span className="row-muted">{label}</span>{node}</label>;
+  const fi = (k, props = {}) => <input value={form[k]} onChange={e => setForm({ ...form, [k]: e.target.value })} {...props} />;
+  return (
+    <div>
+      <div className="page-head">
+        <h1 className="page-title">Insurance</h1>
+        <div className="page-actions">
+          {missingSeed.length > 0 && <button className="btn-ghost" onClick={loadSeed}>Load the {missingSeed.length} policies from the Fairmont summaries</button>}
+          <button className="btn-ghost" onClick={printAll}><Printer size={14} /> Print all</button>
+          <button className="btn-primary" onClick={() => setForm(form ? null : { ...blank })}><Plus size={14} /> Add policy</button>
+        </div>
+      </div>
+      <div className="hint" style={{ marginBottom: 8 }}>
+        Two months before a policy expires, a reminder shows on the Dashboard and calendar to: (1) ask the current broker for renewal quotes, (2) get the declaration pages and loss runs, (3) send everything to other brokers for competing quotes — fill in each date as you do it.
+        One month before you get a second reminder to compare coverage and price and choose; fill in "Chosen &amp; bound" when done. Press <em>Email</em> on a policy for ready-to-send requests, and <em>Renewed</em> to enter the new term.
+        Anything in the table can be typed over directly.
+      </div>
+      {form && (
+        <div className="form-panel" style={{ marginBottom: 10 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 8 }}>
+            {F("Policy type (Property, Liability, Flood, Umbrella…)", fi("type"))}
+            {F("Insured company", fi("insured"))}
+            {F("Building(s) it covers", fi("covers"))}
+            {F("Broker (name, phone, email)", fi("broker"))}
+            {F("Insurance carrier", fi("carrier"))}
+            {F("Policy number", fi("policyNumber"))}
+            {F("Premium", fi("premium", { placeholder: "$" }))}
+            {F("Policy starts", fi("effectiveDate", { type: "date" }))}
+            {F("Policy expires", fi("expirationDate", { type: "date" }))}
+          </div>
+          <div style={{ marginTop: 8 }}>{F("Coverage limits / notes / mortgagees", <textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />)}</div>
+          <div className="form-actions">
+            <button className="btn-primary" onClick={saveNew} disabled={!form.type.trim()}>Save policy</button>
+            <button className="btn-ghost" onClick={() => setForm(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <div className="sheet-wrap wo-sheet-wrap">
+        <table className="sheet wo-sheet">
+          <thead>
+            <tr>
+              <th>Policy</th><th>Insured</th><th>Covers</th><th>Broker</th><th>Carrier</th><th>Policy #</th><th>Premium</th><th>Starts</th><th>Expires</th>
+              <th style={th}>1. Quotes requested</th><th style={th}>2. Dec pages &amp; loss runs</th><th style={th}>3. Sent to other brokers</th><th style={th}>4. Chosen &amp; bound</th><th>Notes</th><th style={{ width: 130 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {all.length === 0 && <tr><td colSpan={15} style={{ padding: 16 }} className="row-muted">No policies yet — press "Add policy"{missingSeed.length ? " or load the ones from your Fairmont summaries" : ""}.</td></tr>}
+            {all.map(p => {
+              const days = p.expirationDate ? daysUntil(p.expirationDate) : null;
+              const kick = p.expirationDate ? addMonthsISO(p.expirationDate, -2) : "";
+              const cell = (k, extra = {}) => <WoCell value={p[k] || ""} onCommit={t => { update("insurancePolicies", p.id, { [k]: t }); return true; }} {...extra} />;
+              const mail = mailFor === p.id ? emailFor(p) : null;
+              return (
+                <React.Fragment key={p.id}>
+                  <tr className="wo-sheet-row">
+                    <td className="wo-edit" data-label="Policy">{cell("type", { multiline: true, narrow: 110 })}</td>
+                    <td className="wo-edit" data-label="Insured">{cell("insured", { multiline: true, narrow: 110, placeholder: "—" })}</td>
+                    <td className="wo-edit" data-label="Covers">{cell("covers", { multiline: true, narrow: 130, placeholder: "—" })}</td>
+                    <td className="wo-edit" data-label="Broker">{cell("broker", { multiline: true, narrow: 130, placeholder: "—" })}</td>
+                    <td className="wo-edit" data-label="Carrier">{cell("carrier", { multiline: true, narrow: 110, placeholder: "—" })}</td>
+                    <td className="wo-edit" data-label="Policy #">
+                      {cell("policyNumber", { placeholder: "—", narrow: 110 })}
+                      {(p.history || []).length > 0 && <div className="row-muted" style={{ fontSize: 11, padding: "0 10px 6px" }}>Past: {(p.history || []).map(h => `${h.expired ? fmtDate(h.expired) : "?"} ${h.carrier || ""}${h.premium ? ` ${h.premium}` : ""}`).join("; ")}</div>}
+                    </td>
+                    <td className="wo-edit" data-label="Premium">{cell("premium", { placeholder: "—", narrow: 85 })}</td>
+                    <td className="wo-edit" data-label="Starts"><WoCell type="date" value={p.effectiveDate || ""} onCommit={t => { update("insurancePolicies", p.id, { effectiveDate: t }); return true; }} /></td>
+                    <td className="wo-edit" data-label="Expires">
+                      <WoCell type="date" value={p.expirationDate || ""} onCommit={t => { update("insurancePolicies", p.id, { expirationDate: t }); return true; }} />
+                      {p.expirationDate && (
+                        <div style={{ fontSize: 11, padding: "0 10px 6px" }} className={days < 0 ? "" : "row-muted"}>
+                          {days < 0 ? <span className="pill pill-danger">Expired</span> : `${days} days · reminders from ${fmtDate(kick)}`}
+                        </div>
+                      )}
+                    </td>
+                    {["stepQuotes", "stepDecs", "stepOther", "stepBound"].map(k => (
+                      <td key={k} className="wo-edit" data-label={k}>
+                        <WoCell type="date" value={p[k] || ""} onCommit={t => { update("insurancePolicies", p.id, { [k]: t }); return true; }} />
+                      </td>
+                    ))}
+                    <td className="wo-edit" data-label="Notes">{cell("notes", { multiline: true, placeholder: "Limits, mortgagees, quotes…", narrow: 200 })}</td>
+                    <td className="wo-sheet-actions">
+                      <button className="btn-ghost" title="Ready-to-send renewal emails" onClick={() => setMailFor(mailFor === p.id ? null : p.id)}><Mail size={14} /> Email</button>
+                      <button className="btn-ghost" title="This policy was renewed — enter the new term" onClick={() => startRenew(p)}>Renewed</button>
+                      <IconBtn title="Delete" danger onClick={() => { if (window.confirm("Delete this policy row?")) remove("insurancePolicies", p.id); }}><Trash2 size={14} /></IconBtn>
+                    </td>
+                  </tr>
+                  {mail && (
+                    <tr className="wo-sheet-detail-row">
+                      <td colSpan={15}>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12 }}>
+                          {[["toCurrent", "To your current broker"], ["toOthers", "To other brokers (attach the dec pages and loss runs)"]].map(([k, label]) => (
+                            <div key={k}>
+                              <div className="row"><strong>{label}</strong> <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => copyText(p.id + k, mail[k])}>{copied === p.id + k ? "Copied!" : "Copy"}</button></div>
+                              <textarea readOnly rows={12} value={mail[k]} style={{ width: "100%", boxSizing: "border-box" }} />
+                            </div>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  {renewing === p.id && (
+                    <tr className="wo-sheet-detail-row">
+                      <td colSpan={15}>
+                        <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "center", margin: 0 }}>
+                          <strong>New term</strong>
+                          <label className="hint">Starts <input type="date" value={rf.effectiveDate} onChange={e => setRf({ ...rf, effectiveDate: e.target.value })} /></label>
+                          <label className="hint">Expires <input type="date" value={rf.expirationDate} onChange={e => setRf({ ...rf, expirationDate: e.target.value })} /></label>
+                          <input placeholder="Carrier" value={rf.carrier} onChange={e => setRf({ ...rf, carrier: e.target.value })} />
+                          <input placeholder="Policy #" value={rf.policyNumber} onChange={e => setRf({ ...rf, policyNumber: e.target.value })} />
+                          <input placeholder="Broker" value={rf.broker} onChange={e => setRf({ ...rf, broker: e.target.value })} />
+                          <input placeholder="Premium" value={rf.premium} onChange={e => setRf({ ...rf, premium: e.target.value })} style={{ maxWidth: 110 }} />
+                          <button className="btn-primary" disabled={!rf.expirationDate} onClick={() => saveRenew(p)}>Save</button>
+                          <button className="btn-ghost" onClick={() => setRenewing(null)}>Cancel</button>
+                          <div className="hint" style={{ flexBasis: "100%" }}>The old term is kept under "Past" and the four renewal dates reset for next year.</div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ============================== unit turn ============================== */
+
+const TURN_ROOM_COLS = [
+  { key: "peeling", label: "Peeling paint", rule: "Yes = remediate" },
+  { key: "teeth", label: "Teeth marks on painted chewable surface", rule: "Yes = abate" },
+  { key: "subsurface", label: "Deteriorated painted subsurface", rule: "Yes = remediate" },
+  { key: "doorFrame", label: "Door & door frame friction surfaces painted", rule: "Yes = abate" },
+  { key: "windowFrame", label: "Window frame friction surface painted", rule: "Yes = abate / window channels" },
+  { key: "impact", label: "Painted area shows impact damage", rule: "Yes = remediate" },
+  { key: "floors", label: "Window wells & bare floors smooth and cleanable", rule: "No = remediate" },
+];
+const TURN_CHECKLIST = [
+  { group: "Lead paint (Local Law 1 turnover)", items: [
+    ["lead_inspect", "Turnover lead-paint inspection done — every surface in every room, incl. inside closets & cabinets"],
+    ["lead_fix", "Hazards fixed — wet scrape & repaint by EPA-certified (RRP) workers using safe work practices"],
+    ["lead_abate", "Friction / impact surfaces or teeth marks abated, or window channels installed (if found)"],
+    ["lead_clean", "Cleanup after lead work (and dust clearance if required)"],
+    ["lead_records", "Records filed: SF LL1-06 summary, SF LL1-07 detail, contractor EPA certs & affidavits (keep 10 years)"],
+  ] },
+  { group: "Safety", items: [
+    ["smoke", "Smoke detector installed and working"],
+    ["co", "Carbon monoxide detector installed and working"],
+    ["windowGuards", "Window guards installed / checked"],
+    ["gas", "Stove, gas, heat and hot water checked"],
+    ["locks", "Locks changed; keys / fobs ready; intercom and mailbox updated"],
+  ] },
+  { group: "Condition", items: [
+    ["pests", "Pest inspection (roaches, mice) and bed-bug check"],
+    ["mold", "Mold, leaks and water damage checked"],
+    ["clean", "Cleaned; trash removed"],
+    ["paint", "Painted; walls, ceilings and trim touched up"],
+    ["floors", "Floors repaired / refinished"],
+    ["fixtures", "Plumbing, fixtures, appliances and electric tested"],
+    ["photos", "Photos taken before move-in"],
+  ] },
+  { group: "New tenant paperwork", items: [
+    ["leadDisclosure", "Lead-paint disclosure and pamphlet given (building built before 1978)"],
+    ["bedbug", "Bed-bug infestation history notice given"],
+    ["windowNotice", "Window guard notice / form signed"],
+    ["detectorNotice", "Smoke / CO detector notice signed"],
+    ["floodNotice", "Flood and sprinkler disclosures in the lease"],
+    ["legalRent", "Rent-stabilized: legal rent checked, vacancy rider given, DHCR registration and improvement records filed"],
+  ] },
+];
+const TURN_CHECKLIST_FLAT = TURN_CHECKLIST.flatMap(g => g.items.map(([k, l]) => ({ key: k, label: l, group: g.group })));
+
+function escHtml(x) { return String(x == null ? "" : x).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function openPrintWindow(title, bodyHtml) {
+  const w = window.open("", "_blank");
+  if (!w) { window.alert("Your browser blocked the print window — allow pop-ups for this site and try again."); return; }
+  w.document.write(`<!doctype html><html><head><title>${escHtml(title)}</title><style>
+    @page { size: landscape; margin: 0.5in; }
+    body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #000; }
+    h1 { font-size: 15px; margin: 0; } .sub { font-size: 11px; margin: 2px 0 10px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 6px 24px; margin: 8px 0 12px; }
+    .meta div { flex: 1 1 30%; border-bottom: 1px solid #000; min-height: 18px; padding-top: 4px; }
+    .meta span { font-size: 9px; color: #333; display: block; }
+    table { border-collapse: collapse; width: 100%; } th, td { border: 1px solid #000; padding: 4px 5px; text-align: center; vertical-align: middle; }
+    th { font-size: 9.5px; } td.l, th.l { text-align: left; }
+    .note { font-size: 9px; margin-top: 8px; } .pb { page-break-after: always; }
+    .box { display: inline-block; width: 11px; height: 11px; border: 1px solid #000; margin-right: 6px; vertical-align: -2px; text-align: center; line-height: 11px; font-size: 10px; }
+  </style></head><body>${bodyHtml}<script>window.onload=function(){setTimeout(function(){window.print();},250);};</script></body></html>`);
+  w.document.close();
+}
+
+function UnitTurnTab({ data, add, update, remove, buildingName }) {
+  const thisYear = String(new Date().getFullYear());
+  const [bFilter, setBFilter] = useState("All");
+  const [year, setYear] = useState("All");
+  const [open, setOpen] = useState(null);
+  const [nb, setNb] = useState(data.buildings[0]?.id || "");
+  const [nu, setNu] = useState("");
+  const [nTenant, setNTenant] = useState("");
+  const [nEnded, setNEnded] = useState("");
+  const [roomName, setRoomName] = useState({});
+  const [customText, setCustomText] = useState({});
+  const unitsFor = (bid) => data.units.filter(u => u.buildingId === bid).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber));
+  const unitNum = (id) => data.units.find(u => u.id === id)?.unitNumber || "—";
+  const addr = (bid) => data.buildings.find(b => b.id === bid)?.address || "";
+  const turnYear = (t) => (t.inspectionDate || t.endedDate || t.createdAt || "").slice(0, 4);
+  const pickUnit = (id) => {
+    setNu(id);
+    const ts = data.tenants.filter(t => t.unitId === id);
+    const cur = ts.find(t => !t.movedOut) || ts[ts.length - 1];
+    setNTenant(cur?.name || "");
+  };
+  const startTurn = () => {
+    if (!nb || !nu) return;
+    const id = uid();
+    add("unitTurns", { id, buildingId: nb, unitId: nu, prevTenant: nTenant, endedDate: nEnded, createdAt: todayISO(), exempt: "no", inspectionDate: "", inspectedBy: "owner", inspectorName: "", hazardsFound: "", rooms: [], checklist: {}, customItems: [], notes: [] });
+    setOpen(id); setNu(""); setNTenant(""); setNEnded("");
+  };
+  const years = Array.from(new Set((data.unitTurns || []).map(turnYear).filter(Boolean))).sort().reverse();
+  const shown = (data.unitTurns || [])
+    .filter(t => bFilter === "All" || t.buildingId === bFilter)
+    .filter(t => year === "All" || turnYear(t) === year)
+    .slice().sort((a, b) => (b.endedDate || b.createdAt || "").localeCompare(a.endedDate || a.createdAt || ""));
+  const progress = (t) => {
+    const done = TURN_CHECKLIST_FLAT.filter(i => t.checklist?.[i.key]?.done).length + (t.customItems || []).filter(i => i.done).length;
+    return `${done}/${TURN_CHECKLIST_FLAT.length + (t.customItems || []).length}`;
+  };
+  const ynLabel = { yes: "Yes", no: "No", "": "—" };
+  const cycle = (v) => (v === "" || v == null ? "yes" : v === "yes" ? "no" : "");
+  const hazardsSuggested = (t) => (t.rooms || []).some(r => ["peeling", "teeth", "subsurface", "doorFrame", "windowFrame", "impact"].some(k => r[k] === "yes") || r.floors === "no");
+  const exemptLabel = { no: "No", hpd: "Yes — HPD Lead Free exemption", tested: "Yes — tested, no lead-based paint" };
+
+  // ----- printing -----
+  const metaBlock = (pairs) => `<div class="meta">${pairs.map(([k, v]) => `<div><span>${escHtml(k)}</span>${escHtml(v)}</div>`).join("")}</div>`;
+  const printLL107 = (t) => {
+    const yr = turnYear(t) || thisYear;
+    const rows = (t.rooms && t.rooms.length ? t.rooms : [{ name: "" }]).map(r => `<tr><td class="l">${escHtml(r.name)}</td>${TURN_ROOM_COLS.map(c => `<td>${r[c.key] === "yes" ? "X" : ""}</td><td>${r[c.key] === "no" ? "X" : ""}</td>`).join("")}</tr>`).join("");
+    openPrintWindow("SF LL1-07", `<h1>Turnover Inspection - Detailed Form &nbsp; (Form SF LL1-07)</h1><div class="sub">Calendar Year ${escHtml(yr)}</div>
+      ${metaBlock([["Building address", addr(t.buildingId)], ["Apt #", unitNum(t.unitId)], ["Name of person who completed the inspection", t.inspectorName || ""], ["Borough", ""], ["Property registration #", ""], ["Signature of person who completed the inspection", ""]])}
+      <div class="sub">A visual inspection for lead-based paint hazards shall include every surface in every room in the dwelling unit, including the interiors of closets and cabinets.</div>
+      <table><tr><th class="l" rowspan="2">List apartment room</th>${TURN_ROOM_COLS.map(c => `<th colspan="2">${escHtml(c.label)}<br><i>${escHtml(c.rule)}</i></th>`).join("")}</tr>
+      <tr>${TURN_ROOM_COLS.map(() => "<th>Yes</th><th>No</th>").join("")}</tr>${rows}</table>
+      <div class="note">Inspection date: ${escHtml(t.inspectionDate ? fmtDate(t.inspectionDate) : "")} &nbsp; Performed by: ${t.inspectedBy === "third" ? "Third party" : "Owner / agent"} &nbsp; Lead-based paint hazards found: ${t.hazardsFound === "yes" ? "Yes" : t.hazardsFound === "no" ? "No" : ""}</div>
+      <div class="note">"Remediate" = reduce or eliminate the hazard by wet scraping and repainting. "Abate" = completely eliminate lead-based paint from a surface or replace the components. Retain for at least 10 years, with records of all work to correct hazards found and EPA firm and worker certifications. Sample form for compliance with NYC Administrative Code § 27-2056.8 (HPD form SF LL1-07).</div>`);
+  };
+  const printLL106 = () => {
+    const turns = shown.filter(t => t.endedDate || t.inspectionDate || true);
+    const byB = {};
+    turns.forEach(t => { (byB[t.buildingId] = byB[t.buildingId] || []).push(t); });
+    const yr = year === "All" ? thisYear : year;
+    const pages = Object.keys(byB).map(bid => {
+      const rows = byB[bid].slice().sort((a, b) => compareUnits(unitNum(a.unitId), unitNum(b.unitId))).map(t => `<tr>
+        <td>${escHtml(unitNum(t.unitId))}</td><td>${t.exempt === "hpd" ? "X" : ""}</td><td>${t.exempt === "tested" ? "X" : ""}</td><td>${t.exempt === "no" || !t.exempt ? "X" : ""}</td>
+        <td>${escHtml(t.endedDate ? fmtDate(t.endedDate) : "")}</td><td>${escHtml(t.inspectionDate ? fmtDate(t.inspectionDate) : "")}</td>
+        <td>${t.inspectedBy !== "third" ? "X" : ""}</td><td>${t.inspectedBy === "third" ? "X" : ""}</td><td class="l">${escHtml(t.inspectorName || "")}</td>
+        <td>${t.hazardsFound === "yes" ? "X" : ""}</td><td>${t.hazardsFound === "no" ? "X" : ""}</td></tr>`).join("");
+      return `<div class="pb"><h1>Turnover - Summary Form &nbsp; (Form SF LL1-06)</h1><div class="sub">Calendar Year ${escHtml(yr)}</div>
+        ${metaBlock([["Building address", addr(bid)], ["Owner/agent name", ""], ["Borough", ""], ["Property registration #", ""], ["Owner/agent signature", ""]])}
+        <table><tr><th rowspan="2">Apt #</th><th colspan="3">Is apt exempt from the required turnover inspection?</th><th rowspan="2">Date the previous tenant's occupancy ended</th><th rowspan="2">Date of the turnover inspection</th><th colspan="2">Turnover inspection performed by</th><th rowspan="2" class="l">Name of individual who performed the turnover inspection</th><th colspan="2">Lead-based paint hazards found?</th></tr>
+        <tr><th>Yes, HPD Lead Free exemption</th><th>Yes, tested: lead free, no painted surfaces positive</th><th>No</th><th>Owner / agent</th><th>Third party</th><th>Yes</th><th>No</th></tr>${rows}</table>
+        <div class="note">Attach a copy of each unit's turnover inspection form (SF LL1-07) and retain for at least 10 years. Sample form for compliance with NYC Administrative Code § 27-2056.8 (HPD form SF LL1-06).</div></div>`;
+    }).join("");
+    if (!pages) { window.alert("No unit turns to print for this filter."); return; }
+    openPrintWindow("SF LL1-06", pages);
+  };
+  const printChecklist = (t) => {
+    const items = (g) => g.map(i => `<tr><td class="l" style="width:70%"><span class="box">${t.checklist?.[i.key]?.done ? "X" : ""}</span>${escHtml(i.label)}</td><td>${escHtml(t.checklist?.[i.key]?.date ? fmtDate(t.checklist[i.key].date) : "")}</td><td class="l">${escHtml(t.checklist?.[i.key]?.note || "")}</td></tr>`).join("");
+    const body = TURN_CHECKLIST.map(g => `<h1 style="margin-top:10px;font-size:12px">${escHtml(g.group)}</h1><table>${items(g.items.map(([k, l]) => ({ key: k, label: l })))}</table>`).join("")
+      + ((t.customItems || []).length ? `<h1 style="margin-top:10px;font-size:12px">Other</h1><table>${(t.customItems || []).map(i => `<tr><td class="l" style="width:70%"><span class="box">${i.done ? "X" : ""}</span>${escHtml(i.text)}</td><td>${escHtml(i.date ? fmtDate(i.date) : "")}</td><td class="l">${escHtml(i.note || "")}</td></tr>`).join("")}</table>` : "");
+    openPrintWindow("Unit turn checklist", `<h1>Unit Turn Checklist — ${escHtml(addr(t.buildingId))}, Apt ${escHtml(unitNum(t.unitId))}</h1>
+      <div class="sub">Previous tenant: ${escHtml(t.prevTenant || "")} &nbsp; Occupancy ended: ${escHtml(t.endedDate ? fmtDate(t.endedDate) : "")} &nbsp; New tenant: ${escHtml(t.newTenant || "")} &nbsp; Move-in: ${escHtml(t.moveInDate ? fmtDate(t.moveInDate) : "")}</div>${body}`);
+  };
+
+  const field = (label, node) => <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}><span className="row-muted">{label}</span>{node}</label>;
+
+  return (
+    <div>
+      <div className="page-head">
+        <h1 className="page-title">Unit Turn</h1>
+        <div className="page-actions">
+          <button className="btn-ghost" onClick={printLL106} title="HPD summary form for the buildings and year shown"><Printer size={14} /> Print summary (LL1-06)</button>
+        </div>
+      </div>
+      <div className="hint" style={{ marginBottom: 8 }}>Start a turn, then answer the questions on its card — every answer saves when you press Enter or click away. Print the HPD forms (SF LL1-06 summary, SF LL1-07 per unit) or the checklist any time.</div>
+      <div className="form-panel" style={{ marginBottom: 10 }}>
+        <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "flex-end", margin: 0 }}>
+          {field("Building", <select value={nb} onChange={e => { setNb(e.target.value); setNu(""); }}>{data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}</select>)}
+          {field("Apt", <select value={nu} onChange={e => pickUnit(e.target.value)}><option value="">Select apt…</option>{unitsFor(nb).map(u => <option key={u.id} value={u.id}>{u.unitNumber}</option>)}</select>)}
+          {field("Previous tenant", <input value={nTenant} onChange={e => setNTenant(e.target.value)} />)}
+          {field("Date occupancy ended", <input type="date" value={nEnded} onChange={e => setNEnded(e.target.value)} />)}
+          <button className="btn-primary" onClick={startTurn} disabled={!nb || !nu}><Plus size={14} /> Start unit turn</button>
+        </div>
+      </div>
+      <div className="filter-row">
+        <select value={bFilter} onChange={e => setBFilter(e.target.value)} style={{ maxWidth: 220 }}><option value="All">All buildings</option>{data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}</select>
+        <select value={year} onChange={e => setYear(e.target.value)} style={{ maxWidth: 140 }}><option value="All">All years</option>{years.map(y => <option key={y} value={y}>{y}</option>)}</select>
+      </div>
+      {shown.length === 0 && <EmptyState text="No unit turns yet." />}
+      {shown.map(t => {
+        const isOpen = open === t.id;
+        const set = (patch) => update("unitTurns", t.id, patch);
+        const setCheck = (key, patch) => set({ checklist: { ...(t.checklist || {}), [key]: { ...(t.checklist?.[key] || {}), ...patch } } });
+        const setRoom = (rid, patch) => set({ rooms: t.rooms.map(r => r.id === rid ? { ...r, ...patch } : r) });
+        return (
+          <div className="list-card" key={t.id}>
+            <div className="list-card-head" onClick={() => setOpen(isOpen ? null : t.id)} style={{ cursor: "pointer" }}>
+              {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+              <span className="pill pill-accent">Apt {unitNum(t.unitId)}</span>
+              <div className="list-card-title">{buildingName(t.buildingId)}{t.prevTenant ? ` · ${t.prevTenant}` : ""}</div>
+              {t.endedDate && <span className="pill pill-muted">Ended {fmtDate(t.endedDate)}</span>}
+              {t.inspectionDate ? <span className="pill pill-ok">Inspected {fmtDate(t.inspectionDate)}</span> : <span className="pill pill-warn">Inspection not done</span>}
+              <span className="pill pill-muted">{progress(t)} done</span>
+            </div>
+            {isOpen && (
+              <div className="list-card-body">
+                <div className="inline-form" style={{ flexWrap: "wrap", margin: "0 0 8px" }}>
+                  <button className="btn-ghost" onClick={() => printLL107(t)}><Printer size={14} /> Print LL1-07 (this unit)</button>
+                  <button className="btn-ghost" onClick={() => printChecklist(t)}><Printer size={14} /> Print checklist</button>
+                  <button className="btn-ghost" onClick={() => { if (window.confirm("Delete this unit turn and everything on it?")) { remove("unitTurns", t.id); setOpen(null); } }}><Trash2 size={14} /> Delete</button>
+                </div>
+
+                <div className="row"><strong>1. Turnover inspection (HPD form SF LL1-06)</strong></div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 8, margin: "6px 0 12px" }}>
+                  {field("Previous tenant", <WoCell value={t.prevTenant || ""} onCommit={v => { set({ prevTenant: v }); return true; }} />)}
+                  {field("Date the previous tenant's occupancy ended", <WoCell type="date" value={t.endedDate || ""} onCommit={v => { set({ endedDate: v }); return true; }} />)}
+                  {field("Is the apartment exempt from the turnover inspection?", (
+                    <select value={t.exempt || "no"} onChange={e => set({ exempt: e.target.value })}>
+                      {Object.entries(exemptLabel).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+                    </select>
+                  ))}
+                  {field("Date of the turnover inspection", <WoCell type="date" value={t.inspectionDate || ""} onCommit={v => { set({ inspectionDate: v }); return true; }} />)}
+                  {field("Inspection performed by", (
+                    <select value={t.inspectedBy || "owner"} onChange={e => set({ inspectedBy: e.target.value })}><option value="owner">Owner / agent</option><option value="third">Third party</option></select>
+                  ))}
+                  {field("Name of the person who performed it", <WoCell value={t.inspectorName || ""} onCommit={v => { set({ inspectorName: v }); return true; }} />)}
+                  {field("Lead-based paint hazards found?", (
+                    <select value={t.hazardsFound || ""} onChange={e => set({ hazardsFound: e.target.value })}><option value="">Not answered</option><option value="yes">Yes</option><option value="no">No</option></select>
+                  ))}
+                </div>
+                {hazardsSuggested(t) && t.hazardsFound !== "yes" && <div className="hint" style={{ color: "var(--danger, #B3261E)" }}>Your room answers below include a hazard — "Lead-based paint hazards found?" should probably be Yes.</div>}
+
+                <div className="row" style={{ marginTop: 6 }}><strong>2. Room-by-room (HPD form SF LL1-07)</strong> <span className="row-muted">— tap a box to cycle Yes / No / blank</span></div>
+                <div className="sheet-wrap" style={{ margin: "6px 0 12px" }}>
+                  <table className="sheet">
+                    <thead><tr><th>Room</th>{TURN_ROOM_COLS.map(c => <th key={c.key} title={c.rule} style={{ minWidth: 92 }}>{c.label}<div className="row-muted" style={{ fontWeight: 400 }}>{c.rule}</div></th>)}<th style={{ width: 30 }}></th></tr></thead>
+                    <tbody>
+                      {(t.rooms || []).map(r => (
+                        <tr key={r.id}>
+                          <td className="wo-edit"><WoCell value={r.name || ""} onCommit={v => { setRoom(r.id, { name: v }); return true; }} narrow={110} /></td>
+                          {TURN_ROOM_COLS.map(c => {
+                            const v = r[c.key] || "";
+                            const bad = (c.key === "floors" ? v === "no" : v === "yes");
+                            return <td key={c.key} style={{ textAlign: "center" }}><button type="button" className="chip" style={{ minWidth: 44, background: bad ? "#FDE7E4" : v ? "#E6F4EA" : undefined }} onClick={() => setRoom(r.id, { [c.key]: cycle(v) })}>{ynLabel[v]}</button></td>;
+                          })}
+                          <td><IconBtn title="Remove room" danger onClick={() => set({ rooms: t.rooms.filter(x => x.id !== r.id) })}><X size={12} /></IconBtn></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="inline-form" style={{ flexWrap: "wrap", margin: "0 0 12px" }}>
+                  <input placeholder="Add a room (e.g. Kitchen, closet) and press Enter" value={roomName[t.id] || ""} onChange={e => setRoomName({ ...roomName, [t.id]: e.target.value })}
+                    onKeyDown={e => { if (e.key === "Enter" && (roomName[t.id] || "").trim()) { set({ rooms: [...(t.rooms || []), { id: uid(), name: roomName[t.id].trim() }] }); setRoomName({ ...roomName, [t.id]: "" }); } }} />
+                  <button className="btn-ghost" onClick={() => { const have = (t.rooms || []).map(r => (r.name || "").toLowerCase()); const std = ["Living room", "Kitchen", "Bathroom", "Bedroom 1", "Bedroom 2", "Hallway", "Closets"].filter(n => !have.includes(n.toLowerCase())); set({ rooms: [...(t.rooms || []), ...std.map(n => ({ id: uid(), name: n }))] }); }}>Add standard rooms</button>
+                </div>
+
+                <div className="row"><strong>3. Turn checklist</strong></div>
+                {TURN_CHECKLIST.map(g => (
+                  <div key={g.group} style={{ margin: "8px 0" }}>
+                    <div className="row-muted" style={{ fontSize: 12, fontWeight: 600 }}>{g.group}</div>
+                    {g.items.map(([k, label]) => {
+                      const c = t.checklist?.[k] || {};
+                      return (
+                        <div key={k} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "3px 0" }}>
+                          <label style={{ display: "flex", gap: 6, alignItems: "center", flex: "1 1 320px" }}>
+                            <input type="checkbox" checked={!!c.done} onChange={e => setCheck(k, { done: e.target.checked, date: e.target.checked ? (c.date || todayISO()) : c.date })} />
+                            <span style={{ textDecoration: c.done ? "line-through" : "none", color: c.done ? "var(--ink-soft)" : undefined }}>{label}</span>
+                          </label>
+                          {c.done && <input type="date" value={c.date || ""} onChange={e => setCheck(k, { date: e.target.value })} style={{ width: 150 }} />}
+                          {c.done && <WoCell value={c.note || ""} placeholder="Note (who / what)" onCommit={v => { setCheck(k, { note: v }); return true; }} narrow={160} />}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+                <div style={{ margin: "8px 0" }}>
+                  <div className="row-muted" style={{ fontSize: 12, fontWeight: 600 }}>Other items for this unit</div>
+                  {(t.customItems || []).map(i => (
+                    <div key={i.id} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "3px 0" }}>
+                      <label style={{ display: "flex", gap: 6, alignItems: "center", flex: "1 1 320px" }}>
+                        <input type="checkbox" checked={!!i.done} onChange={e => set({ customItems: t.customItems.map(x => x.id === i.id ? { ...x, done: e.target.checked, date: e.target.checked ? (x.date || todayISO()) : x.date } : x) })} />
+                        <span style={{ textDecoration: i.done ? "line-through" : "none" }}>{i.text}</span>
+                      </label>
+                      <IconBtn title="Remove" danger onClick={() => set({ customItems: t.customItems.filter(x => x.id !== i.id) })}><X size={12} /></IconBtn>
+                    </div>
+                  ))}
+                  <div className="inline-form">
+                    <input placeholder="Add your own item and press Enter" value={customText[t.id] || ""} onChange={e => setCustomText({ ...customText, [t.id]: e.target.value })}
+                      onKeyDown={e => { if (e.key === "Enter" && (customText[t.id] || "").trim()) { set({ customItems: [...(t.customItems || []), { id: uid(), text: customText[t.id].trim(), done: false }] }); setCustomText({ ...customText, [t.id]: "" }); } }} />
+                  </div>
+                </div>
+
+                <div className="row"><strong>4. New tenant</strong></div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 8, margin: "6px 0 12px" }}>
+                  {field("New tenant", <WoCell value={t.newTenant || ""} onCommit={v => { set({ newTenant: v }); return true; }} />)}
+                  {field("Move-in date", <WoCell type="date" value={t.moveInDate || ""} onCommit={v => { set({ moveInDate: v }); return true; }} />)}
+                </div>
+                <div className="row"><strong>Notes</strong></div>
+                <WoCell multiline value="" placeholder="Add a note and press Enter…" onCommit={v => { if (!v.trim()) return true; set({ notes: [...(t.notes || []), { date: todayISO(), timestamp: Date.now(), text: v.trim() }] }); return true; }} />
+                {newestFirst(t.notes).map((n, i) => <div key={i} style={{ fontSize: 12, padding: "2px 10px" }}><span className="row-muted">{fmtDate(n.date)}</span> {n.text}</div>)}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
