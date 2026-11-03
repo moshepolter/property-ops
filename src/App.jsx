@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-39";
+const APP_BUILD = "sync-fix-40";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -8661,14 +8661,11 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
   const [detailsOpen, setDetailsOpen] = useState(true);
   const sigRec = (data.signatures || []).find(x => x.id === "sig-main");
   const sigImg = sigRec?.image || "";
-  const [signOn, setSignOn] = useState(() => { try { return localStorage.getItem("po-sign-on") === "1"; } catch (e) { return false; } });
-  const setSign = (on) => { setSignOn(on); try { localStorage.setItem("po-sign-on", on ? "1" : "0"); } catch (e) { /* ignore */ } };
   const saveSig = (image) => { if (sigRec) update("signatures", "sig-main", { image }); else add("signatures", { id: "sig-main", image }); };
-  const activeSig = () => {
-    if (!signOn) return "";
-    if (!sigImg) { setDetailsOpen(true); setTimeout(() => document.getElementById("sig-setup")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50); window.alert("Your signature isn't saved yet — draw it in the Signature box that just opened, then print again."); return null; }
-    return sigImg;
-  };
+  const needSig = () => { setDetailsOpen(true); setTimeout(() => document.getElementById("sig-setup")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50); window.alert("Your signature isn't saved yet — draw it in the \"My signature\" box (it just opened), save it, then click the signature button again."); };
+  const sigBtn = (signed, onToggle) => (
+    <button type="button" className={signed ? "btn-primary" : "btn-ghost"} onClick={() => { if (!sigImg) { needSig(); return; } onToggle(!signed); }}>{signed && sigImg ? <>✓ Signed <img src={sigImg} alt="" style={{ height: 22, background: "#fff", borderRadius: 3, verticalAlign: "middle", marginLeft: 6 }} /></> : "Add my signature"}</button>
+  );
   const [nb, setNb] = useState(data.buildings[0]?.id || "");
   const [nu, setNu] = useState("");
   const [nTenant, setNTenant] = useState("");
@@ -8713,6 +8710,7 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
     const b = data.buildings.find(x => x.id === bid) || {};
     return { address: b.address || "", ownerAgent: b.hpdOwnerAgent || "", borough: b.hpdBorough || "Brooklyn", regId: b.hpdRegId || "" };
   };
+  const bInfoSigned = (bid) => !!(data.buildings.find(x => x.id === bid) || {}).hpdSigned;
   const warnMissing = (bids) => {
     const missing = [];
     bids.forEach(bid => { const i = bInfo(bid); const miss = [!i.ownerAgent && "owner/agent name", !i.regId && "property registration #"].filter(Boolean); if (miss.length) missing.push(`${shortAddress(i.address)}: ${miss.join(", ")}`); });
@@ -8722,7 +8720,7 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
     return window.confirm(`These are blank on the form:\n\n${missing.join("\n")}\n\nPress Cancel to fill them in — the "Form details" box near the top of this page is opening for you. Press OK to print with them blank.`);
   };
   const printLL107 = (t) => {
-    const sig = activeSig(); if (sig === null) return;
+    const sig = t.signed ? sigImg : "";
     if (!warnMissing([t.buildingId])) return;
     const i = bInfo(t.buildingId);
     openHpdPrint("SF LL1-07", buildLL107Pages({ sig, year: turnYear(t) || thisYear, address: i.address, apt: unitNum(t.unitId), inspector: t.inspectorName || "", borough: i.borough, regId: i.regId }, t.rooms || []));
@@ -8732,7 +8730,6 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
     shown.forEach(t => { (byB[t.buildingId] = byB[t.buildingId] || []).push(t); });
     const bids = Object.keys(byB);
     if (bids.length === 0) { window.alert("No unit turns to print for this filter."); return; }
-    const sig = activeSig(); if (sig === null) return;
     if (!warnMissing(bids)) return;
     const yr = year === "All" ? thisYear : year;
     const pages = bids.map(bid => {
@@ -8740,12 +8737,12 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
       const rows = byB[bid].slice().sort((a, b) => compareUnits(unitNum(a.unitId), unitNum(b.unitId))).map(t => ({
         apt: unitNum(t.unitId), exempt: t.exempt || "no", ended: t.endedDate, inspected: t.inspectionDate, by: t.inspectedBy, inspector: t.inspectorName, hazards: t.hazardsFound,
       }));
-      return buildLL106Pages({ sig, year: yr, address: i.address, ownerAgent: i.ownerAgent, borough: i.borough, regId: i.regId }, rows);
+      return buildLL106Pages({ sig: byB[bid].length && bInfoSigned(bid) ? sigImg : "", year: yr, address: i.address, ownerAgent: i.ownerAgent, borough: i.borough, regId: i.regId }, rows);
     }).join("");
     openHpdPrint("SF LL1-06", pages);
   };
   const printChecklist = (t) => {
-    const sig = activeSig(); if (sig === null) return;
+    const sig = t.signed ? sigImg : "";
     const items = (g) => g.map(i => `<tr><td class="l" style="width:70%"><span class="box">${t.checklist?.[i.key]?.done ? "X" : ""}</span>${escHtml(i.label)}</td><td>${escHtml(t.checklist?.[i.key]?.date ? fmtDate(t.checklist[i.key].date) : "")}</td><td class="l">${escHtml(t.checklist?.[i.key]?.note || "")}</td></tr>`).join("");
     const body = TURN_CHECKLIST.map(g => `<h1 style="margin-top:10px;font-size:12px">${escHtml(g.group)}</h1><table>${items(g.items.map(([k, l]) => ({ key: k, label: l })))}</table>`).join("")
       + ((t.customItems || []).length ? `<h1 style="margin-top:10px;font-size:12px">Other</h1><table>${(t.customItems || []).map(i => `<tr><td class="l" style="width:70%"><span class="box">${i.done ? "X" : ""}</span>${escHtml(i.text)}</td><td>${escHtml(i.date ? fmtDate(i.date) : "")}</td><td class="l">${escHtml(i.note || "")}</td></tr>`).join("")}</table>` : "");
@@ -8760,7 +8757,6 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
       <div className="page-head">
         <h1 className="page-title">Unit Turn</h1>
         <div className="page-actions">
-          <button className={signOn ? "btn-primary" : "btn-ghost"} onClick={() => setSign(!signOn)} title="When on, your saved signature and today's date are added to every form/checklist you print">{signOn ? "✓ Signature ON" : "Add my signature"}</button>
           <button className="btn-ghost" onClick={printLL106} title="HPD summary form for the buildings and year shown"><Printer size={14} /> Print summary (LL1-06)</button>
         </div>
       </div>
@@ -8778,17 +8774,18 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
         <summary style={{ cursor: "pointer", fontWeight: 600 }}>Form details — type each building's owner/agent name, borough and property registration # here (printed on the HPD forms)</summary>
         <div style={{ marginTop: 8 }}>
           {data.buildings.map(b => (
-            <div key={b.id} style={{ display: "grid", gridTemplateColumns: "minmax(140px, 1fr) repeat(3, minmax(160px, 1fr))", gap: 8, alignItems: "center", marginBottom: 4 }}>
+            <div key={b.id} style={{ display: "grid", gridTemplateColumns: "minmax(140px, 1fr) repeat(3, minmax(160px, 1fr)) auto", gap: 8, alignItems: "center", marginBottom: 4 }}>
               <strong>{shortAddress(b.address)}</strong>
               <div style={{ border: b.hpdOwnerAgent ? "1px solid var(--border)" : "1px solid #C77700", borderRadius: 4 }}><WoCell value={b.hpdOwnerAgent || ""} placeholder="Owner/agent name" onCommit={v => { update("buildings", b.id, { hpdOwnerAgent: v }); return true; }} /></div>
               <div style={{ border: "1px solid var(--border)", borderRadius: 4 }}><WoCell value={b.hpdBorough || "Brooklyn"} placeholder="Borough" onCommit={v => { update("buildings", b.id, { hpdBorough: v }); return true; }} /></div>
               <div style={{ border: b.hpdRegId ? "1px solid var(--border)" : "1px solid #C77700", borderRadius: 4 }}><WoCell value={b.hpdRegId || ""} placeholder="Property registration #" onCommit={v => { update("buildings", b.id, { hpdRegId: v }); return true; }} /></div>
+              {sigBtn(!!b.hpdSigned, on => update("buildings", b.id, { hpdSigned: on }))}
             </div>
           ))}
         </div>
         <div className="hint">Typed once per building.</div>
         <div id="sig-setup" style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
-          <strong>My signature</strong> <span className="row-muted">— draw it once; the "Add my signature" button then puts it (with today's date) on the printed forms</span>
+          <strong>My signature</strong> <span className="row-muted">— draw it here once. Then the "Add my signature" button beside each owner/agent name (summary form) and on each apartment (LL1-07) puts it on the printed form.</span>
           <SignaturePad current={sigImg} onSave={saveSig} onClear={() => saveSig("")} />
         </div>
       </details>
@@ -8834,6 +8831,7 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
                     <select value={t.inspectedBy || "owner"} onChange={e => set({ inspectedBy: e.target.value })}><option value="owner">Owner / agent</option><option value="third">Third party</option></select>
                   ))}
                   {field("Name of the person who performed it", <WoCell value={t.inspectorName || ""} onCommit={v => { set({ inspectorName: v }); return true; }} />)}
+                  {field("Signature of person who completed the inspection", sigBtn(!!t.signed, on => set({ signed: on })))}
                   {field("Lead-based paint hazards found?", (
                     <select value={t.hazardsFound || ""} onChange={e => set({ hazardsFound: e.target.value })}><option value="">Not answered</option><option value="yes">Yes</option><option value="no">No</option></select>
                   ))}
@@ -9835,16 +9833,11 @@ function hpdCell(x0, x1, y0, y1, text, align) {
   return `<div class="hpd-t" style="left:${x0 + 2}pt;width:${w}pt;top:${(y0 + y1) / 2 - size / 2}pt;font-size:${size}pt;text-align:${align || "left"}">${escHtml(text)}</div>`;
 }
 function hpdX(x0, x1, y0, y1) { return `<div class="hpd-x" style="left:${x0}pt;width:${x1 - x0}pt;top:${(y0 + y1) / 2 - 6}pt">X</div>`; }
-// Signature (+ date) in the blank strip at the bottom of the form. kind: "106" or "107".
+// Signature sitting on the form's own signature line (LL1-06: "Owner/agent signature"; LL1-07: "Signature of person who completed the inspection").
 function hpdSign(sig, kind) {
   if (!sig) return "";
-  const d = hpdDate(todayISO());
-  if (kind === "106") return `<img src="${sig}" style="position:absolute;left:548pt;top:522pt;height:32pt;max-width:150pt">`
-    + `<div style="position:absolute;left:545pt;top:556pt;width:150pt;border-top:0.7pt solid #000"></div>`
-    + `<div class="hpd-t" style="left:706pt;top:545pt;width:64pt;text-align:center">${d}</div><div style="position:absolute;left:706pt;top:556pt;width:64pt;border-top:0.7pt solid #000"></div>`;
-  return `<img src="${sig}" style="position:absolute;left:40pt;top:538pt;height:34pt;max-width:190pt">`
-    + `<div style="position:absolute;left:38pt;top:574pt;width:190pt;border-top:0.7pt solid #000"></div><div class="hpd-t" style="left:38pt;top:576pt;font-size:7pt">Owner/Agent signature</div>`
-    + `<div class="hpd-t" style="left:250pt;top:560pt;width:80pt;text-align:center">${d}</div><div style="position:absolute;left:250pt;top:574pt;width:80pt;border-top:0.7pt solid #000"></div><div class="hpd-t" style="left:250pt;top:576pt;font-size:7pt">Date</div>`;
+  const lineY = kind === "106" ? 152 : 177;
+  return `<img src="${sig}" style="position:absolute;left:497pt;top:${lineY - 30}pt;height:28pt;max-width:210pt">`;
 }
 function hpdHeader(year, page, pages) {
   return `<div class="hpd-t" style="left:699pt;top:22pt;width:74pt;text-align:center">${escHtml(year)}</div>`
