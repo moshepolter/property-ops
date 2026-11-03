@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-34";
+const APP_BUILD = "sync-fix-36";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -2480,18 +2480,15 @@ function allDatedItems(data, tenantName, buildingName) {
       items.push({ key: `n-${n.id}`, date: n.reminderDate, type: "Reminder", label: n.text, sub: n.buildingId ? buildingName(n.buildingId) : "", tab: "quicknotes" });
     }
   });
-  // Insurance renewals: 2 months before expiry (until the three steps are done),
-  // 1 month before (until chosen & bound), and the expiry date itself.
+  // Insurance renewals: 2 months before expiry (shows until the policy is renewed or its
+  // date is changed), 1 month before, and the expiry date itself.
   (data.insurancePolicies || []).forEach(p => {
     if (!p.expirationDate) return;
     const bn = (Array.isArray(p.buildingIds) ? p.buildingIds : []).map(id => buildingName(id)).join(", ") || p.insured || "";
     const lbl = `${bn ? `${bn} — ` : ""}${p.type || "Insurance"}${p.carrier ? ` (${p.carrier})` : ""}`;
-    const rem = insuranceRemaining(p);
-    if (rem.length) items.push({ key: `ins-${p.id}`, targetId: p.id, date: addMonthsISO(p.expirationDate, -2), type: "Insurance renewal", label: lbl, note: `Expires ${fmtDate(p.expirationDate)} — to do: ${rem.map(r => r.todo).join("; ")}`, tab: "insurance" });
-    if (!p.stepBound) {
-      items.push({ key: `insd-${p.id}`, targetId: p.id, date: addMonthsISO(p.expirationDate, -1), type: "Insurance renewal", label: lbl, note: `Expires ${fmtDate(p.expirationDate)} — compare coverage and price, choose, and bind the renewal`, tab: "insurance" });
-      items.push({ key: `inse-${p.id}`, targetId: p.id, date: p.expirationDate, type: "Insurance renewal", label: lbl, note: "Policy expires today — confirm the renewal is bound, then press Renewed", tab: "insurance" });
-    }
+    items.push({ key: `ins-${p.id}`, targetId: p.id, date: addMonthsISO(p.expirationDate, -2), type: "Insurance renewal", label: lbl, note: `Expires ${fmtDate(p.expirationDate)} — ask the broker for renewal quotes, get the dec pages and loss runs, and send to other brokers for quotes`, tab: "insurance" });
+    items.push({ key: `insd-${p.id}`, targetId: p.id, date: addMonthsISO(p.expirationDate, -1), type: "Insurance renewal", label: lbl, note: `Expires ${fmtDate(p.expirationDate)} — compare coverage and price and choose`, tab: "insurance" });
+    items.push({ key: `inse-${p.id}`, targetId: p.id, date: p.expirationDate, type: "Insurance renewal", label: lbl, note: "Policy expires today — make sure the renewal is in place, then press Renewed", tab: "insurance" });
   });
   // Anything scheduled for a Saturday gets a second reminder on the Monday after.
   const weekend = [];
@@ -2769,7 +2766,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
   const allDated = allDatedItems(data, tenantName, buildingName);
   // Saturday items reminded on the Monday itself, and payment follow-ups with the attorney.
   const weekendItems = allDated.filter(i => i.type === "Weekend reminder" && i.date === today);
-  const insuranceItems = allDated.filter(i => i.type === "Insurance renewal" && i.date <= today).sort((a, b) => a.date.localeCompare(b.date));
+  const insuranceItems = allDated.filter(i => i.type === "Insurance renewal" && i.key.startsWith("ins-") && i.date <= today).sort((a, b) => a.date.localeCompare(b.date));
   const payFollowItems = allDated.filter(i => i.type === "Payment follow-up" && i.date <= today).sort((a, b) => a.date.localeCompare(b.date));
   const rentPanelCount = overdueTenants.length + allFollowUps;
   const totalViolationsDue = violationAgencyGroups.reduce((sum, g) => sum + g.items.length, 0);
@@ -3009,8 +3006,7 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
     addSheet("Insurance", (data.insurancePolicies || []).map(p => ({
       Policy: p.type || "", Insured: p.insured || "", Buildings: (Array.isArray(p.buildingIds) ? p.buildingIds : []).map(id => buildingMap[id] || "").filter(Boolean).join(", ") || p.covers || "", Starts: p.effectiveDate ? fmtDate(p.effectiveDate) : "", Broker: p.broker || "", Carrier: p.carrier || "", "Policy #": p.policyNumber || "", Premium: p.premium || "",
       Expires: p.expirationDate ? fmtDate(p.expirationDate) : "",
-      "Quotes requested": p.stepQuotes ? fmtDate(p.stepQuotes) : "", "Dec pages & loss runs": p.stepDecs ? fmtDate(p.stepDecs) : "",
-      "Sent to other brokers": p.stepOther ? fmtDate(p.stepOther) : "", "Chosen & bound": p.stepBound ? fmtDate(p.stepBound) : "", Notes: p.notes || "",
+      Notes: p.notes || "",
     })));
     addSheet("Unit Turns", (data.unitTurns || []).map(t => ({
       Building: buildingMap[t.buildingId] || "", Apt: unitMap[t.unitId] || "", "Previous Tenant": t.prevTenant || "",
@@ -8354,50 +8350,41 @@ function insuranceCovers(type) {
 function InsurancePolicyForm({ form, setForm, buildings, onSave, onSaveAnother, onCancel, saveLabel, existing, notice }) {
   const toggleB = (id) => setForm({ ...form, buildingIds: form.buildingIds.includes(id) ? form.buildingIds.filter(x => x !== id) : [...form.buildingIds, id] });
   const set = (k, v) => setForm({ ...form, [k]: v });
-  const F = (label, node, span) => <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 12, gridColumn: span ? `span ${span}` : undefined }}><span className="row-muted">{label}</span>{node}</label>;
+  const F = (label, node) => <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 12 }}><span className="row-muted">{label}</span>{node}</label>;
   const have = new Set();
   existing.filter(p => insBuildingIds(p).some(id => form.buildingIds.includes(id))).forEach(p => insuranceCovers(p.type).forEach(c => have.add(c)));
   const ok = form.type.trim() && form.buildingIds.length > 0;
   return (
     <div className="form-panel" style={{ marginBottom: 12 }}>
-      <div style={{ fontWeight: 600, marginBottom: 6 }}>1. Which building(s) is this policy for?</div>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>Building</div>
       <div className="inline-form" style={{ flexWrap: "wrap", margin: "0 0 4px" }}>
         {buildings.map(b => <button key={b.id} type="button" className={`chip ${form.buildingIds.includes(b.id) ? "chip-active" : ""}`} onClick={() => toggleB(b.id)}>{shortAddress(b.address)}</button>)}
       </div>
       {form.buildingIds.length > 0 && (
-        <div className="hint" style={{ marginBottom: 8 }}>
-          Already entered for {form.buildingIds.length === 1 ? "this building" : "these buildings"}: {INSURANCE_CORE.map(c => <span key={c} style={{ marginRight: 8, color: have.has(c) ? "var(--ok, #1E7B34)" : undefined }}>{have.has(c) ? "✓" : "○"} {c}</span>)}
+        <div className="hint" style={{ marginBottom: 6 }}>
+          Already entered: {INSURANCE_CORE.map(c => <span key={c} style={{ marginRight: 8 }}>{have.has(c) ? "✓" : "○"} {c}</span>)}
         </div>
       )}
-      <div style={{ fontWeight: 600, margin: "10px 0 6px" }}>2. What kind of policy?</div>
+      <div style={{ fontWeight: 600, margin: "10px 0 6px" }}>Type of policy</div>
       <div className="inline-form" style={{ flexWrap: "wrap", margin: "0 0 6px" }}>
         {INSURANCE_TYPES.map(t => <button key={t} type="button" className={`chip ${form.type === t ? "chip-active" : ""}`} onClick={() => set("type", t)}>{t}</button>)}
-        <input placeholder="or type another kind…" value={INSURANCE_TYPES.includes(form.type) ? "" : form.type} onChange={e => set("type", e.target.value)} style={{ maxWidth: 220 }} />
+        <input placeholder="or type another…" value={INSURANCE_TYPES.includes(form.type) ? "" : form.type} onChange={e => set("type", e.target.value)} style={{ maxWidth: 200 }} />
       </div>
-      <div style={{ fontWeight: 600, margin: "10px 0 6px" }}>3. Details</div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 10 }}>
-        {F("Insured company (named insured)", <input value={form.insured} onChange={e => set("insured", e.target.value)} />)}
-        {F("Insurance carrier", <input value={form.carrier} onChange={e => set("carrier", e.target.value)} />)}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10, marginTop: 10 }}>
+        {F("Carrier", <input value={form.carrier} onChange={e => set("carrier", e.target.value)} />)}
         {F("Policy number", <input value={form.policyNumber} onChange={e => set("policyNumber", e.target.value)} />)}
-        {F("Broker (name, phone, email)", <input value={form.broker} onChange={e => set("broker", e.target.value)} />)}
+        {F("Expires", <input type="date" value={form.expirationDate} onChange={e => set("expirationDate", e.target.value)} />)}
+        {F("Starts", <input type="date" value={form.effectiveDate} onChange={e => set("effectiveDate", e.target.value)} />)}
         {F("Premium", <input value={form.premium} placeholder="$" onChange={e => set("premium", e.target.value)} />)}
-        {F("Policy starts", <input type="date" value={form.effectiveDate} onChange={e => set("effectiveDate", e.target.value)} />)}
-        {F("Policy expires", <input type="date" value={form.expirationDate} onChange={e => set("expirationDate", e.target.value)} />)}
+        {F("Broker (name, phone, email)", <input value={form.broker} onChange={e => set("broker", e.target.value)} />)}
+        {F("Insured company", <input value={form.insured} onChange={e => set("insured", e.target.value)} />)}
       </div>
-      <div style={{ marginTop: 10 }}>{F("Coverage limits, deductibles, mortgagees, notes", <textarea rows={2} value={form.notes} onChange={e => set("notes", e.target.value)} />)}</div>
-      {existing && form.id && (
-        <>
-          <div style={{ fontWeight: 600, margin: "10px 0 6px" }}>Renewal steps (dates done)</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 }}>
-            {[["stepQuotes", "1. Renewal quotes requested"], ["stepDecs", "2. Dec pages & loss runs received"], ["stepOther", "3. Sent to other brokers"], ["stepBound", "4. Chosen & bound"]].map(([k, l]) => F(l, <input key={k} type="date" value={form[k] || ""} onChange={e => set(k, e.target.value)} />))}
-          </div>
-        </>
-      )}
+      <div style={{ marginTop: 10 }}>{F("Notes", <textarea rows={3} value={form.notes} onChange={e => set("notes", e.target.value)} />)}</div>
       <div className="form-actions" style={{ alignItems: "center" }}>
         <button className="btn-primary" onClick={onSave} disabled={!ok}>{saveLabel}</button>
-        {onSaveAnother && <button className="btn-ghost" onClick={onSaveAnother} disabled={!ok} title="Saves this one and keeps the building, company and broker filled in">Save &amp; add another for the same building</button>}
+        {onSaveAnother && <button className="btn-ghost" onClick={onSaveAnother} disabled={!ok}>Save &amp; add another for this building</button>}
         <button className="btn-ghost" onClick={onCancel}>Cancel</button>
-        {!ok && <span className="hint">Pick a building and a policy type.</span>}
+        {!ok && <span className="hint">Pick a building and a type.</span>}
         {notice && <span className="hint" style={{ color: "var(--ok, #1E7B34)" }}>{notice}</span>}
       </div>
     </div>
@@ -8406,14 +8393,12 @@ function InsurancePolicyForm({ form, setForm, buildings, onSave, onSaveAnother, 
 
 function InsuranceTab({ data, add, update, remove, buildingName }) {
   const blank = { type: "", buildingIds: [], insured: "", broker: "", carrier: "", policyNumber: "", premium: "", effectiveDate: "", expirationDate: "", notes: "" };
-  const [form, setForm] = useState(null);       // add form
+  const [form, setForm] = useState(null);
   const [notice, setNotice] = useState("");
-  const [editing, setEditing] = useState(null); // policy id being edited
+  const [editing, setEditing] = useState(null);
   const [ef, setEf] = useState(null);
   const [renewing, setRenewing] = useState(null);
   const [rf, setRf] = useState({});
-  const [mailFor, setMailFor] = useState(null);
-  const [copied, setCopied] = useState("");
   const [bFilter, setBFilter] = useState("All");
   const today = todayISO();
   const policies = (data.insurancePolicies || []).slice().sort((a, b) => (a.expirationDate || "9999-99-99").localeCompare(b.expirationDate || "9999-99-99"));
@@ -8430,134 +8415,98 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
   const saveNew = (another) => {
     if (!form.type.trim() || form.buildingIds.length === 0) return;
     const rec = { id: uid(), ...form, type: form.type.trim() };
-    delete rec.covers;
     add("insurancePolicies", rec);
     if (another) {
-      setNotice(`Saved ${rec.type} for ${form.buildingIds.map(buildingName).join(", ")} — now the next one.`);
+      setNotice(`Saved ${rec.type} — now the next one.`);
       setForm({ ...blank, buildingIds: form.buildingIds, insured: form.insured, broker: form.broker });
       setTimeout(() => setNotice(""), 4000);
     } else { setForm(null); setNotice(""); }
   };
   const startEdit = (p) => { setEditing(p.id); setEf({ ...blank, ...p, buildingIds: insBuildingIds(p) }); };
   const saveEdit = () => {
+    const orig = policies.find(p => p.id === editing) || {};
     const patch = {};
-    Object.keys(ef).forEach(k => { if (k !== "id" && k !== "history" && JSON.stringify(ef[k]) !== JSON.stringify((policies.find(p => p.id === editing) || {})[k])) patch[k] = ef[k]; });
+    Object.keys(ef).forEach(k => { if (k !== "id" && k !== "history" && JSON.stringify(ef[k]) !== JSON.stringify(orig[k])) patch[k] = ef[k]; });
     if (Object.keys(patch).length) update("insurancePolicies", editing, patch);
     setEditing(null);
   };
-  const startRenew = (p) => { setRenewing(p.id); setRf({ effectiveDate: p.expirationDate || "", expirationDate: "", carrier: p.carrier || "", policyNumber: "", broker: p.broker || "", premium: "" }); };
+  const startRenew = (p) => { setRenewing(p.id); setRf({ effectiveDate: p.expirationDate || "", expirationDate: "", carrier: p.carrier || "", policyNumber: "", premium: "" }); };
   const saveRenew = (p) => {
     if (!rf.expirationDate) return;
-    const old = { expired: p.expirationDate || "", carrier: p.carrier || "", broker: p.broker || "", policyNumber: p.policyNumber || "", premium: p.premium || "", renewedOn: today };
-    update("insurancePolicies", p.id, {
-      effectiveDate: rf.effectiveDate, expirationDate: rf.expirationDate, carrier: rf.carrier, policyNumber: rf.policyNumber, broker: rf.broker, premium: rf.premium,
-      stepQuotes: "", stepDecs: "", stepOther: "", stepBound: "", history: [...(p.history || []), old],
-    });
+    const old = { expired: p.expirationDate || "", carrier: p.carrier || "", policyNumber: p.policyNumber || "", premium: p.premium || "", renewedOn: today };
+    update("insurancePolicies", p.id, { effectiveDate: rf.effectiveDate, expirationDate: rf.expirationDate, carrier: rf.carrier, policyNumber: rf.policyNumber, premium: rf.premium, history: [...(p.history || []), old] });
     setRenewing(null);
   };
   const printAll = () => {
     if (policies.length === 0) { window.alert("No policies to print yet."); return; }
     const d = (x) => (x ? fmtDate(x) : "");
     const order = data.buildings.map(b => b.id);
-    const byBuilding = (p) => { const ids = insBuildingIds(p); return ids.length ? Math.min(...ids.map(i => order.indexOf(i)).filter(i => i >= 0)) : 9999; };
+    const byBuilding = (p) => { const ids = insBuildingIds(p).map(i => order.indexOf(i)).filter(i => i >= 0); return ids.length ? Math.min(...ids) : 9999; };
     const rows = policies.slice().sort((a, b) => byBuilding(a) - byBuilding(b) || (a.expirationDate || "").localeCompare(b.expirationDate || "")).map(p => `<tr>
-      <td class="l"><b>${escHtml(coversText(p))}</b></td><td class="l"><b>${escHtml(p.type)}</b></td><td class="l">${escHtml(p.insured)}</td><td class="l">${escHtml(p.broker)}</td><td class="l">${escHtml(p.carrier)}</td>
-      <td>${escHtml(p.policyNumber)}</td><td>${escHtml(d(p.effectiveDate))}${p.effectiveDate || p.expirationDate ? " –<br>" : ""}<b>${escHtml(d(p.expirationDate))}</b></td><td>${escHtml(p.premium)}</td>
-      <td>${escHtml(p.expirationDate ? d(addMonthsISO(p.expirationDate, -2)) : "")}</td>
-      <td>${escHtml(d(p.stepQuotes))}</td><td>${escHtml(d(p.stepDecs))}</td><td>${escHtml(d(p.stepOther))}</td><td>${escHtml(d(p.stepBound))}</td><td class="l">${escHtml(p.notes)}</td></tr>`).join("");
-    openPrintWindow("Insurance schedule", `<h1>Insurance schedule</h1><div class="sub">Printed ${escHtml(fmtDate(today))} — by building</div>
-      <table style="font-size:9.5px"><tr><th class="l">Building</th><th class="l">Policy</th><th class="l">Insured</th><th class="l">Broker</th><th class="l">Carrier</th><th>Policy #</th><th>Policy period</th><th>Premium</th><th>Start renewal</th><th>Quotes requested</th><th>Dec pages &amp; loss runs</th><th>Sent to other brokers</th><th>Chosen &amp; bound</th><th class="l">Notes</th></tr>${rows}</table>
-      <div class="note">Renewal process, starting two months before each policy expires: (1) ask the current broker for renewal quotes, (2) request declaration pages and loss runs, (3) send the information to other brokers for competing quotes, then compare coverage and price one month before expiration.</div>`);
+      <td class="l"><b>${escHtml(coversText(p))}</b></td><td class="l"><b>${escHtml(p.type)}</b></td><td class="l">${escHtml(p.carrier)}</td><td>${escHtml(p.policyNumber)}</td>
+      <td><b>${escHtml(d(p.expirationDate))}</b></td><td>${escHtml(p.premium)}</td><td class="l">${escHtml(p.broker)}</td><td class="l">${escHtml(p.insured)}</td><td class="l">${escHtml(p.notes)}</td></tr>`).join("");
+    openPrintWindow("Insurance schedule", `<h1>Insurance schedule</h1><div class="sub">Printed ${escHtml(fmtDate(today))}</div>
+      <table style="font-size:10px"><tr><th class="l">Building</th><th class="l">Policy</th><th class="l">Carrier</th><th>Policy #</th><th>Expires</th><th>Premium</th><th class="l">Broker</th><th class="l">Insured</th><th class="l">Notes</th></tr>${rows}</table>`);
   };
-  const emailFor = (p) => {
-    const cv = coversText(p);
-    const what = `${p.type}${p.insured ? ` policy for ${p.insured}` : " policy"}`;
-    const cov = cv ? ` (${cv})` : "";
-    const cur = `${p.carrier ? ` with ${p.carrier}` : ""}${p.policyNumber ? `, policy number ${p.policyNumber}` : ""}`;
-    const exp = p.expirationDate ? fmtDate(p.expirationDate) : "";
-    const toCurrent = `Subject: Renewal quotes, declaration pages and loss runs — ${cv || p.insured || ""} ${p.type}${p.policyNumber ? ` (${p.policyNumber})` : ""}\n\nHello,\n\nThe ${what}${cov}${cur}${exp ? ` expires on ${exp}` : " is coming up for renewal"}. Please send us:\n\n1. Your renewal quotes\n2. The current declaration pages\n3. Currently valued loss runs for the past five years\n\nWe will also be getting competing quotes from other brokers, so please send these as soon as you can.\n\nThank you,\nMoshe`;
-    const toOthers = `Subject: Quote request — ${cv || p.insured || ""} ${p.type}${exp ? `, effective ${exp}` : ""}\n\nHello,\n\nWe are reviewing the renewal of the ${what}${cov}${p.carrier ? `, currently with ${p.carrier}` : ""}${exp ? `, which expires on ${exp}` : ""}. Attached are the current declaration pages and loss runs.${p.notes ? `\n\nCurrent coverage details: ${p.notes}` : ""}\n\nPlease send a quote with the same or better coverage and tell us where your coverage differs from what we have now, so we can compare coverage and pricing side by side.\n\nThank you,\nMoshe`;
-    return { toCurrent, toOthers };
-  };
-  const copyText = (key, text) => { navigator.clipboard.writeText(text); setCopied(key); setTimeout(() => setCopied(""), 1500); };
 
-  // ----- one policy card -----
-  const PolicyCard = (p) => {
+  const PolicyRows = (p) => {
     const days = p.expirationDate ? daysUntil(p.expirationDate) : null;
-    const rem = insuranceRemaining(p);
-    const inWindow = p.expirationDate && today >= addMonthsISO(p.expirationDate, -2);
-    const tone = days === null ? "#9AA0A6" : days < 0 ? "#B3261E" : days <= 60 ? "#C77700" : "#1E7B34";
-    const steps = [["stepQuotes", "Quotes requested"], ["stepDecs", "Dec pages & loss runs"], ["stepOther", "Sent to other brokers"], ["stepBound", "Chosen & bound"]];
-    const mail = mailFor === p.id ? emailFor(p) : null;
+    const tone = days === null ? "inherit" : days < 0 ? "#B3261E" : days <= 60 ? "#C77700" : "#1E7B34";
     if (editing === p.id) {
-      return <InsurancePolicyForm key={p.id} form={ef} setForm={setEf} buildings={data.buildings} existing={policies} saveLabel="Save changes" onSave={saveEdit} onCancel={() => setEditing(null)} />;
+      return (
+        <tr key={p.id}><td colSpan={8} style={{ padding: 8 }}>
+          <InsurancePolicyForm form={ef} setForm={setEf} buildings={data.buildings} existing={policies} saveLabel="Save changes" onSave={saveEdit} onCancel={() => setEditing(null)} />
+        </td></tr>
+      );
     }
     return (
-      <div key={p.id} className="list-card" style={{ borderLeft: `4px solid ${tone}`, marginBottom: 8 }}>
-        <div className="list-card-body">
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
-            <strong style={{ fontSize: 15 }}>{p.type}</strong>
-            {p.carrier && <span>{p.carrier}</span>}
-            {p.policyNumber && <span className="row-muted">#{p.policyNumber}</span>}
-            {p.premium && <span className="row-muted">{p.premium}</span>}
-            <span style={{ marginLeft: "auto", color: tone, fontWeight: 600 }}>
-              {p.expirationDate ? (days < 0 ? `Expired ${fmtDate(p.expirationDate)}` : `Expires ${fmtDate(p.expirationDate)} · ${days} days`) : "No expiration date"}
-            </span>
-          </div>
-          <div className="row-muted" style={{ fontSize: 12, marginTop: 2 }}>
-            {p.insured && <span>{p.insured} · </span>}{p.broker && <span>Broker: {p.broker}</span>}
-          </div>
-          {p.notes && <div style={{ fontSize: 12, marginTop: 4 }}>{p.notes}</div>}
-          {(p.history || []).length > 0 && <div className="row-muted" style={{ fontSize: 11, marginTop: 2 }}>Past terms: {(p.history || []).map(h => `${h.expired ? fmtDate(h.expired) : "?"} ${h.carrier || ""}${h.premium ? ` ${h.premium}` : ""}`).join("; ")}</div>}
-          {p.expirationDate && (
-            <div style={{ marginTop: 8 }}>
-              <div className="row-muted" style={{ fontSize: 11, marginBottom: 3 }}>
-                Renewal steps {inWindow ? "— start now" : `— reminders start ${fmtDate(addMonthsISO(p.expirationDate, -2))}`} (tap to mark done / undo)
-              </div>
-              <div className="inline-form" style={{ flexWrap: "wrap", margin: 0 }}>
-                {steps.map(([k, l]) => (
-                  <button key={k} type="button" className={`chip ${p[k] ? "chip-active" : ""}`} title={p[k] ? `Done ${fmtDate(p[k])} — tap to undo` : "Tap when done"}
-                    onClick={() => update("insurancePolicies", p.id, { [k]: p[k] ? "" : today })}>{p[k] ? "✓" : "○"} {l}{p[k] ? ` · ${fmtDate(p[k])}` : ""}</button>
-                ))}
-              </div>
-              {rem.length === 0 && !p.stepBound && <div className="hint" style={{ marginTop: 4 }}>All three steps done — compare the quotes and choose by {fmtDate(addMonthsISO(p.expirationDate, -1))}.</div>}
-            </div>
-          )}
-          <div className="inline-form" style={{ flexWrap: "wrap", margin: "8px 0 0" }}>
-            <button className="btn-ghost" onClick={() => startEdit(p)}><Pencil size={14} /> Edit</button>
-            <button className="btn-ghost" onClick={() => setMailFor(mailFor === p.id ? null : p.id)}><Mail size={14} /> Email brokers</button>
-            <button className="btn-ghost" onClick={() => startRenew(p)}>Renewed</button>
-            <button className="btn-ghost" onClick={() => { if (window.confirm("Delete this policy?")) remove("insurancePolicies", p.id); }}><Trash2 size={14} /> Delete</button>
-          </div>
-          {mail && (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12, marginTop: 8 }}>
-              {[["toCurrent", "To your current broker"], ["toOthers", "To other brokers (attach the dec pages and loss runs)"]].map(([k, label]) => (
-                <div key={k}>
-                  <div className="row"><strong>{label}</strong> <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => copyText(p.id + k, mail[k])}>{copied === p.id + k ? "Copied!" : "Copy"}</button></div>
-                  <textarea readOnly rows={11} value={mail[k]} style={{ width: "100%", boxSizing: "border-box" }} />
-                </div>
-              ))}
-            </div>
-          )}
-          {renewing === p.id && (
-            <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+      <React.Fragment key={p.id}>
+        <tr className="wo-sheet-row">
+          <td data-label="Policy" style={{ fontWeight: 600 }}>{p.type}</td>
+          <td data-label="Carrier">{p.carrier || <span className="row-muted">—</span>}</td>
+          <td data-label="Policy #">{p.policyNumber || <span className="row-muted">—</span>}</td>
+          <td data-label="Expires">
+            {p.expirationDate ? (
+              <div><div style={{ fontWeight: 700, color: tone }}>{fmtDate(p.expirationDate)}</div>
+                <div style={{ fontSize: 11, color: tone }}>{days < 0 ? "Expired" : `${days} days left`}</div></div>
+            ) : <span className="row-muted">Add date</span>}
+          </td>
+          <td data-label="Premium">{p.premium || <span className="row-muted">—</span>}</td>
+          <td data-label="Broker" style={{ fontSize: 12 }}>{p.broker || <span className="row-muted">—</span>}</td>
+          <td className="wo-edit" data-label="Notes" style={{ minWidth: 220 }}>
+            <WoCell multiline value={p.notes || ""} placeholder="Add a note…" onCommit={t => { update("insurancePolicies", p.id, { notes: t }); return true; }} />
+          </td>
+          <td className="wo-sheet-actions">
+            <IconBtn title="Edit" onClick={() => startEdit(p)}><Pencil size={14} /></IconBtn>
+            <button className="btn-ghost" title="The policy renewed — enter the new term" onClick={() => startRenew(p)}>Renewed</button>
+            <IconBtn title="Delete" danger onClick={() => { if (window.confirm("Delete this policy?")) remove("insurancePolicies", p.id); }}><Trash2 size={14} /></IconBtn>
+          </td>
+        </tr>
+        {renewing === p.id && (
+          <tr className="wo-sheet-detail-row"><td colSpan={8}>
+            <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "center", margin: 0 }}>
               <strong>New term</strong>
               <label className="hint">Starts <input type="date" value={rf.effectiveDate} onChange={e => setRf({ ...rf, effectiveDate: e.target.value })} /></label>
               <label className="hint">Expires <input type="date" value={rf.expirationDate} onChange={e => setRf({ ...rf, expirationDate: e.target.value })} /></label>
               <input placeholder="Carrier" value={rf.carrier} onChange={e => setRf({ ...rf, carrier: e.target.value })} />
               <input placeholder="Policy #" value={rf.policyNumber} onChange={e => setRf({ ...rf, policyNumber: e.target.value })} />
-              <input placeholder="Broker" value={rf.broker} onChange={e => setRf({ ...rf, broker: e.target.value })} />
               <input placeholder="Premium" value={rf.premium} onChange={e => setRf({ ...rf, premium: e.target.value })} style={{ maxWidth: 110 }} />
               <button className="btn-primary" disabled={!rf.expirationDate} onClick={() => saveRenew(p)}>Save</button>
               <button className="btn-ghost" onClick={() => setRenewing(null)}>Cancel</button>
-              <div className="hint" style={{ flexBasis: "100%" }}>The old term is kept under "Past terms" and the renewal steps reset for next year.</div>
             </div>
-          )}
-        </div>
-      </div>
+          </td></tr>
+        )}
+      </React.Fragment>
     );
   };
-
+  const Table = (items) => (
+    <div className="sheet-wrap wo-sheet-wrap">
+      <table className="sheet wo-sheet">
+        <thead><tr><th>Policy</th><th>Carrier</th><th>Policy #</th><th>Expires</th><th>Premium</th><th>Broker</th><th>Notes</th><th style={{ width: 150 }}></th></tr></thead>
+        <tbody>{items.map(PolicyRows)}</tbody>
+      </table>
+    </div>
+  );
   const groups = data.buildings
     .filter(b => bFilter === "All" || b.id === bFilter)
     .map(b => ({ b, items: policies.filter(p => insBuildingIds(p).includes(b.id)) }))
@@ -8573,9 +8522,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
           <button className="btn-primary" onClick={() => { setForm(form ? null : { ...blank, buildingIds: bFilter !== "All" ? [bFilter] : [] }); setNotice(""); }}><Plus size={14} /> Add policy</button>
         </div>
       </div>
-      <div className="hint" style={{ marginBottom: 8 }}>
-        Two months before a policy expires you get a reminder on the Dashboard and calendar to ask your broker for renewal quotes, get the dec pages and loss runs, and send everything to other brokers. One month before, a reminder to compare and choose.
-      </div>
+      <div className="hint" style={{ marginBottom: 8 }}>You get a reminder on the Dashboard and calendar two months before each policy expires (request renewal quotes, dec pages and loss runs, and shop other brokers), and again one month before. When a policy renews, press Renewed and enter the new dates.</div>
       {form && <InsurancePolicyForm form={form} setForm={setForm} buildings={data.buildings} existing={policies} saveLabel="Save" onSave={() => saveNew(false)} onSaveAnother={() => saveNew(true)} onCancel={() => { setForm(null); setNotice(""); }} notice={notice} />}
       <div className="filter-row">
         <select value={bFilter} onChange={e => setBFilter(e.target.value)} style={{ maxWidth: 240 }}>
@@ -8588,22 +8535,22 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
         const have = new Set();
         items.forEach(p => insuranceCovers(p.type).forEach(c => have.add(c)));
         return (
-          <div key={b.id} style={{ marginBottom: 16 }}>
+          <div key={b.id} style={{ marginBottom: 18 }}>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", margin: "6px 0" }}>
               <h2 style={{ fontSize: 16, margin: 0 }}>{shortAddress(b.address)}</h2>
               {INSURANCE_CORE.map(c => have.has(c)
                 ? <span key={c} className="pill pill-ok">✓ {c}</span>
                 : <button key={c} type="button" className="chip" title={`Add ${c} for this building`} onClick={() => { setForm({ ...blank, type: c, buildingIds: [b.id], insured: items[0]?.insured || "", broker: items[0]?.broker || "" }); setNotice(""); window.scrollTo({ top: 0, behavior: "smooth" }); }}>+ {c}</button>)}
             </div>
-            {items.map(PolicyCard)}
+            {items.length > 0 && Table(items)}
           </div>
         );
       })}
       {unlinked.length > 0 && (
         <div style={{ marginBottom: 16 }}>
           <h2 style={{ fontSize: 16, margin: "6px 0" }}>Not linked to a building yet</h2>
-          <div className="hint" style={{ marginBottom: 6 }}>Press Edit and pick the building(s) so these show up under them.</div>
-          {unlinked.map(PolicyCard)}
+          <div className="hint" style={{ marginBottom: 6 }}>Press the pencil and pick the building(s) so these show up under them.</div>
+          {Table(unlinked)}
         </div>
       )}
     </div>
@@ -8680,6 +8627,7 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
   const [bFilter, setBFilter] = useState("All");
   const [year, setYear] = useState("All");
   const [open, setOpen] = useState(null);
+  const [detailsOpen, setDetailsOpen] = useState(true);
   const [nb, setNb] = useState(data.buildings[0]?.id || "");
   const [nu, setNu] = useState("");
   const [nTenant, setNTenant] = useState("");
@@ -8727,7 +8675,10 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
   const warnMissing = (bids) => {
     const missing = [];
     bids.forEach(bid => { const i = bInfo(bid); const miss = [!i.ownerAgent && "owner/agent name", !i.regId && "property registration #"].filter(Boolean); if (miss.length) missing.push(`${shortAddress(i.address)}: ${miss.join(", ")}`); });
-    return missing.length === 0 || window.confirm(`These are blank on the form (fill them in under "Form details"):\n\n${missing.join("\n")}\n\nPrint anyway?`);
+    if (missing.length === 0) return true;
+    setDetailsOpen(true);
+    setTimeout(() => document.getElementById("hpd-form-details")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
+    return window.confirm(`These are blank on the form:\n\n${missing.join("\n")}\n\nPress Cancel to fill them in — the "Form details" box near the top of this page is opening for you. Press OK to print with them blank.`);
   };
   const printLL107 = (t) => {
     if (!warnMissing([t.buildingId])) return;
@@ -8778,15 +8729,15 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
           <button className="btn-primary" onClick={startTurn} disabled={!nb || !nu}><Plus size={14} /> Start unit turn</button>
         </div>
       </div>
-      <details className="form-panel" style={{ marginBottom: 10 }}>
-        <summary style={{ cursor: "pointer", fontWeight: 600 }}>Form details printed on the HPD forms (owner/agent, borough, registration #)</summary>
+      <details id="hpd-form-details" className="form-panel" style={{ marginBottom: 10 }} open={detailsOpen} onToggle={e => setDetailsOpen(e.currentTarget.open)}>
+        <summary style={{ cursor: "pointer", fontWeight: 600 }}>Form details — type each building's owner/agent name, borough and property registration # here (printed on the HPD forms)</summary>
         <div style={{ marginTop: 8 }}>
           {data.buildings.map(b => (
             <div key={b.id} style={{ display: "grid", gridTemplateColumns: "minmax(140px, 1fr) repeat(3, minmax(160px, 1fr))", gap: 8, alignItems: "center", marginBottom: 4 }}>
               <strong>{shortAddress(b.address)}</strong>
-              <WoCell value={b.hpdOwnerAgent || ""} placeholder="Owner/agent name" onCommit={v => { update("buildings", b.id, { hpdOwnerAgent: v }); return true; }} />
-              <WoCell value={b.hpdBorough || "Brooklyn"} placeholder="Borough" onCommit={v => { update("buildings", b.id, { hpdBorough: v }); return true; }} />
-              <WoCell value={b.hpdRegId || ""} placeholder="Property registration #" onCommit={v => { update("buildings", b.id, { hpdRegId: v }); return true; }} />
+              <div style={{ border: b.hpdOwnerAgent ? "1px solid var(--border)" : "1px solid #C77700", borderRadius: 4 }}><WoCell value={b.hpdOwnerAgent || ""} placeholder="Owner/agent name" onCommit={v => { update("buildings", b.id, { hpdOwnerAgent: v }); return true; }} /></div>
+              <div style={{ border: "1px solid var(--border)", borderRadius: 4 }}><WoCell value={b.hpdBorough || "Brooklyn"} placeholder="Borough" onCommit={v => { update("buildings", b.id, { hpdBorough: v }); return true; }} /></div>
+              <div style={{ border: b.hpdRegId ? "1px solid var(--border)" : "1px solid #C77700", borderRadius: 4 }}><WoCell value={b.hpdRegId || ""} placeholder="Property registration #" onCommit={v => { update("buildings", b.id, { hpdRegId: v }); return true; }} /></div>
             </div>
           ))}
         </div>
