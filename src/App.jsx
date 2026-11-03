@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-37";
+const APP_BUILD = "sync-fix-38";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -287,7 +287,7 @@ const emptyData = () => ({
   buildings: [], units: [], tenants: [], vendors: [], workOrders: [],
   violations: [], courtCases: [], inspections: [], appointments: [],
   localLaws: [], bossReminders: [], customAppointmentTypes: [], customInspectionTypes: [],
-  customOtherAgencies: [], quickNotes: [], importHistory: [], caseStageOptions: [], emergencyRepairs: [], collections: [], smokeCoDetectors: [], unitTurns: [], insurancePolicies: [],
+  customOtherAgencies: [], quickNotes: [], importHistory: [], caseStageOptions: [], emergencyRepairs: [], collections: [], smokeCoDetectors: [], unitTurns: [], insurancePolicies: [], signatures: [],
 });
 
 // Every field in emptyData() is an array of records with an id. When a
@@ -8327,6 +8327,7 @@ function insuranceRemaining(p) { return INSURANCE_STEPS.filter(st => !p[st.key])
 
 // The policies from the Fairmont Insurance Brokers summaries (prepared June 2026).
 const INSURANCE_SEED = [
+  { type: "Package (Property + Liability)", insured: "Estella Realty, LLC", covers: "910 81st St, Brooklyn 11228", broker: "Brooks Group Ins. Agency, 70 Bridge Plaza Dr, Manalapan NJ 07726", carrier: "Seneca Specialty Insurance Company (surplus lines, not NY-licensed)", policyNumber: "SPP 0802446", premium: "$73,027.00", effectiveDate: "2025-12-10", expirationDate: "2026-12-10", notes: "Renewal of ESR 0808816. GL $1M occurrence / $2M aggregate, GL premium $47,395 + terrorism $2,010. Property premium $20,949 + terrorism $2,673. Building $9,305,130 agreed value, special form, 100% coinsurance, $10,000 deductible. Business income/rental value $849,675 (80%). Sewer/drain discharge $75,000. Mortgagee: Wells Fargo Bank, NA (Attn: Ins. Dept., Charlotte NC). Flood and umbrella not on this policy. Claims: 800-442-5723." },
   { type: "Package (Property + Liability + Flood)", insured: "Newkirk Group LLC", covers: "1401-1425 Newkirk Ave aka 582-588 Marlborough Rd, Brooklyn 11226", broker: "Fairmont Insurance Brokers LLC, 718-232-3300", carrier: "Utica Mutual Insurance Company", policyNumber: "CPP 5503348", premium: "$34,164.28", effectiveDate: "2026-03-15", expirationDate: "2027-03-15", notes: "Building $12,699,721 ($10,000 ded). Rental income 12 months. Flood $1,000,000 ($25,000 ded). Sewer backup $250,000. General liability $1M occurrence / $2M aggregate. Mortgagees: Hancock JV Bidco LLC & SIG CRE 2023 Venture LLC (c/o Rialto Capital Advisors); Signature Bank ISAOA ATIMA." },
   { type: "Umbrella", insured: "Newkirk Group LLC", covers: "1401-1425 Newkirk Ave aka 582-588 Marlborough Rd, Brooklyn 11226", broker: "Fairmont Insurance Brokers LLC, 718-232-3300", carrier: "Utica Mutual Insurance Company", policyNumber: "CULP 5510540", premium: "$3,069.00", effectiveDate: "2026-03-15", expirationDate: "2027-03-15", notes: "Limit $2,000,000 / $2,000,000." },
   { type: "Business Auto", insured: "Newkirk Group LLC", covers: "Business auto", broker: "Fairmont Insurance Brokers LLC, 718-232-3300", carrier: "Utica Mutual Insurance Company", policyNumber: "5505272", premium: "$204.00", effectiveDate: "2026-03-15", expirationDate: "2027-03-15", notes: "Combined single limit $1,000,000." },
@@ -8405,7 +8406,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
   const coversText = (p) => insBuildingIds(p).map(id => buildingName(id)).join(", ") || p.covers || "";
   const missingSeed = INSURANCE_SEED.filter(sd => !policies.some(p => (p.policyNumber || "").trim() === sd.policyNumber));
   const loadSeed = () => {
-    if (!window.confirm(`Add ${missingSeed.length} policies from the Fairmont insurance summaries (Newkirk, Shpelrub, Rafyana, Neptune)? They're linked to a building when the address matches one of yours.`)) return;
+    if (!window.confirm(`Add ${missingSeed.length} policies from your insurance documents (Newkirk, Shpelrub, Rafyana, Neptune, Estella/910 81st)? They're linked to a building when the address matches one of yours.`)) return;
     missingSeed.forEach(sd => {
       const key = (sd.covers || "").toLowerCase();
       const hit = data.buildings.find(b => { const a = (b.address || "").toLowerCase(); return (key.includes("newkirk") && a.includes("newkirk")) || (key.includes("east 21st") && a.includes("21st")) || (key.includes("brighton 8th") && a.includes("brighton 8th")) || (key.includes("350-362 neptune") && a.includes("neptune")); });
@@ -8622,12 +8623,51 @@ function openPrintWindow(title, bodyHtml) {
   w.document.close();
 }
 
+function SignaturePad({ current, onSave, onClear }) {
+  const ref = useRef(null);
+  const drawing = useRef(false);
+  const [dirty, setDirty] = useState(false);
+  const pos = (e) => { const r = ref.current.getBoundingClientRect(); return [(e.clientX - r.left) * (ref.current.width / r.width), (e.clientY - r.top) * (ref.current.height / r.height)]; };
+  const down = (e) => { e.preventDefault(); ref.current.setPointerCapture?.(e.pointerId); drawing.current = true; const ctx = ref.current.getContext("2d"); const [x, y] = pos(e); ctx.beginPath(); ctx.moveTo(x, y); ctx.lineWidth = 3; ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.strokeStyle = "#000"; ctx.lineTo(x + 0.1, y + 0.1); ctx.stroke(); setDirty(true); };
+  const move = (e) => { if (!drawing.current) return; const ctx = ref.current.getContext("2d"); const [x, y] = pos(e); ctx.lineTo(x, y); ctx.stroke(); };
+  const up = () => { drawing.current = false; };
+  const wipe = () => { const c = ref.current; c.getContext("2d").clearRect(0, 0, c.width, c.height); setDirty(false); };
+  const upload = (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => { const img = new Image(); img.onload = () => { const k = Math.min(1, 600 / img.width); const c = document.createElement("canvas"); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k); c.getContext("2d").drawImage(img, 0, 0, c.width, c.height); onSave(c.toDataURL("image/png")); }; img.src = rd.result; };
+    rd.readAsDataURL(f); e.target.value = "";
+  };
+  return (
+    <div style={{ marginTop: 6 }}>
+      {current && <div style={{ marginBottom: 6 }}><span className="row-muted">Saved signature:</span> <img src={current} alt="signature" style={{ height: 44, background: "#fff", border: "1px solid var(--border)", borderRadius: 4, verticalAlign: "middle" }} /> <button type="button" className="btn-ghost" onClick={() => { if (window.confirm("Remove your saved signature?")) onClear(); }}>Remove</button></div>}
+      <canvas ref={ref} width={600} height={160} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerLeave={up}
+        style={{ width: "100%", maxWidth: 420, height: 112, background: "#fff", border: "1px dashed #888", borderRadius: 6, touchAction: "none", display: "block" }} />
+      <div className="inline-form" style={{ flexWrap: "wrap", marginTop: 6 }}>
+        <button type="button" className="btn-primary" disabled={!dirty} onClick={() => { const c = ref.current; onSave(c.toDataURL("image/png")); wipe(); }}>Save drawn signature</button>
+        <button type="button" className="btn-ghost" onClick={wipe}>Clear pad</button>
+        <label className="btn-ghost" style={{ cursor: "pointer" }}>Or upload a picture of it<input type="file" accept="image/*" onChange={upload} style={{ display: "none" }} /></label>
+      </div>
+    </div>
+  );
+}
+
 function UnitTurnTab({ data, add, update, remove, buildingName }) {
   const thisYear = String(new Date().getFullYear());
   const [bFilter, setBFilter] = useState("All");
   const [year, setYear] = useState("All");
   const [open, setOpen] = useState(null);
   const [detailsOpen, setDetailsOpen] = useState(true);
+  const sigRec = (data.signatures || []).find(x => x.id === "sig-main");
+  const sigImg = sigRec?.image || "";
+  const [signOn, setSignOn] = useState(() => { try { return localStorage.getItem("po-sign-on") === "1"; } catch (e) { return false; } });
+  const setSign = (on) => { setSignOn(on); try { localStorage.setItem("po-sign-on", on ? "1" : "0"); } catch (e) { /* ignore */ } };
+  const saveSig = (image) => { if (sigRec) update("signatures", "sig-main", { image }); else add("signatures", { id: "sig-main", image }); };
+  const activeSig = () => {
+    if (!signOn) return "";
+    if (!sigImg) { setDetailsOpen(true); setTimeout(() => document.getElementById("sig-setup")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50); window.alert("Your signature isn't saved yet — draw it in the Signature box that just opened, then print again."); return null; }
+    return sigImg;
+  };
   const [nb, setNb] = useState(data.buildings[0]?.id || "");
   const [nu, setNu] = useState("");
   const [nTenant, setNTenant] = useState("");
@@ -8681,15 +8721,17 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
     return window.confirm(`These are blank on the form:\n\n${missing.join("\n")}\n\nPress Cancel to fill them in — the "Form details" box near the top of this page is opening for you. Press OK to print with them blank.`);
   };
   const printLL107 = (t) => {
+    const sig = activeSig(); if (sig === null) return;
     if (!warnMissing([t.buildingId])) return;
     const i = bInfo(t.buildingId);
-    openHpdPrint("SF LL1-07", buildLL107Pages({ year: turnYear(t) || thisYear, address: i.address, apt: unitNum(t.unitId), inspector: t.inspectorName || "", borough: i.borough, regId: i.regId }, t.rooms || []));
+    openHpdPrint("SF LL1-07", buildLL107Pages({ sig, year: turnYear(t) || thisYear, address: i.address, apt: unitNum(t.unitId), inspector: t.inspectorName || "", borough: i.borough, regId: i.regId }, t.rooms || []));
   };
   const printLL106 = () => {
     const byB = {};
     shown.forEach(t => { (byB[t.buildingId] = byB[t.buildingId] || []).push(t); });
     const bids = Object.keys(byB);
     if (bids.length === 0) { window.alert("No unit turns to print for this filter."); return; }
+    const sig = activeSig(); if (sig === null) return;
     if (!warnMissing(bids)) return;
     const yr = year === "All" ? thisYear : year;
     const pages = bids.map(bid => {
@@ -8697,16 +8739,17 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
       const rows = byB[bid].slice().sort((a, b) => compareUnits(unitNum(a.unitId), unitNum(b.unitId))).map(t => ({
         apt: unitNum(t.unitId), exempt: t.exempt || "no", ended: t.endedDate, inspected: t.inspectionDate, by: t.inspectedBy, inspector: t.inspectorName, hazards: t.hazardsFound,
       }));
-      return buildLL106Pages({ year: yr, address: i.address, ownerAgent: i.ownerAgent, borough: i.borough, regId: i.regId }, rows);
+      return buildLL106Pages({ sig, year: yr, address: i.address, ownerAgent: i.ownerAgent, borough: i.borough, regId: i.regId }, rows);
     }).join("");
     openHpdPrint("SF LL1-06", pages);
   };
   const printChecklist = (t) => {
+    const sig = activeSig(); if (sig === null) return;
     const items = (g) => g.map(i => `<tr><td class="l" style="width:70%"><span class="box">${t.checklist?.[i.key]?.done ? "X" : ""}</span>${escHtml(i.label)}</td><td>${escHtml(t.checklist?.[i.key]?.date ? fmtDate(t.checklist[i.key].date) : "")}</td><td class="l">${escHtml(t.checklist?.[i.key]?.note || "")}</td></tr>`).join("");
     const body = TURN_CHECKLIST.map(g => `<h1 style="margin-top:10px;font-size:12px">${escHtml(g.group)}</h1><table>${items(g.items.map(([k, l]) => ({ key: k, label: l })))}</table>`).join("")
       + ((t.customItems || []).length ? `<h1 style="margin-top:10px;font-size:12px">Other</h1><table>${(t.customItems || []).map(i => `<tr><td class="l" style="width:70%"><span class="box">${i.done ? "X" : ""}</span>${escHtml(i.text)}</td><td>${escHtml(i.date ? fmtDate(i.date) : "")}</td><td class="l">${escHtml(i.note || "")}</td></tr>`).join("")}</table>` : "");
     openPrintWindow("Unit turn checklist", `<h1>Unit Turn Checklist — ${escHtml(addr(t.buildingId))}, Apt ${escHtml(unitNum(t.unitId))}</h1>
-      <div class="sub">Previous tenant: ${escHtml(t.prevTenant || "")} &nbsp; Occupancy ended: ${escHtml(t.endedDate ? fmtDate(t.endedDate) : "")} &nbsp; New tenant: ${escHtml(t.newTenant || "")} &nbsp; Move-in: ${escHtml(t.moveInDate ? fmtDate(t.moveInDate) : "")}</div>${body}`);
+      <div class="sub">Previous tenant: ${escHtml(t.prevTenant || "")} &nbsp; Occupancy ended: ${escHtml(t.endedDate ? fmtDate(t.endedDate) : "")} &nbsp; New tenant: ${escHtml(t.newTenant || "")} &nbsp; Move-in: ${escHtml(t.moveInDate ? fmtDate(t.moveInDate) : "")}</div>${body}${sig ? `<div style="margin-top:28px"><img src="${sig}" style="height:56px"><div style="border-top:1px solid #000;width:260px;font-size:11px;padding-top:2px">Signature &nbsp;&nbsp; ${escHtml(fmtDate(todayISO()))}</div></div>` : ""}`);
   };
 
   const field = (label, node) => <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}><span className="row-muted">{label}</span>{node}</label>;
@@ -8716,6 +8759,7 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
       <div className="page-head">
         <h1 className="page-title">Unit Turn</h1>
         <div className="page-actions">
+          <button className={signOn ? "btn-primary" : "btn-ghost"} onClick={() => setSign(!signOn)} title="When on, your saved signature and today's date are added to every form/checklist you print">{signOn ? "✓ Signature ON" : "Add my signature"}</button>
           <button className="btn-ghost" onClick={printLL106} title="HPD summary form for the buildings and year shown"><Printer size={14} /> Print summary (LL1-06)</button>
         </div>
       </div>
@@ -8741,7 +8785,11 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
             </div>
           ))}
         </div>
-        <div className="hint">Typed once per building. The owner/agent signature is left blank on the printed forms for you to sign.</div>
+        <div className="hint">Typed once per building.</div>
+        <div id="sig-setup" style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+          <strong>My signature</strong> <span className="row-muted">— draw it once; the "Add my signature" button then puts it (with today's date) on the printed forms</span>
+          <SignaturePad current={sigImg} onSave={saveSig} onClear={() => saveSig("")} />
+        </div>
       </details>
       <div className="filter-row">
         <select value={bFilter} onChange={e => setBFilter(e.target.value)} style={{ maxWidth: 220 }}><option value="All">All buildings</option>{data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}</select>
@@ -8791,10 +8839,10 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
                 </div>
                 {hazardsSuggested(t) && t.hazardsFound !== "yes" && <div className="hint" style={{ color: "var(--danger, #B3261E)" }}>Your room answers below include a hazard — "Lead-based paint hazards found?" should probably be Yes.</div>}
 
-                <div className="row" style={{ marginTop: 6 }}><strong>2. Room-by-room (HPD form SF LL1-07)</strong> <span className="row-muted">— choose Yes or No in each box, or leave it blank; "All clear" fills a clean room in one click</span></div>
+                <div className="row" style={{ marginTop: 6 }}><strong>2. Room-by-room (HPD form SF LL1-07)</strong> <span className="row-muted">— tap Yes or No in each box (tap it again to clear), or leave it blank; "All clear" fills a clean room in one click</span></div>
                 <div className="sheet-wrap" style={{ margin: "6px 0 12px" }}>
                   <table className="sheet">
-                    <thead><tr><th>Room</th>{TURN_ROOM_COLS.map(c => <th key={c.key} title={c.rule} style={{ minWidth: 92 }}>{c.label}<div className="row-muted" style={{ fontWeight: 400 }}>{c.rule}</div></th>)}<th style={{ width: 110 }}></th></tr></thead>
+                    <thead><tr><th>Room</th>{TURN_ROOM_COLS.map(c => <th key={c.key} title={c.rule} style={{ minWidth: 110 }}>{c.label}<div className="row-muted" style={{ fontWeight: 400 }}>{c.rule}</div></th>)}<th style={{ width: 110 }}></th></tr></thead>
                     <tbody>
                       {(t.rooms || []).map(r => (
                         <tr key={r.id}>
@@ -8804,9 +8852,14 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
                             const bad = (c.key === "floors" ? v === "no" : v === "yes");
                             return (
                               <td key={c.key} style={{ textAlign: "center", padding: 2 }}>
-                                <select value={v} onChange={e => setRoom(r.id, { [c.key]: e.target.value })} style={{ width: 66, background: bad ? "#FDE7E4" : v ? "#E6F4EA" : undefined }}>
-                                  <option value="">—</option><option value="yes">Yes</option><option value="no">No</option>
-                                </select>
+                                <div style={{ display: "inline-flex", gap: 3 }}>
+                                  {[["yes", "Yes"], ["no", "No"]].map(([val, lab]) => {
+                                    const on = v === val;
+                                    const good = (c.key === "floors") ? val === "yes" : val === "no";
+                                    return <button key={val} type="button" onClick={() => setRoom(r.id, { [c.key]: on ? "" : val })}
+                                      style={{ padding: "3px 8px", borderRadius: 4, fontSize: 12, cursor: "pointer", border: on ? "1px solid " + (good ? "#1E7B34" : "#B3261E") : "1px solid var(--border)", background: on ? (good ? "#CFEBD6" : "#F8D0CB") : "transparent", fontWeight: on ? 700 : 400, color: on ? (good ? "#14532D" : "#7A1A12") : "inherit" }}>{lab}</button>;
+                                  })}
+                                </div>
                               </td>
                             );
                           })}
@@ -9781,6 +9834,17 @@ function hpdCell(x0, x1, y0, y1, text, align) {
   return `<div class="hpd-t" style="left:${x0 + 2}pt;width:${w}pt;top:${(y0 + y1) / 2 - size / 2}pt;font-size:${size}pt;text-align:${align || "left"}">${escHtml(text)}</div>`;
 }
 function hpdX(x0, x1, y0, y1) { return `<div class="hpd-x" style="left:${x0}pt;width:${x1 - x0}pt;top:${(y0 + y1) / 2 - 6}pt">X</div>`; }
+// Signature (+ date) in the blank strip at the bottom of the form. kind: "106" or "107".
+function hpdSign(sig, kind) {
+  if (!sig) return "";
+  const d = hpdDate(todayISO());
+  if (kind === "106") return `<img src="${sig}" style="position:absolute;left:548pt;top:522pt;height:32pt;max-width:150pt">`
+    + `<div style="position:absolute;left:545pt;top:556pt;width:150pt;border-top:0.7pt solid #000"></div>`
+    + `<div class="hpd-t" style="left:706pt;top:545pt;width:64pt;text-align:center">${d}</div><div style="position:absolute;left:706pt;top:556pt;width:64pt;border-top:0.7pt solid #000"></div>`;
+  return `<img src="${sig}" style="position:absolute;left:40pt;top:538pt;height:34pt;max-width:190pt">`
+    + `<div style="position:absolute;left:38pt;top:574pt;width:190pt;border-top:0.7pt solid #000"></div><div class="hpd-t" style="left:38pt;top:576pt;font-size:7pt">Owner/Agent signature</div>`
+    + `<div class="hpd-t" style="left:250pt;top:560pt;width:80pt;text-align:center">${d}</div><div style="position:absolute;left:250pt;top:574pt;width:80pt;border-top:0.7pt solid #000"></div><div class="hpd-t" style="left:250pt;top:576pt;font-size:7pt">Date</div>`;
+}
 function hpdHeader(year, page, pages) {
   return `<div class="hpd-t" style="left:699pt;top:22pt;width:74pt;text-align:center">${escHtml(year)}</div>`
     + `<div class="hpd-t" style="left:703pt;top:37pt;width:30pt;text-align:center">${page}</div>`
@@ -9793,7 +9857,7 @@ function buildLL106Pages(info, rows) {
   const pages = Math.max(1, Math.ceil(rows.length / PER));
   let html = "";
   for (let p = 0; p < pages; p++) {
-    let body = hpdHeader(info.year, p + 1, pages)
+    let body = hpdHeader(info.year, p + 1, pages) + hpdSign(info.sig, "106")
       + hpdText(20, 115, info.address, 418) + hpdText(492, 115, info.ownerAgent, 278)
       + hpdText(20, 152, info.borough, 164) + hpdText(284, 152, info.regId, 155);
     rows.slice(p * PER, p * PER + PER).forEach((r, i) => {
@@ -9819,7 +9883,7 @@ function buildLL107Pages(info, rooms) {
   const pages = Math.max(1, Math.ceil(rooms.length / PER));
   let html = "";
   for (let p = 0; p < pages; p++) {
-    let body = hpdHeader(info.year, p + 1, pages)
+    let body = hpdHeader(info.year, p + 1, pages) + hpdSign(info.sig, "107")
       + hpdText(20, 140, info.address, 258) + hpdText(327, 140, info.apt, 126) + hpdText(497, 140, info.inspector, 272)
       + hpdText(20, 177, info.borough, 160) + hpdText(233, 177, info.regId, 133);
     rooms.slice(p * PER, p * PER + PER).forEach((r, i) => {
