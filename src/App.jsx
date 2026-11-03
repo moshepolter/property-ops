@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-40";
+const APP_BUILD = "sync-fix-41";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -8720,7 +8720,7 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
     return window.confirm(`These are blank on the form:\n\n${missing.join("\n")}\n\nPress Cancel to fill them in — the "Form details" box near the top of this page is opening for you. Press OK to print with them blank.`);
   };
   const printLL107 = (t) => {
-    const sig = t.signed ? sigImg : "";
+    const sig = sigImg;
     if (!warnMissing([t.buildingId])) return;
     const i = bInfo(t.buildingId);
     openHpdPrint("SF LL1-07", buildLL107Pages({ sig, year: turnYear(t) || thisYear, address: i.address, apt: unitNum(t.unitId), inspector: t.inspectorName || "", borough: i.borough, regId: i.regId }, t.rooms || []));
@@ -8737,12 +8737,12 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
       const rows = byB[bid].slice().sort((a, b) => compareUnits(unitNum(a.unitId), unitNum(b.unitId))).map(t => ({
         apt: unitNum(t.unitId), exempt: t.exempt || "no", ended: t.endedDate, inspected: t.inspectionDate, by: t.inspectedBy, inspector: t.inspectorName, hazards: t.hazardsFound,
       }));
-      return buildLL106Pages({ sig: byB[bid].length && bInfoSigned(bid) ? sigImg : "", year: yr, address: i.address, ownerAgent: i.ownerAgent, borough: i.borough, regId: i.regId }, rows);
+      return buildLL106Pages({ sig: sigImg, year: yr, address: i.address, ownerAgent: i.ownerAgent, borough: i.borough, regId: i.regId }, rows);
     }).join("");
     openHpdPrint("SF LL1-06", pages);
   };
   const printChecklist = (t) => {
-    const sig = t.signed ? sigImg : "";
+    const sig = sigImg;
     const items = (g) => g.map(i => `<tr><td class="l" style="width:70%"><span class="box">${t.checklist?.[i.key]?.done ? "X" : ""}</span>${escHtml(i.label)}</td><td>${escHtml(t.checklist?.[i.key]?.date ? fmtDate(t.checklist[i.key].date) : "")}</td><td class="l">${escHtml(t.checklist?.[i.key]?.note || "")}</td></tr>`).join("");
     const body = TURN_CHECKLIST.map(g => `<h1 style="margin-top:10px;font-size:12px">${escHtml(g.group)}</h1><table>${items(g.items.map(([k, l]) => ({ key: k, label: l })))}</table>`).join("")
       + ((t.customItems || []).length ? `<h1 style="margin-top:10px;font-size:12px">Other</h1><table>${(t.customItems || []).map(i => `<tr><td class="l" style="width:70%"><span class="box">${i.done ? "X" : ""}</span>${escHtml(i.text)}</td><td>${escHtml(i.date ? fmtDate(i.date) : "")}</td><td class="l">${escHtml(i.note || "")}</td></tr>`).join("")}</table>` : "");
@@ -8770,24 +8770,23 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
           <button className="btn-primary" onClick={startTurn} disabled={!nb || !nu}><Plus size={14} /> Start unit turn</button>
         </div>
       </div>
+      <div id="sig-setup" className="form-panel" style={{ marginBottom: 10, border: sigImg ? undefined : "2px solid #C77700" }}>
+        <strong>My signature</strong> <span className="row-muted">— {sigImg ? "saved. It's added automatically to every form you print (owner/agent signature line on LL1-06, inspector signature line on LL1-07, and the checklist)." : "draw it once below and save it — after that it's added automatically to every printed form."}</span>
+        <SignaturePad current={sigImg} onSave={saveSig} onClear={() => saveSig("")} />
+      </div>
       <details id="hpd-form-details" className="form-panel" style={{ marginBottom: 10 }} open={detailsOpen} onToggle={e => setDetailsOpen(e.currentTarget.open)}>
         <summary style={{ cursor: "pointer", fontWeight: 600 }}>Form details — type each building's owner/agent name, borough and property registration # here (printed on the HPD forms)</summary>
         <div style={{ marginTop: 8 }}>
           {data.buildings.map(b => (
-            <div key={b.id} style={{ display: "grid", gridTemplateColumns: "minmax(140px, 1fr) repeat(3, minmax(160px, 1fr)) auto", gap: 8, alignItems: "center", marginBottom: 4 }}>
+            <div key={b.id} style={{ display: "grid", gridTemplateColumns: "minmax(140px, 1fr) repeat(3, minmax(160px, 1fr))", gap: 8, alignItems: "center", marginBottom: 4 }}>
               <strong>{shortAddress(b.address)}</strong>
               <div style={{ border: b.hpdOwnerAgent ? "1px solid var(--border)" : "1px solid #C77700", borderRadius: 4 }}><WoCell value={b.hpdOwnerAgent || ""} placeholder="Owner/agent name" onCommit={v => { update("buildings", b.id, { hpdOwnerAgent: v }); return true; }} /></div>
               <div style={{ border: "1px solid var(--border)", borderRadius: 4 }}><WoCell value={b.hpdBorough || "Brooklyn"} placeholder="Borough" onCommit={v => { update("buildings", b.id, { hpdBorough: v }); return true; }} /></div>
               <div style={{ border: b.hpdRegId ? "1px solid var(--border)" : "1px solid #C77700", borderRadius: 4 }}><WoCell value={b.hpdRegId || ""} placeholder="Property registration #" onCommit={v => { update("buildings", b.id, { hpdRegId: v }); return true; }} /></div>
-              {sigBtn(!!b.hpdSigned, on => update("buildings", b.id, { hpdSigned: on }))}
             </div>
           ))}
         </div>
         <div className="hint">Typed once per building.</div>
-        <div id="sig-setup" style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
-          <strong>My signature</strong> <span className="row-muted">— draw it here once. Then the "Add my signature" button beside each owner/agent name (summary form) and on each apartment (LL1-07) puts it on the printed form.</span>
-          <SignaturePad current={sigImg} onSave={saveSig} onClear={() => saveSig("")} />
-        </div>
       </details>
       <div className="filter-row">
         <select value={bFilter} onChange={e => setBFilter(e.target.value)} style={{ maxWidth: 220 }}><option value="All">All buildings</option>{data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}</select>
@@ -8831,7 +8830,6 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
                     <select value={t.inspectedBy || "owner"} onChange={e => set({ inspectedBy: e.target.value })}><option value="owner">Owner / agent</option><option value="third">Third party</option></select>
                   ))}
                   {field("Name of the person who performed it", <WoCell value={t.inspectorName || ""} onCommit={v => { set({ inspectorName: v }); return true; }} />)}
-                  {field("Signature of person who completed the inspection", sigBtn(!!t.signed, on => set({ signed: on })))}
                   {field("Lead-based paint hazards found?", (
                     <select value={t.hazardsFound || ""} onChange={e => set({ hazardsFound: e.target.value })}><option value="">Not answered</option><option value="yes">Yes</option><option value="no">No</option></select>
                   ))}
