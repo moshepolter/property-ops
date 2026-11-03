@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-36";
+const APP_BUILD = "sync-fix-37";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -8791,10 +8791,10 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
                 </div>
                 {hazardsSuggested(t) && t.hazardsFound !== "yes" && <div className="hint" style={{ color: "var(--danger, #B3261E)" }}>Your room answers below include a hazard — "Lead-based paint hazards found?" should probably be Yes.</div>}
 
-                <div className="row" style={{ marginTop: 6 }}><strong>2. Room-by-room (HPD form SF LL1-07)</strong> <span className="row-muted">— tap a box to cycle Yes / No / blank</span></div>
+                <div className="row" style={{ marginTop: 6 }}><strong>2. Room-by-room (HPD form SF LL1-07)</strong> <span className="row-muted">— choose Yes or No in each box, or leave it blank; "All clear" fills a clean room in one click</span></div>
                 <div className="sheet-wrap" style={{ margin: "6px 0 12px" }}>
                   <table className="sheet">
-                    <thead><tr><th>Room</th>{TURN_ROOM_COLS.map(c => <th key={c.key} title={c.rule} style={{ minWidth: 92 }}>{c.label}<div className="row-muted" style={{ fontWeight: 400 }}>{c.rule}</div></th>)}<th style={{ width: 30 }}></th></tr></thead>
+                    <thead><tr><th>Room</th>{TURN_ROOM_COLS.map(c => <th key={c.key} title={c.rule} style={{ minWidth: 92 }}>{c.label}<div className="row-muted" style={{ fontWeight: 400 }}>{c.rule}</div></th>)}<th style={{ width: 110 }}></th></tr></thead>
                     <tbody>
                       {(t.rooms || []).map(r => (
                         <tr key={r.id}>
@@ -8802,9 +8802,18 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
                           {TURN_ROOM_COLS.map(c => {
                             const v = r[c.key] || "";
                             const bad = (c.key === "floors" ? v === "no" : v === "yes");
-                            return <td key={c.key} style={{ textAlign: "center" }}><button type="button" className="chip" style={{ minWidth: 44, background: bad ? "#FDE7E4" : v ? "#E6F4EA" : undefined }} onClick={() => setRoom(r.id, { [c.key]: cycle(v) })}>{ynLabel[v]}</button></td>;
+                            return (
+                              <td key={c.key} style={{ textAlign: "center", padding: 2 }}>
+                                <select value={v} onChange={e => setRoom(r.id, { [c.key]: e.target.value })} style={{ width: 66, background: bad ? "#FDE7E4" : v ? "#E6F4EA" : undefined }}>
+                                  <option value="">—</option><option value="yes">Yes</option><option value="no">No</option>
+                                </select>
+                              </td>
+                            );
                           })}
-                          <td><IconBtn title="Remove room" danger onClick={() => set({ rooms: t.rooms.filter(x => x.id !== r.id) })}><X size={12} /></IconBtn></td>
+                          <td style={{ whiteSpace: "nowrap" }}>
+                            <button type="button" className="btn-ghost" title="Fills in a clean room: No hazards, and Yes for smooth and cleanable floors" onClick={() => setRoom(r.id, { peeling: "no", teeth: "no", subsurface: "no", doorFrame: "no", windowFrame: "no", impact: "no", floors: "yes" })}>All clear</button>
+                            <IconBtn title="Remove room" danger onClick={() => set({ rooms: t.rooms.filter(x => x.id !== r.id) })}><X size={12} /></IconBtn>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
