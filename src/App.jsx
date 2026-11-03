@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-41";
+const APP_BUILD = "sync-fix-42";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -8662,6 +8662,13 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
   const sigRec = (data.signatures || []).find(x => x.id === "sig-main");
   const sigImg = sigRec?.image || "";
   const saveSig = (image) => { if (sigRec) update("signatures", "sig-main", { image }); else add("signatures", { id: "sig-main", image }); };
+  const askNoSig = () => {
+    if (sigImg) return true;
+    if (window.confirm("No signature is saved yet, so the signature line will print blank.\n\nPress Cancel to go draw it now (the \"My signature\" box at the top of this page), or OK to print without it.")) return true;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    setTimeout(() => document.getElementById("sig-setup")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
+    return false;
+  };
   const needSig = () => { setDetailsOpen(true); setTimeout(() => document.getElementById("sig-setup")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50); window.alert("Your signature isn't saved yet — draw it in the \"My signature\" box (it just opened), save it, then click the signature button again."); };
   const sigBtn = (signed, onToggle) => (
     <button type="button" className={signed ? "btn-primary" : "btn-ghost"} onClick={() => { if (!sigImg) { needSig(); return; } onToggle(!signed); }}>{signed && sigImg ? <>✓ Signed <img src={sigImg} alt="" style={{ height: 22, background: "#fff", borderRadius: 3, verticalAlign: "middle", marginLeft: 6 }} /></> : "Add my signature"}</button>
@@ -8721,6 +8728,7 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
   };
   const printLL107 = (t) => {
     const sig = sigImg;
+    if (!askNoSig()) return;
     if (!warnMissing([t.buildingId])) return;
     const i = bInfo(t.buildingId);
     openHpdPrint("SF LL1-07", buildLL107Pages({ sig, year: turnYear(t) || thisYear, address: i.address, apt: unitNum(t.unitId), inspector: t.inspectorName || "", borough: i.borough, regId: i.regId }, t.rooms || []));
@@ -8730,6 +8738,7 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
     shown.forEach(t => { (byB[t.buildingId] = byB[t.buildingId] || []).push(t); });
     const bids = Object.keys(byB);
     if (bids.length === 0) { window.alert("No unit turns to print for this filter."); return; }
+    if (!askNoSig()) return;
     if (!warnMissing(bids)) return;
     const yr = year === "All" ? thisYear : year;
     const pages = bids.map(bid => {
@@ -8743,6 +8752,7 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
   };
   const printChecklist = (t) => {
     const sig = sigImg;
+    if (!askNoSig()) return;
     const items = (g) => g.map(i => `<tr><td class="l" style="width:70%"><span class="box">${t.checklist?.[i.key]?.done ? "X" : ""}</span>${escHtml(i.label)}</td><td>${escHtml(t.checklist?.[i.key]?.date ? fmtDate(t.checklist[i.key].date) : "")}</td><td class="l">${escHtml(t.checklist?.[i.key]?.note || "")}</td></tr>`).join("");
     const body = TURN_CHECKLIST.map(g => `<h1 style="margin-top:10px;font-size:12px">${escHtml(g.group)}</h1><table>${items(g.items.map(([k, l]) => ({ key: k, label: l })))}</table>`).join("")
       + ((t.customItems || []).length ? `<h1 style="margin-top:10px;font-size:12px">Other</h1><table>${(t.customItems || []).map(i => `<tr><td class="l" style="width:70%"><span class="box">${i.done ? "X" : ""}</span>${escHtml(i.text)}</td><td>${escHtml(i.date ? fmtDate(i.date) : "")}</td><td class="l">${escHtml(i.note || "")}</td></tr>`).join("")}</table>` : "");
@@ -8773,6 +8783,7 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
       <div id="sig-setup" className="form-panel" style={{ marginBottom: 10, border: sigImg ? undefined : "2px solid #C77700" }}>
         <strong>My signature</strong> <span className="row-muted">— {sigImg ? "saved. It's added automatically to every form you print (owner/agent signature line on LL1-06, inspector signature line on LL1-07, and the checklist)." : "draw it once below and save it — after that it's added automatically to every printed form."}</span>
         <SignaturePad current={sigImg} onSave={saveSig} onClear={() => saveSig("")} />
+        {sigImg && <div className="hint" style={{ color: "#1E7B34", fontWeight: 600 }}>✓ Signature saved — it will print on the signature lines automatically.</div>}
       </div>
       <details id="hpd-form-details" className="form-panel" style={{ marginBottom: 10 }} open={detailsOpen} onToggle={e => setDetailsOpen(e.currentTarget.open)}>
         <summary style={{ cursor: "pointer", fontWeight: 600 }}>Form details — type each building's owner/agent name, borough and property registration # here (printed on the HPD forms)</summary>
