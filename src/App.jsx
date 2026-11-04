@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-42";
+const APP_BUILD = "sync-fix-44";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -8327,6 +8327,7 @@ function insuranceRemaining(p) { return INSURANCE_STEPS.filter(st => !p[st.key])
 
 // The policies from the Fairmont Insurance Brokers summaries (prepared June 2026).
 const INSURANCE_SEED = [
+  { type: "Liability", insured: "Fort Hamilton Apartments LLC", covers: "8220 Fort Hamilton Pkwy, Brooklyn 11209", broker: "Brooks Group Insurance Agency LLC, 70 Bridge Plaza Dr, Manalapan NJ 07726", carrier: "James River Insurance Company", policyNumber: "P0000003844", premium: "$39,769.00", effectiveDate: "2025-12-10", expirationDate: "2026-12-10", notes: "General liability $1M occurrence / $2M aggregate / $2M products-completed ops. 37 apartment units, premium $38,494 + $1,000 employee benefits liability + $275 company fee. Deductible $5,000 per claim/occurrence. Medical payments excluded. Damage to premises rented $50,000. WATER LIMITATION: no coverage for injury or damage from leaks, plumbing, sewer backup or water entering the building. Also excludes mold/fungi, terrorism (rejected) and construction activities. Additional insured: Investors Bank ISAOA ATIMA, Short Hills NJ. Claims must be sent in writing, not by phone: CoreClaims@jamesriverins.com, fax 804-420-1058." },
   { type: "Property", insured: "Sg & Sons Realty LLC", covers: "321-339 Ovington Avenue, Brooklyn 11209", broker: "WKFC Underwriting Managers, 201 Old Country Rd, Suite 201, Melville NY 11747", carrier: "National Casualty Company", policyNumber: "RYO0007340", premium: "$45,615.45", effectiveDate: "2026-03-09", expirationDate: "2027-03-09", notes: "Renewal of RYO0004630. Building $21,164,000 replacement cost, no coinsurance. Rental income $2,202,898 (100%). Deductible $5,000. Flood $1,000,000 annual aggregate ($50,000 ded). Earthquake $1,000,000 ($50,000 ded). Ordinance or law $1,000,000. Equipment breakdown $23,366,898. Terrorism (TRIA) declined. Property only - no liability on this policy. Mortgagee: Midland Loan Services (PNC), PO Box 25965, Shawnee Mission KS; additional insured Wilmington Trust as Trustee for Citigroup CMT 2020-GC46. Claims: claims@wkfc.com, 877-227-6652." },
   { type: "Package (Property + Liability)", insured: "Estella Realty, LLC", covers: "910 81st St, Brooklyn 11228", broker: "Brooks Group Ins. Agency, 70 Bridge Plaza Dr, Manalapan NJ 07726", carrier: "Seneca Specialty Insurance Company (surplus lines, not NY-licensed)", policyNumber: "SPP 0802446", premium: "$73,027.00", effectiveDate: "2025-12-10", expirationDate: "2026-12-10", notes: "Renewal of ESR 0808816. GL $1M occurrence / $2M aggregate, GL premium $47,395 + terrorism $2,010. Property premium $20,949 + terrorism $2,673. Building $9,305,130 agreed value, special form, 100% coinsurance, $10,000 deductible. Business income/rental value $849,675 (80%). Sewer/drain discharge $75,000. Mortgagee: Wells Fargo Bank, NA (Attn: Ins. Dept., Charlotte NC). Flood and umbrella not on this policy. Claims: 800-442-5723." },
   { type: "Package (Property + Liability + Flood)", insured: "Newkirk Group LLC", covers: "1401-1425 Newkirk Ave aka 582-588 Marlborough Rd, Brooklyn 11226", broker: "Fairmont Insurance Brokers LLC, 718-232-3300", carrier: "Utica Mutual Insurance Company", policyNumber: "CPP 5503348", premium: "$34,164.28", effectiveDate: "2026-03-15", expirationDate: "2027-03-15", notes: "Building $12,699,721 ($10,000 ded). Rental income 12 months. Flood $1,000,000 ($25,000 ded). Sewer backup $250,000. General liability $1M occurrence / $2M aggregate. Mortgagees: Hancock JV Bidco LLC & SIG CRE 2023 Venture LLC (c/o Rialto Capital Advisors); Signature Bank ISAOA ATIMA." },
@@ -8407,7 +8408,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
   const coversText = (p) => insBuildingIds(p).map(id => buildingName(id)).join(", ") || p.covers || "";
   const missingSeed = INSURANCE_SEED.filter(sd => !policies.some(p => (p.policyNumber || "").trim() === sd.policyNumber));
   const loadSeed = () => {
-    if (!window.confirm(`Add ${missingSeed.length} policies from your insurance documents (Newkirk, Shpelrub, Rafyana, Neptune, Estella/910 81st)? They're linked to a building when the address matches one of yours.`)) return;
+    if (!window.confirm(`Add ${missingSeed.length} policies from your insurance documents (Newkirk, Shpelrub, Rafyana, Neptune, Estella/910 81st, Fort Hamilton)? They're linked to a building when the address matches one of yours.`)) return;
     missingSeed.forEach(sd => {
       const key = (sd.covers || "").toLowerCase();
       const hit = data.buildings.find(b => { const a = (b.address || "").toLowerCase(); return (key.includes("newkirk") && a.includes("newkirk")) || (key.includes("east 21st") && a.includes("21st")) || (key.includes("brighton 8th") && a.includes("brighton 8th")) || (key.includes("350-362 neptune") && a.includes("neptune")); });
@@ -8658,7 +8659,7 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
   const [bFilter, setBFilter] = useState("All");
   const [year, setYear] = useState("All");
   const [open, setOpen] = useState(null);
-  const [detailsOpen, setDetailsOpen] = useState(true);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const sigRec = (data.signatures || []).find(x => x.id === "sig-main");
   const sigImg = sigRec?.image || "";
   const saveSig = (image) => { if (sigRec) update("signatures", "sig-main", { image }); else add("signatures", { id: "sig-main", image }); };
@@ -8780,25 +8781,6 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
           <button className="btn-primary" onClick={startTurn} disabled={!nb || !nu}><Plus size={14} /> Start unit turn</button>
         </div>
       </div>
-      <div id="sig-setup" className="form-panel" style={{ marginBottom: 10, border: sigImg ? undefined : "2px solid #C77700" }}>
-        <strong>My signature</strong> <span className="row-muted">— {sigImg ? "saved. It's added automatically to every form you print (owner/agent signature line on LL1-06, inspector signature line on LL1-07, and the checklist)." : "draw it once below and save it — after that it's added automatically to every printed form."}</span>
-        <SignaturePad current={sigImg} onSave={saveSig} onClear={() => saveSig("")} />
-        {sigImg && <div className="hint" style={{ color: "#1E7B34", fontWeight: 600 }}>✓ Signature saved — it will print on the signature lines automatically.</div>}
-      </div>
-      <details id="hpd-form-details" className="form-panel" style={{ marginBottom: 10 }} open={detailsOpen} onToggle={e => setDetailsOpen(e.currentTarget.open)}>
-        <summary style={{ cursor: "pointer", fontWeight: 600 }}>Form details — type each building's owner/agent name, borough and property registration # here (printed on the HPD forms)</summary>
-        <div style={{ marginTop: 8 }}>
-          {data.buildings.map(b => (
-            <div key={b.id} style={{ display: "grid", gridTemplateColumns: "minmax(140px, 1fr) repeat(3, minmax(160px, 1fr))", gap: 8, alignItems: "center", marginBottom: 4 }}>
-              <strong>{shortAddress(b.address)}</strong>
-              <div style={{ border: b.hpdOwnerAgent ? "1px solid var(--border)" : "1px solid #C77700", borderRadius: 4 }}><WoCell value={b.hpdOwnerAgent || ""} placeholder="Owner/agent name" onCommit={v => { update("buildings", b.id, { hpdOwnerAgent: v }); return true; }} /></div>
-              <div style={{ border: "1px solid var(--border)", borderRadius: 4 }}><WoCell value={b.hpdBorough || "Brooklyn"} placeholder="Borough" onCommit={v => { update("buildings", b.id, { hpdBorough: v }); return true; }} /></div>
-              <div style={{ border: b.hpdRegId ? "1px solid var(--border)" : "1px solid #C77700", borderRadius: 4 }}><WoCell value={b.hpdRegId || ""} placeholder="Property registration #" onCommit={v => { update("buildings", b.id, { hpdRegId: v }); return true; }} /></div>
-            </div>
-          ))}
-        </div>
-        <div className="hint">Typed once per building.</div>
-      </details>
       <div className="filter-row">
         <select value={bFilter} onChange={e => setBFilter(e.target.value)} style={{ maxWidth: 220 }}><option value="All">All buildings</option>{data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}</select>
         <select value={year} onChange={e => setYear(e.target.value)} style={{ maxWidth: 140 }}><option value="All">All years</option>{years.map(y => <option key={y} value={y}>{y}</option>)}</select>
@@ -8935,6 +8917,25 @@ function UnitTurnTab({ data, add, update, remove, buildingName }) {
           </div>
         );
       })}
+      <details id="hpd-form-details" className="form-panel" style={{ marginTop: 14 }} open={detailsOpen} onToggle={e => setDetailsOpen(e.currentTarget.open)}>
+        <summary style={{ cursor: "pointer", fontWeight: 600 }}>Setup — my signature, and each building's owner/agent name &amp; registration # (for the HPD forms)</summary>
+        <div style={{ marginTop: 8 }}>
+          {data.buildings.map(b => (
+            <div key={b.id} style={{ display: "grid", gridTemplateColumns: "minmax(140px, 1fr) repeat(3, minmax(160px, 1fr))", gap: 8, alignItems: "center", marginBottom: 4 }}>
+              <strong>{shortAddress(b.address)}</strong>
+              <div style={{ border: b.hpdOwnerAgent ? "1px solid var(--border)" : "1px solid #C77700", borderRadius: 4 }}><WoCell value={b.hpdOwnerAgent || ""} placeholder="Owner/agent name" onCommit={v => { update("buildings", b.id, { hpdOwnerAgent: v }); return true; }} /></div>
+              <div style={{ border: "1px solid var(--border)", borderRadius: 4 }}><WoCell value={b.hpdBorough || "Brooklyn"} placeholder="Borough" onCommit={v => { update("buildings", b.id, { hpdBorough: v }); return true; }} /></div>
+              <div style={{ border: b.hpdRegId ? "1px solid var(--border)" : "1px solid #C77700", borderRadius: 4 }}><WoCell value={b.hpdRegId || ""} placeholder="Property registration #" onCommit={v => { update("buildings", b.id, { hpdRegId: v }); return true; }} /></div>
+            </div>
+          ))}
+        </div>
+        <div className="hint">Typed once per building.</div>
+      <div id="sig-setup" className="form-panel" style={{ marginTop: 10, border: sigImg ? undefined : "2px solid #C77700" }}>
+        <strong>My signature</strong> <span className="row-muted">— {sigImg ? "saved. It's added automatically to every form you print (owner/agent signature line on LL1-06, inspector signature line on LL1-07, and the checklist)." : "draw it once below and save it — after that it's added automatically to every printed form."}</span>
+        <SignaturePad current={sigImg} onSave={saveSig} onClear={() => saveSig("")} />
+        {sigImg && <div className="hint" style={{ color: "#1E7B34", fontWeight: 600 }}>✓ Signature saved — it will print on the signature lines automatically.</div>}
+      </div>
+      </details>
     </div>
   );
 }
