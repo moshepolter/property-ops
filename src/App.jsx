@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-44";
+const APP_BUILD = "sync-fix-45";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -2767,6 +2767,8 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
   // Saturday items reminded on the Monday itself, and payment follow-ups with the attorney.
   const weekendItems = allDated.filter(i => i.type === "Weekend reminder" && i.date === today);
   const insuranceItems = allDated.filter(i => i.type === "Insurance renewal" && i.key.startsWith("ins-") && i.date <= today).sort((a, b) => a.date.localeCompare(b.date));
+  const INS_SOON_MONTHS = 3;
+  const insExpiring = (data.insurancePolicies || []).filter(p => p.expirationDate && p.expirationDate <= addMonthsISO(today, INS_SOON_MONTHS)).sort((a, b) => a.expirationDate.localeCompare(b.expirationDate));
   const payFollowItems = allDated.filter(i => i.type === "Payment follow-up" && i.date <= today).sort((a, b) => a.date.localeCompare(b.date));
   const rentPanelCount = overdueTenants.length + allFollowUps;
   const totalViolationsDue = violationAgencyGroups.reduce((sum, g) => sum + g.items.length, 0);
@@ -3180,6 +3182,11 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
           <div className="dash-stat-label">Open court cases</div>
           <div className="dash-stat-sub">Active, not archived</div>
         </button>
+        <button className="dash-stat-card" onClick={() => setStatOpen(s => s === "insurance" ? null : "insurance")}>
+          <div className="dash-stat-num" style={{ color: insExpiring.some(p => p.expirationDate < today) ? "var(--danger)" : "var(--warn)" }}>{insExpiring.length}</div>
+          <div className="dash-stat-label">Insurance expiring</div>
+          <div className="dash-stat-sub">Within {INS_SOON_MONTHS} months</div>
+        </button>
         <button className="dash-stat-card" onClick={() => setStatOpen(s => s === "tenantsdue" ? null : "tenantsdue")}>
           <div className="dash-stat-num" style={{ color: "var(--danger)" }}>{overdueTenants.length}</div>
           <div className="dash-stat-label">Tenants due</div>
@@ -3228,6 +3235,24 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
                   {c.nextCourtDate && <span className="pill pill-muted">{fmtDate(c.nextCourtDate)}</span>}
                 </button>
               ))
+          )}
+          {statOpen === "insurance" && (
+            insExpiring.length === 0
+              ? <div className="hint">No policies expire in the next {INS_SOON_MONTHS} months.</div>
+              : insExpiring.map(p => {
+                const d = daysUntil(p.expirationDate);
+                const bn = insBuildingIds(p).map(id => buildingName(id)).join(", ") || p.covers || "";
+                return (
+                  <button key={p.id} className="dash-detail-item" onClick={() => setTab("insurance")}>
+                    <span className={`pill ${d < 0 ? "pill-danger" : d <= 60 ? "pill-warn" : "pill-muted"}`}>{d < 0 ? "Expired" : `${d} days`}</span>
+                    <div className="followup-item-main">
+                      <div className="followup-item-name">{bn}<span className="row-muted"> — {p.type}</span></div>
+                      <div className="followup-item-note">{[p.carrier, p.policyNumber].filter(Boolean).join(" · ")}</div>
+                    </div>
+                    <span className="pill pill-muted">{fmtDate(p.expirationDate)}</span>
+                  </button>
+                );
+              })
           )}
           {statOpen === "tenantsdue" && (
             overdueTenants.length === 0
@@ -8403,6 +8428,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
   const [renewing, setRenewing] = useState(null);
   const [rf, setRf] = useState({});
   const [bFilter, setBFilter] = useState("All");
+  const [openB, setOpenB] = useState({});
   const today = todayISO();
   const policies = (data.insurancePolicies || []).slice().sort((a, b) => (a.expirationDate || "9999-99-99").localeCompare(b.expirationDate || "9999-99-99"));
   const coversText = (p) => insBuildingIds(p).map(id => buildingName(id)).join(", ") || p.covers || "";
@@ -8442,14 +8468,24 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
   };
   const printAll = () => {
     if (policies.length === 0) { window.alert("No policies to print yet."); return; }
-    const d = (x) => (x ? fmtDate(x) : "");
-    const order = data.buildings.map(b => b.id);
-    const byBuilding = (p) => { const ids = insBuildingIds(p).map(i => order.indexOf(i)).filter(i => i >= 0); return ids.length ? Math.min(...ids) : 9999; };
-    const rows = policies.slice().sort((a, b) => byBuilding(a) - byBuilding(b) || (a.expirationDate || "").localeCompare(b.expirationDate || "")).map(p => `<tr>
-      <td class="l"><b>${escHtml(coversText(p))}</b></td><td class="l"><b>${escHtml(p.type)}</b></td><td class="l">${escHtml(p.carrier)}</td><td>${escHtml(p.policyNumber)}</td>
-      <td><b>${escHtml(d(p.expirationDate))}</b></td><td>${escHtml(p.premium)}</td><td class="l">${escHtml(p.broker)}</td><td class="l">${escHtml(p.insured)}</td><td class="l">${escHtml(p.notes)}</td></tr>`).join("");
-    openPrintWindow("Insurance schedule", `<h1>Insurance schedule</h1><div class="sub">Printed ${escHtml(fmtDate(today))}</div>
-      <table style="font-size:10px"><tr><th class="l">Building</th><th class="l">Policy</th><th class="l">Carrier</th><th>Policy #</th><th>Expires</th><th>Premium</th><th class="l">Broker</th><th class="l">Insured</th><th class="l">Notes</th></tr>${rows}</table>`);
+    const d = (x) => (x ? fmtDate(x) : "—");
+    const sorted = (arr) => arr.slice().sort((a, b) => (a.expirationDate || "9999").localeCompare(b.expirationDate || "9999"));
+    const policyBlock = (p) => {
+      const days = p.expirationDate ? daysUntil(p.expirationDate) : null;
+      const left = days === null ? "" : days < 0 ? " (EXPIRED)" : ` (${days} days left)`;
+      return `<table class="pol"><tr class="top"><td style="width:15%"><span>Policy</span><b>${escHtml(p.type)}</b></td><td style="width:22%"><span>Carrier</span>${escHtml(p.carrier || "—")}</td><td style="width:18%"><span>Policy #</span>${escHtml(p.policyNumber || "—")}</td><td style="width:25%"><span>Term</span>${escHtml(d(p.effectiveDate))} to <b>${escHtml(d(p.expirationDate))}</b>${escHtml(left)}</td><td style="width:20%"><span>Premium</span>${escHtml(p.premium || "—")}</td></tr>
+        <tr><td colspan="3"><span>Broker</span>${escHtml(p.broker || "—")}</td><td colspan="2"><span>Insured</span>${escHtml(p.insured || "—")}</td></tr>
+        ${p.notes ? `<tr><td colspan="5"><span>Notes</span>${escHtml(p.notes)}</td></tr>` : ""}</table>`;
+    };
+    const sections = data.buildings.map(b => ({ name: shortAddress(b.address), items: sorted(policies.filter(p => insBuildingIds(p).includes(b.id))) })).filter(g => g.items.length);
+    const lone = sorted(policies.filter(p => insBuildingIds(p).length === 0));
+    if (lone.length) sections.push({ name: "Not linked to a building", items: lone });
+    const html = sections.map(g => `<div class="bld"><div class="bldhead">${escHtml(g.name)} <small>${g.items.length} ${g.items.length === 1 ? "policy" : "policies"}</small></div>${g.items.map(policyBlock).join("")}</div>`).join("");
+    openPrintWindow("Insurance schedule", `<style>
+      .bld { margin: 0 0 18px; page-break-inside: avoid; } .bldhead { background: #222; color: #fff; font-size: 13px; font-weight: bold; padding: 5px 8px; -webkit-print-color-adjust: exact; print-color-adjust: exact; } .bldhead small { font-weight: normal; font-size: 10px; margin-left: 8px; }
+      table.pol { width: 100%; border-collapse: collapse; margin: 0; border-bottom: 2px solid #000; } table.pol td { border: 0; border-bottom: 1px solid #bbb; text-align: left; padding: 4px 8px; font-size: 10.5px; vertical-align: top; }
+      table.pol td span { display: block; font-size: 8px; text-transform: uppercase; color: #555; } table.pol tr.top td { padding-top: 6px; }
+    </style><h1>Insurance schedule</h1><div class="sub">Printed ${escHtml(fmtDate(today))} &nbsp;|&nbsp; ${policies.length} policies &nbsp;|&nbsp; ${sections.length} ${sections.length === 1 ? "building" : "buildings"}</div>${html}`);
   };
 
   const PolicyRows = (p) => {
@@ -8521,6 +8557,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
         <h1 className="page-title">Insurance</h1>
         <div className="page-actions">
           {missingSeed.length > 0 && <button className="btn-ghost" onClick={loadSeed}>Load the {missingSeed.length} policies from the Fairmont summaries</button>}
+          <button className="btn-ghost" onClick={() => { const all = data.buildings.every(b => openB[b.id]); const n = {}; data.buildings.forEach(b => { n[b.id] = !all; }); setOpenB(n); }}>{data.buildings.every(b => openB[b.id]) ? "Collapse all" : "Expand all"}</button>
           <button className="btn-ghost" onClick={printAll}><Printer size={14} /> Print all</button>
           <button className="btn-primary" onClick={() => { setForm(form ? null : { ...blank, buildingIds: bFilter !== "All" ? [bFilter] : [] }); setNotice(""); }}><Plus size={14} /> Add policy</button>
         </div>
@@ -8538,15 +8575,19 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
         const have = new Set();
         items.forEach(p => insuranceCovers(p.type).forEach(c => have.add(c)));
         return (
-          <div key={b.id} style={{ marginBottom: 18 }}>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", margin: "6px 0" }}>
-              <h2 style={{ fontSize: 16, margin: 0 }}>{shortAddress(b.address)}</h2>
+          <details key={b.id} className="form-panel" style={{ marginBottom: 10, display: "block" }} open={!!openB[b.id] || bFilter !== "All"} onToggle={e => { const o = e.currentTarget.open; setOpenB(prev => (!!prev[b.id] === o ? prev : { ...prev, [b.id]: o })); }}>
+            <summary style={{ cursor: "pointer", display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+              <h2 style={{ fontSize: 16, margin: 0, display: "inline" }}>{shortAddress(b.address)}</h2>
+              <span className="row-muted">{items.length} {items.length === 1 ? "policy" : "policies"}</span>
+              {(() => { const nx = items.filter(p => p.expirationDate)[0]; if (!nx) return null; const dd = daysUntil(nx.expirationDate); return <span className={`pill ${dd < 0 ? "pill-danger" : dd <= 92 ? "pill-warn" : "pill-ok"}`}>{dd < 0 ? "Expired" : "Next expires"} {fmtDate(nx.expirationDate)}</span>; })()}
+            </summary>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", margin: "8px 0" }}>
               {INSURANCE_CORE.map(c => have.has(c)
                 ? <span key={c} className="pill pill-ok">✓ {c}</span>
                 : <button key={c} type="button" className="chip" title={`Add ${c} for this building`} onClick={() => { setForm({ ...blank, type: c, buildingIds: [b.id], insured: items[0]?.insured || "", broker: items[0]?.broker || "" }); setNotice(""); window.scrollTo({ top: 0, behavior: "smooth" }); }}>+ {c}</button>)}
             </div>
             {items.length > 0 && Table(items)}
-          </div>
+          </details>
         );
       })}
       {unlinked.length > 0 && (
@@ -9368,7 +9409,7 @@ function Styles() {
         display: flex; align-items: center; gap: 10px; background: var(--ok-bg); color: var(--ok);
         border-radius: 8px; padding: 16px; font-size: 13px; margin-bottom: 24px;
       }
-      .dash-stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+      .dash-stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 16px; }
       .dash-quick-note {
         display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--border);
         border-radius: 8px; padding: 6px 12px; margin-bottom: 14px;
