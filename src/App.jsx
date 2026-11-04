@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-45";
+const APP_BUILD = "sync-fix-46";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -8404,7 +8404,8 @@ function InsurancePolicyForm({ form, setForm, buildings, onSave, onSaveAnother, 
         {F("Expires", <input type="date" value={form.expirationDate} onChange={e => set("expirationDate", e.target.value)} />)}
         {F("Starts", <input type="date" value={form.effectiveDate} onChange={e => set("effectiveDate", e.target.value)} />)}
         {F("Premium", <input value={form.premium} placeholder="$" onChange={e => set("premium", e.target.value)} />)}
-        {F("Broker (name, phone, email)", <input value={form.broker} onChange={e => set("broker", e.target.value)} />)}
+        {F("My broker (who I deal with, e.g. Jack - Cortland)", <input value={form.brokerContact || ""} onChange={e => set("brokerContact", e.target.value)} />)}
+        {F("Broker on the policy (name, phone, email)", <input value={form.broker} onChange={e => set("broker", e.target.value)} />)}
         {F("Insured company", <input value={form.insured} onChange={e => set("insured", e.target.value)} />)}
       </div>
       <div style={{ marginTop: 10 }}>{F("Notes", <textarea rows={3} value={form.notes} onChange={e => set("notes", e.target.value)} />)}</div>
@@ -8420,7 +8421,7 @@ function InsurancePolicyForm({ form, setForm, buildings, onSave, onSaveAnother, 
 }
 
 function InsuranceTab({ data, add, update, remove, buildingName }) {
-  const blank = { type: "", buildingIds: [], insured: "", broker: "", carrier: "", policyNumber: "", premium: "", effectiveDate: "", expirationDate: "", notes: "" };
+  const blank = { type: "", buildingIds: [], brokerContact: "", insured: "", broker: "", carrier: "", policyNumber: "", premium: "", effectiveDate: "", expirationDate: "", notes: "" };
   const [form, setForm] = useState(null);
   const [notice, setNotice] = useState("");
   const [editing, setEditing] = useState(null);
@@ -8447,7 +8448,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
     add("insurancePolicies", rec);
     if (another) {
       setNotice(`Saved ${rec.type} — now the next one.`);
-      setForm({ ...blank, buildingIds: form.buildingIds, insured: form.insured, broker: form.broker });
+      setForm({ ...blank, buildingIds: form.buildingIds, insured: form.insured, broker: form.broker, brokerContact: form.brokerContact });
       setTimeout(() => setNotice(""), 4000);
     } else { setForm(null); setNotice(""); }
   };
@@ -8474,7 +8475,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
       const days = p.expirationDate ? daysUntil(p.expirationDate) : null;
       const left = days === null ? "" : days < 0 ? " (EXPIRED)" : ` (${days} days left)`;
       return `<table class="pol"><tr class="top"><td style="width:15%"><span>Policy</span><b>${escHtml(p.type)}</b></td><td style="width:22%"><span>Carrier</span>${escHtml(p.carrier || "—")}</td><td style="width:18%"><span>Policy #</span>${escHtml(p.policyNumber || "—")}</td><td style="width:25%"><span>Term</span>${escHtml(d(p.effectiveDate))} to <b>${escHtml(d(p.expirationDate))}</b>${escHtml(left)}</td><td style="width:20%"><span>Premium</span>${escHtml(p.premium || "—")}</td></tr>
-        <tr><td colspan="3"><span>Broker</span>${escHtml(p.broker || "—")}</td><td colspan="2"><span>Insured</span>${escHtml(p.insured || "—")}</td></tr>
+        <tr><td colspan="3"><span>My broker</span><b>${escHtml(p.brokerContact || "—")}</b>${p.broker ? `<br><small>Policy lists: ${escHtml(p.broker)}</small>` : ""}</td><td colspan="2"><span>Insured</span>${escHtml(p.insured || "—")}</td></tr>
         ${p.notes ? `<tr><td colspan="5"><span>Notes</span>${escHtml(p.notes)}</td></tr>` : ""}</table>`;
     };
     const sections = data.buildings.map(b => ({ name: shortAddress(b.address), items: sorted(policies.filter(p => insBuildingIds(p).includes(b.id))) })).filter(g => g.items.length);
@@ -8511,7 +8512,10 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
             ) : <span className="row-muted">Add date</span>}
           </td>
           <td data-label="Premium">{p.premium || <span className="row-muted">—</span>}</td>
-          <td data-label="Broker" style={{ fontSize: 12 }}>{p.broker || <span className="row-muted">—</span>}</td>
+          <td className="wo-edit" data-label="My broker" style={{ fontSize: 12, minWidth: 150 }}>
+            <WoCell value={p.brokerContact || ""} placeholder="e.g. Jack - Cortland" onCommit={v => { update("insurancePolicies", p.id, { brokerContact: v }); return true; }} />
+            {p.broker && <div className="row-muted" style={{ fontSize: 11, padding: "0 6px 4px" }}>Policy lists: {p.broker}</div>}
+          </td>
           <td className="wo-edit" data-label="Notes" style={{ minWidth: 220 }}>
             <WoCell multiline value={p.notes || ""} placeholder="Add a note…" onCommit={t => { update("insurancePolicies", p.id, { notes: t }); return true; }} />
           </td>
@@ -8541,7 +8545,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
   const Table = (items) => (
     <div className="sheet-wrap wo-sheet-wrap">
       <table className="sheet wo-sheet">
-        <thead><tr><th>Policy</th><th>Carrier</th><th>Policy #</th><th>Expires</th><th>Premium</th><th>Broker</th><th>Notes</th><th style={{ width: 150 }}></th></tr></thead>
+        <thead><tr><th>Policy</th><th>Carrier</th><th>Policy #</th><th>Expires</th><th>Premium</th><th>My broker</th><th>Notes</th><th style={{ width: 150 }}></th></tr></thead>
         <tbody>{items.map(PolicyRows)}</tbody>
       </table>
     </div>
@@ -8557,6 +8561,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
         <h1 className="page-title">Insurance</h1>
         <div className="page-actions">
           {missingSeed.length > 0 && <button className="btn-ghost" onClick={loadSeed}>Load the {missingSeed.length} policies from the Fairmont summaries</button>}
+          <button className="btn-ghost" title="Type your broker once and fill it in on every policy that doesn't have one yet" onClick={() => { const v = window.prompt("Your broker for the policies that don't have one yet (e.g. Jack - Cortland):", ""); if (!v || !v.trim()) return; policies.filter(p => !(p.brokerContact || "").trim()).forEach(p => update("insurancePolicies", p.id, { brokerContact: v.trim() })); }}>Set my broker on all</button>
           <button className="btn-ghost" onClick={() => { const all = data.buildings.every(b => openB[b.id]); const n = {}; data.buildings.forEach(b => { n[b.id] = !all; }); setOpenB(n); }}>{data.buildings.every(b => openB[b.id]) ? "Collapse all" : "Expand all"}</button>
           <button className="btn-ghost" onClick={printAll}><Printer size={14} /> Print all</button>
           <button className="btn-primary" onClick={() => { setForm(form ? null : { ...blank, buildingIds: bFilter !== "All" ? [bFilter] : [] }); setNotice(""); }}><Plus size={14} /> Add policy</button>
@@ -8584,7 +8589,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", margin: "8px 0" }}>
               {INSURANCE_CORE.map(c => have.has(c)
                 ? <span key={c} className="pill pill-ok">✓ {c}</span>
-                : <button key={c} type="button" className="chip" title={`Add ${c} for this building`} onClick={() => { setForm({ ...blank, type: c, buildingIds: [b.id], insured: items[0]?.insured || "", broker: items[0]?.broker || "" }); setNotice(""); window.scrollTo({ top: 0, behavior: "smooth" }); }}>+ {c}</button>)}
+                : <button key={c} type="button" className="chip" title={`Add ${c} for this building`} onClick={() => { setForm({ ...blank, type: c, buildingIds: [b.id], insured: items[0]?.insured || "", broker: items[0]?.broker || "", brokerContact: items[0]?.brokerContact || "" }); setNotice(""); window.scrollTo({ top: 0, behavior: "smooth" }); }}>+ {c}</button>)}
             </div>
             {items.length > 0 && Table(items)}
           </details>
