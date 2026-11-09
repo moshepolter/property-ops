@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-54";
+const APP_BUILD = "sync-fix-55";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -8804,7 +8804,7 @@ const leaseNums = (r) => {
   const autoLine = r.kind === "vacancy" && r.status === "A" && numOf(r.pref) > 0 ? `PREFERENTIAL RENT $${dollars(numOf(r.pref))} FOR THIS LEASE TERM ONLY.  LEGAL RENT $${dollars(c.legal)}.` : "";
   return { monthly, yearly, security, riderLine: (r.riderText || "").trim() || autoLine };
 };
-async function buildLeasePdf(r, tpl, { sig }) {
+async function buildLeasePdf(r, tpl) {
   const { PDFDocument, StandardFonts, rgb } = await loadPdfLib();
   const doc = await PDFDocument.load(tpl);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);
@@ -8842,18 +8842,11 @@ async function buildLeasePdf(r, tpl, { sig }) {
   if (r.riderPages) put(p2, r.riderPages, 170, 837.8, 50);
   put(p2, n.riderLine, 32.4, 860.3, 540, mono, 10);
   put(p2, U(r.landlord) ? `${U(r.landlord)}, Landlord` : "", 32.4, 906.8, 250);
-  put(p2, t[0] ? `${U(t[0])}, Tenant` : "", 302.4, 922.1, 280); put(p2, t[1] ? `${U(t[1])}, Co-Tenant` : "", 302.4, 945.0, 280);
-  if (sig) {
-    try {
-      const img = await doc.embedPng(sig);
-      const h = 26, w = Math.min(150, (img.width / img.height) * h);
-      p2.drawImage(img, { x: 56, y: 1008 - 945 + 3, width: w, height: h });
-    } catch (e) { /* signature is optional */ }
-  }
+  put(p2, t[0] ? `${U(t[0])}, Tenant` : "", 302.4, 922.1, 280); put(p2, t[1] ? `${U(t[1])}, Co-Tenant` : "", 302.4, 957.1, 280);
   return doc;
 }
 
-async function buildRiderPdf(r, tpl, { address, ownerAgent, sig, asDoc }) {
+async function buildRiderPdf(r, tpl, { address, ownerAgent, asDoc }) {
   const { PDFDocument, StandardFonts, rgb } = await loadPdfLib();
   const doc = await PDFDocument.load(tpl);
   const form = doc.getForm();
@@ -8917,16 +8910,6 @@ async function buildRiderPdf(r, tpl, { address, ownerAgent, sig, asDoc }) {
   text("Print Name of Tenants", tenantsOf(r).join(" & "));
   text("Print Name of Owner or Owners Agent", ownerAgent);
   form.updateFieldAppearances(font);
-  // automatic signature + date on the owner's signature line
-  if (sig) {
-    try {
-      const img = await doc.embedPng(sig);
-      const h = 26, w = Math.min(150, (img.width / img.height) * h);
-      const pg4 = doc.getPage(3);
-      pg4.drawImage(img, { x: 318, y: 497, width: w, height: h });
-      pg4.drawText(mdy(todayISO()), { x: 500, y: 500, size: 10, font, color: rgb(0, 0, 0) });
-    } catch (e) { /* signature is optional */ }
-  }
   form.flatten();
   return asDoc ? doc : await doc.save();
 }
@@ -8970,11 +8953,11 @@ function LeaseRiderTab({ data, add, update, remove }) {
       if (needL && !leaseTpl) { setNeedTpl({ id: r.id, mode, which: "lease" }); setBusy(""); return; }
       const b = bldg(r.buildingId);
       let out;
-      if (mode === "rider") out = await buildRiderPdf(r, riderTpl, { address: b.address || "", ownerAgent: r.ownerAgent || b.hpdOwnerAgent || "", sig: sigImg });
+      if (mode === "rider") out = await buildRiderPdf(r, riderTpl, { address: b.address || "", ownerAgent: r.ownerAgent || b.hpdOwnerAgent || "" });
       else {
-        const doc = await buildLeasePdf(r, leaseTpl, { sig: sigImg });
+        const doc = await buildLeasePdf(r, leaseTpl);
         if (mode === "both") {
-          const rd = await buildRiderPdf(r, riderTpl, { address: b.address || "", ownerAgent: r.ownerAgent || b.hpdOwnerAgent || "", sig: sigImg, asDoc: true });
+          const rd = await buildRiderPdf(r, riderTpl, { address: b.address || "", ownerAgent: r.ownerAgent || b.hpdOwnerAgent || "", asDoc: true });
           const pages = await doc.copyPages(rd, rd.getPageIndices());
           pages.forEach(p => doc.addPage(p));
         }
@@ -9003,7 +8986,7 @@ function LeaseRiderTab({ data, add, update, remove }) {
   return (
     <div>
       <div className="page-head"><h1 className="page-title">Lease + Rider</h1></div>
-      <div className="hint" style={{ marginBottom: 8 }}>Pick the building and apartment and fill in the lease once — the lease (Blumberg T327) and the official DHCR rent-stabilized Lease Rider (RA-LR1, June 2026) both fill in from it, and the rider's rent math is worked out for you. Your saved signature (from the Unit Turn tab) goes on the landlord lines. Landlord, bank and owner details carry over from the last lease you did for the same building.</div>
+      <div className="hint" style={{ marginBottom: 8 }}>Pick the building and apartment and fill in the lease once — the lease (Blumberg T327) and the official DHCR rent-stabilized Lease Rider (RA-LR1, June 2026) both fill in from it, and the rider's rent math is worked out for you. Landlord, bank and owner details carry over from the last lease you did for the same building.</div>
       <input ref={fileRef} type="file" accept="application/pdf" style={{ display: "none" }} onChange={onPickTemplate} />
       <div className="form-panel" style={{ marginBottom: 10 }}>
         <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "flex-end", margin: 0 }}>
@@ -9147,7 +9130,7 @@ function LeaseRiderTab({ data, add, update, remove }) {
                 <button className="btn-primary" disabled={busy === r.id} onClick={() => generate(r, "both")}><Printer size={14} /> {busy === r.id ? "Building…" : "Print lease + rider"}</button>
                 <button className="btn-ghost" disabled={busy === r.id} onClick={() => generate(r, "lease")}>Lease only</button>
                 <button className="btn-ghost" disabled={busy === r.id} onClick={() => generate(r, "rider")}>Rider only</button>
-                <span className="row-muted" style={{ fontSize: 12 }}>{sigImg ? "Your saved signature (and today's date on the rider) go on the landlord lines." : "No signature saved yet — the landlord lines print blank (draw it in the Unit Turn tab)."} Tenants sign by hand.</span>
+                <span className="row-muted" style={{ fontSize: 12 }}>Nothing is signed for you — the landlord and tenants sign by hand.</span>
               </div>
             </div>}
           </div>
