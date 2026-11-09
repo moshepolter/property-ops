@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-48";
+const APP_BUILD = "sync-fix-49";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -8371,6 +8371,15 @@ const INSURANCE_SEED = [
   { type: "Flood", insured: "Legosh Management Corp.", covers: "2872 Brighton 4th St, Brooklyn 11235", brokerContact: "Jack - Cortland", broker: "Fairmont Insurance Brokers LLC, 1600 60th St, Brooklyn 11204, 718-232-3300", carrier: "MS Transverse Specialty Insurance Company (via Neptune Flood)", policyNumber: "TNF4508920", premium: "$4,682.02", effectiveDate: "2026-11-22", expirationDate: "2027-11-22", notes: "Renewal of TNF4078688. Premium $4,214 + $310 broker fee + $151.70 surplus lines tax + $6.32 stamping fee. PAYMENT DUE 11/22/2026. Building $501,000 replacement cost; contents, basement contents, business interruption and loss of rent all $0. Increased cost of compliance $30,000. Pollution damage $10,000. Deductible $25,000 (applies separately to building and contents). Flood zone AE. Mortgagee: Flagstar Bank, N.A. ISAOA, ATIMA, ref #110702531. Claims: Neptune 727-202-4815 or adjuster Peninsula Insurance Bureau 877-420-3689, neptune@pibadjusters.com." },
 ];
 
+// Changes to policies that may already be in the app (matched by policy number).
+const INSURANCE_SEED_UPDATES = [
+  { policyNumber: "RYO0006154", patch: { expirationDate: "2026-12-19" },
+    addNote: "POLICY CHANGE #3 (eff 10/20/26): expiration extended from 10/20/26 to 12/19/26. Additional premium $2,844.40 ($2,818 + $26.40 NYFF, TRIA declined). Full policy details (2025-26): building $5,524,100 replacement cost, special form incl. earthquake, flood excluded; business income incl. rental value $431,000 (100% coinsurance); deductible $5,000; equipment breakdown $643 premium. Mortgagees: Northfield Bank (loan 7212542) and PHH Mortgage Services ISAOA ATIMA. Includes windstorm/hail endorsement, ACV roof covering, sewer backup endorsement, aluminum wiring and existing-damage exclusions. Claims: claims@wkfc.com, 877-227-6652." },
+  { policyNumber: "BY01-8000193-04",
+    renew: { carrier: "Steadfast Insurance Company", policyNumber: "BINDER B2611334637 (policy # pending)", premium: "$30,213.00", effectiveDate: "2026-10-20", expirationDate: "2027-10-20",
+      notes: "2026-27 BINDER (dated 11/3/26) issued by Fairmont to extend coverage; replaces expiring Clear Blue BY01-8000193-04. Estimated premium $30,213. $1,000,000 each occurrence / $2,000,000 general aggregate / $2,000,000 products-completed ops. Personal & advertising injury $1,000,000. Damage to rented premises $300,000. Medical payments excluded. Deductible $5,000 each occurrence. Described as 4-story building with merc, 38 units, 3,000 sq ft merc (liquor store, barber shop, Halal meat store, pharmacy). Replace the policy number when the actual policy is issued." } },
+];
+
 // Pieces used by the Insurance tab.
 const INSURANCE_TYPES = ["Property", "Liability", "Flood", "Umbrella", "Package", "Workers' Comp", "Business Auto"];
 const INSURANCE_CORE = ["Property", "Liability", "Flood", "Umbrella"];
@@ -8440,12 +8449,23 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
   const policies = (data.insurancePolicies || []).slice().sort((a, b) => (a.expirationDate || "9999-99-99").localeCompare(b.expirationDate || "9999-99-99"));
   const coversText = (p) => insBuildingIds(p).map(id => buildingName(id)).join(", ") || p.covers || "";
   const missingSeed = INSURANCE_SEED.filter(sd => !policies.some(p => (p.policyNumber || "").trim() === sd.policyNumber));
+  const seedUpd = (u) => u.renew || u.patch;
+  const applySeedUpdate = (p, u) => u.renew
+    ? { ...u.renew, history: [...(p.history || []), { expired: p.expirationDate || "", carrier: p.carrier || "", policyNumber: p.policyNumber || "", premium: p.premium || "", renewedOn: today }] }
+    : { ...u.patch, notes: ((p.notes || "") + " " + (u.addNote || "")).trim() };
+  const pendingUpd = INSURANCE_SEED_UPDATES.filter(u => policies.some(p => (p.policyNumber || "").trim() === u.policyNumber && p.expirationDate !== seedUpd(u).expirationDate));
+  const seedCount = missingSeed.length + pendingUpd.length;
   const loadSeed = () => {
-    if (!window.confirm(`Add ${missingSeed.length} policies from your insurance documents (including the 3 Legosh / 2872 Brighton 4th policies)? They're linked to a building when the address matches one of yours.`)) return;
+    if (!window.confirm(`Add ${missingSeed.length} new polic${missingSeed.length === 1 ? "y" : "ies"} and update ${pendingUpd.length} existing one${pendingUpd.length === 1 ? "" : "s"} from your insurance documents? New ones are linked to a building when the address matches one of yours.`)) return;
     missingSeed.forEach(sd => {
       const key = (sd.covers || "").toLowerCase();
       const hit = data.buildings.find(b => { const a = (b.address || "").toLowerCase(); return (key.includes("newkirk") && a.includes("newkirk")) || (key.includes("east 21st") && a.includes("21st")) || (key.includes("brighton 8th") && a.includes("brighton 8th")) || (key.includes("350-362 neptune") && a.includes("neptune")) || (key.includes("brighton 4th") && a.includes("brighton 4th")); });
-      add("insurancePolicies", { id: uid(), ...sd, buildingIds: hit ? [hit.id] : [] });
+      const u = INSURANCE_SEED_UPDATES.find(x => x.policyNumber === sd.policyNumber);
+      add("insurancePolicies", { id: uid(), ...sd, ...(u ? applySeedUpdate(sd, u) : {}), buildingIds: hit ? [hit.id] : [] });
+    });
+    pendingUpd.forEach(u => {
+      const p = policies.find(x => (x.policyNumber || "").trim() === u.policyNumber);
+      if (p) update("insurancePolicies", p.id, applySeedUpdate(p, u));
     });
   };
   const saveNew = (another) => {
@@ -8566,7 +8586,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
       <div className="page-head">
         <h1 className="page-title">Insurance</h1>
         <div className="page-actions">
-          {missingSeed.length > 0 && <button className="btn-ghost" onClick={loadSeed}>Add the {missingSeed.length} new polic{missingSeed.length === 1 ? "y" : "ies"} from my insurance documents</button>}
+          {seedCount > 0 && <button className="btn-ghost" onClick={loadSeed}>Add / update {seedCount} polic{seedCount === 1 ? "y" : "ies"} from my insurance documents</button>}
           <button className="btn-ghost" title="Type your broker once and fill it in on every policy that doesn't have one yet" onClick={() => { const v = window.prompt("Your broker for the policies that don't have one yet (e.g. Jack - Cortland):", ""); if (!v || !v.trim()) return; policies.filter(p => !(p.brokerContact || "").trim()).forEach(p => update("insurancePolicies", p.id, { brokerContact: v.trim() })); }}>Set my broker on all</button>
           <button className="btn-ghost" onClick={() => { const all = data.buildings.every(b => openB[b.id]); const n = {}; data.buildings.forEach(b => { n[b.id] = !all; }); setOpenB(n); }}>{data.buildings.every(b => openB[b.id]) ? "Collapse all" : "Expand all"}</button>
           <button className="btn-ghost" onClick={printAll}><Printer size={14} /> Print all</button>
