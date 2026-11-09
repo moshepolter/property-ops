@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-53";
+const APP_BUILD = "sync-fix-54";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -8736,13 +8736,17 @@ function SignaturePad({ current, onSave, onClear }) {
 // IAI / rent math itself, and opens the finished lease + rider to print.
 // ---------------------------------------------------------------------------
 const RIDER_TEMPLATE_URL = "/RA-LR1-06-2026-fillable.pdf";
-const PDFLIB_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js";
-const loadPdfLib = () => new Promise((resolve, reject) => {
-  if (window.PDFLib) { resolve(window.PDFLib); return; }
-  const s = document.createElement("script");
-  s.src = PDFLIB_URL; s.onload = () => resolve(window.PDFLib); s.onerror = () => reject(new Error("Could not load the PDF library (check your internet connection)."));
-  document.head.appendChild(s);
-});
+const PDFLIB_URLS = ["https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js", "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js", "https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"];
+const loadPdfLib = async () => {
+  if (window.PDFLib) return window.PDFLib;
+  for (const url of PDFLIB_URLS) {
+    try {
+      await new Promise((resolve, reject) => { const s = document.createElement("script"); s.src = url; s.onload = resolve; s.onerror = () => { s.remove(); reject(new Error("blocked")); }; document.head.appendChild(s); });
+      if (window.PDFLib) return window.PDFLib;
+    } catch (e) { /* try the next host */ }
+  }
+  throw new Error("Could not load the PDF library from any of the 3 hosts it tries (cdnjs, jsDelivr, unpkg). Check your internet connection or whether something is blocking those sites.");
+};
 const formsDb = () => new Promise((resolve, reject) => {
   try {
     const rq = indexedDB.open("propops-forms", 1);
@@ -8934,6 +8938,8 @@ function LeaseRiderTab({ data, add, update, remove }) {
   const [bFilter, setBFilter] = useState("All");
   const [busy, setBusy] = useState("");
   const [needTpl, setNeedTpl] = useState(null);
+  const [pdfView, setPdfView] = useState(null);
+  const [errMsg, setErrMsg] = useState("");
   const fileRef = useRef(null);
   const sigImg = (data.signatures || []).find(x => x.id === "sig-main")?.image || "";
   const unitsFor = (bid) => data.units.filter(u => u.buildingId === bid).sort((a, b) => compareUnits(a.unitNumber, b.unitNumber));
@@ -8954,15 +8960,14 @@ function LeaseRiderTab({ data, add, update, remove }) {
   };
   const generate = async (r, mode, got) => {
     // mode: "both" | "lease" | "rider". got = { which, buf } for a template the person just chose.
-    setBusy(r.id);
-    const w = window.open("about:blank", "_blank");
+    setBusy(r.id); setErrMsg("");
     try {
       const need = (mode === "rider" || mode === "both") ? "rider" : "";
       const needL = (mode === "lease" || mode === "both") ? "lease" : "";
       const riderTpl = need ? (got?.which === "rider" ? got.buf : await getRiderTemplate()) : null;
       const leaseTpl = needL ? (got?.which === "lease" ? got.buf : await getLeaseTemplate()) : null;
-      if (need && !riderTpl) { if (w) w.close(); setNeedTpl({ id: r.id, mode, which: "rider" }); setBusy(""); return; }
-      if (needL && !leaseTpl) { if (w) w.close(); setNeedTpl({ id: r.id, mode, which: "lease" }); setBusy(""); return; }
+      if (need && !riderTpl) { setNeedTpl({ id: r.id, mode, which: "rider" }); setBusy(""); return; }
+      if (needL && !leaseTpl) { setNeedTpl({ id: r.id, mode, which: "lease" }); setBusy(""); return; }
       const b = bldg(r.buildingId);
       let out;
       if (mode === "rider") out = await buildRiderPdf(r, riderTpl, { address: b.address || "", ownerAgent: r.ownerAgent || b.hpdOwnerAgent || "", sig: sigImg });
@@ -8976,8 +8981,8 @@ function LeaseRiderTab({ data, add, update, remove }) {
         out = await doc.save();
       }
       const url = URL.createObjectURL(new Blob([out], { type: "application/pdf" }));
-      if (w) w.location.href = url; else { const a = document.createElement("a"); a.href = url; a.download = `${mode === "rider" ? "Lease Rider" : mode === "lease" ? "Lease" : "Lease + Rider"} - ${shortAddress(b.address)} Apt ${r.apt}.pdf`; a.click(); }
-    } catch (e) { if (w) w.close(); window.alert("Could not build the PDF: " + (e?.message || e)); }
+      setPdfView(prev => { if (prev?.url) URL.revokeObjectURL(prev.url); return { url, name: `${mode === "rider" ? "Lease Rider" : mode === "lease" ? "Lease" : "Lease + Rider"} - ${shortAddress(b.address)} Apt ${r.apt}.pdf` }; });
+    } catch (e) { setErrMsg("Could not build the PDF: " + (e?.message || e)); }
     setBusy("");
   };
   const onPickTemplate = async (e) => {
@@ -9008,6 +9013,17 @@ function LeaseRiderTab({ data, add, update, remove }) {
         </div>
       </div>
       <div className="filter-row"><select value={bFilter} onChange={e => setBFilter(e.target.value)} style={{ maxWidth: 220 }}><option value="All">All buildings</option>{data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}</select></div>
+      {errMsg && <div className="form-panel" style={{ marginBottom: 10, borderColor: "#B00020", color: "#B00020", fontSize: 13 }}>{errMsg} <button className="btn-ghost" style={{ marginLeft: 6 }} onClick={() => setErrMsg("")}>Dismiss</button></div>}
+      {pdfView && <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.6)", display: "flex", flexDirection: "column", padding: 12 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", background: "#fff", padding: "8px 12px", borderRadius: "8px 8px 0 0", flexWrap: "wrap" }}>
+          <b style={{ flex: 1, minWidth: 160 }}>{pdfView.name}</b>
+          <a className="btn-primary" href={pdfView.url} download={pdfView.name} style={{ textDecoration: "none" }}><Download size={14} /> Download</a>
+          <a className="btn-ghost" href={pdfView.url} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>Open in new tab</a>
+          <button className="btn-ghost" onClick={() => { URL.revokeObjectURL(pdfView.url); setPdfView(null); }}><X size={14} /> Close</button>
+        </div>
+        <iframe title="Lease PDF" src={pdfView.url} style={{ flex: 1, border: 0, background: "#fff", borderRadius: "0 0 8px 8px" }} />
+        <div style={{ color: "#fff", fontSize: 12, marginTop: 4 }}>Use the print button in the viewer above, or Download and print the file.</div>
+      </div>}
       {needTpl && <div className="form-panel" style={{ marginBottom: 10, borderColor: "#C77700" }}>
         <div style={{ fontSize: 13, marginBottom: 6 }}>{needTpl.which === "lease"
           ? <>The blank lease PDF isn't on this site yet. Choose <b>lease-new.pdf</b> (the Blumberg T327 lease) once — it's remembered on this device afterward. To skip this on every device, put it in your project's <code>public</code> folder as <code>Lease-T327.pdf</code>.</>
