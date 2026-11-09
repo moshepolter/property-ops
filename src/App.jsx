@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-52";
+const APP_BUILD = "sync-fix-53";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -8771,7 +8771,7 @@ const RIDER_KITCHEN = [["Sink", "Check Box4.8.1"], ["Stove", "Check Box4.8.2"], 
 const RIDER_OTHER = [["Doors", "Check Box10"], ["Windows", "Check Box11"], ["Radiators", "Check Box12"], ["Light Fixtures", "Check Box13"], ["Electrical Work", "Check Box14"], ["Sheetrock", "Check Box15"]];
 const RIDER_RATES = { "1-le": 168, "1-gt": 180, "2-le": 144, "2-gt": 156 };
 const numOf = (v) => { const n = parseFloat(String(v ?? "").replace(/[$,\s]/g, "")); return isFinite(n) ? n : 0; };
-const money = (n) => (isFinite(n) ? n : 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const dollars = (n) => (isFinite(n) ? n : 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const riderCalc = (r) => {
   const prev = numOf(r.prevRent);
   const guideline = r.guidelineAmt !== "" && r.guidelineAmt != null ? numOf(r.guidelineAmt) : Math.round(prev * numOf(r.guidelinePct)) / 100;
@@ -8797,7 +8797,7 @@ const leaseNums = (r) => {
   monthly = Math.round(monthly * 100) / 100;
   const yearly = Math.round(monthly * 12 * 100) / 100;
   const security = r.security !== "" && r.security != null ? numOf(r.security) : monthly;
-  const autoLine = r.kind === "vacancy" && r.status === "A" && numOf(r.pref) > 0 ? `PREFERENTIAL RENT $${money(numOf(r.pref))} FOR THIS LEASE TERM ONLY.  LEGAL RENT $${money(c.legal)}.` : "";
+  const autoLine = r.kind === "vacancy" && r.status === "A" && numOf(r.pref) > 0 ? `PREFERENTIAL RENT $${dollars(numOf(r.pref))} FOR THIS LEASE TERM ONLY.  LEGAL RENT $${dollars(c.legal)}.` : "";
   return { monthly, yearly, security, riderLine: (r.riderText || "").trim() || autoLine };
 };
 async function buildLeasePdf(r, tpl, { sig }) {
@@ -8831,7 +8831,7 @@ async function buildLeasePdf(r, tpl, { sig }) {
   put(p1, U(r.apt), 184, 150.0, 48); put(p1, U(r.premises), 260, 150.0, 314);
   put(p1, U(r.bank), 70, 162.8, 228);
   put(p1, r.termYears, 102, 177.2, 28); put(p1, mdy(r.startDate), 286, 177.2, 84); put(p1, mdy(r.endDate), 433, 177.2, 70);
-  if (n.monthly > 0) { put(p1, money(n.yearly), 119, 190.2, 58); put(p1, money(n.monthly), 308, 190.2, 62); put(p1, money(n.security), 438, 190.2, 64); }
+  if (n.monthly > 0) { put(p1, dollars(n.yearly), 119, 190.2, 58); put(p1, dollars(n.monthly), 308, 190.2, 62); put(p1, dollars(n.security), 438, 190.2, 64); }
   // ---- page 2: rider line, signature block ----
   clear(p2, 30, 520, 849.5, 861.3);
   clear(p2, 30, 260, 896.3, 907.3); clear(p2, 300, 585, 911.3, 923); clear(p2, 300, 585, 934.5, 945.0);
@@ -8857,7 +8857,7 @@ async function buildRiderPdf(r, tpl, { address, ownerAgent, sig, asDoc }) {
   const text = (name, val) => { if (val === "" || val == null) return; try { form.getTextField(name).setText(String(val)); } catch (e) { /* field missing */ } };
   const check = (name, on) => { if (!on) return; try { form.getCheckBox(name).check(); } catch (e) { /* field missing */ } };
   const c = riderCalc(r);
-  const amt = (n, show) => (show ? money(n) : "");
+  const amt = (n, show) => (show ? dollars(n) : "");
   const apt = r.apt || "";
   // ---- Section 1 (vacancy leases only) ----
   if (r.kind === "vacancy") {
@@ -8883,21 +8883,21 @@ async function buildRiderPdf(r, tpl, { address, ownerAgent, sig, asDoc }) {
         const t2 = r.tier === "2", gt = r.units35 === "gt";
         check(t2 ? "Check Box18" : "Check Box17", true);
         check(t2 ? (gt ? "Check Box22" : "Check Box21") : (gt ? "Check Box20" : "Check Box19"), true);
-        text(t2 ? "3F 2" : "3F 1", money(c.f)); text("3G", money(c.g)); text("3H", money(c.h));
+        text(t2 ? "3F 2" : "3F 1", dollars(c.f)); text("3G", dollars(c.g)); text("3H", dollars(c.h));
       }
-      text("New Legal Regulated Rent", money(c.legal));
-      if (numOf(r.pref) > 0) text("undefined_7", money(numOf(r.pref)));
-      text("Preferential Rent or High Actual Rent2", money(c.charged));
+      text("New Legal Regulated Rent", dollars(c.legal));
+      if (numOf(r.pref) > 0) text("undefined_7", dollars(numOf(r.pref)));
+      text("Preferential Rent or High Actual Rent2", dollars(c.charged));
       text("Air Conditioner Surcharges", amt(numOf(r.ac), r.ac !== "")); text("Appliance Surcharges", amt(numOf(r.appl), r.appl !== ""));
       text("Ancillary Service Charges", amt(numOf(r.anc), r.anc !== ""));
       text("8 Other specify", r.other8Label); text("Other charges", amt(numOf(r.other8), r.other8 !== ""));
-      text("New Tenant's Total Payment", money(c.total));
+      text("New Tenant's Total Payment", dollars(c.total));
     } else if (r.status === "B") {
-      check("Check Box24", true); text("rent", money(numOf(r.statusRent)));
+      check("Check Box24", true); text("rent", dollars(numOf(r.statusRent)));
     } else if (r.status === "C") {
-      check("Check Box25", true); text("Specify Program", r.statusLabel); text("Government Program rent", money(numOf(r.statusRent)));
+      check("Check Box25", true); text("Specify Program", r.statusLabel); text("Government Program rent", dollars(numOf(r.statusRent)));
     } else if (r.status === "D") {
-      check("Check Box26", true); text("Other D", r.statusLabel); text("Other D2", money(numOf(r.statusRent)));
+      check("Check Box26", true); text("Other D", r.statusLabel); text("Other D2", dollars(numOf(r.statusRent)));
     }
     check("Check Box23", r.docReq);
     if (r.status === "A") {
@@ -9023,7 +9023,7 @@ function LeaseRiderTab({ data, add, update, remove }) {
         const inp = (k, ph, extra) => <input value={r[k] ?? ""} placeholder={ph || ""} onChange={e => set({ [k]: e.target.value })} style={extra} />;
         const cb = (label, on, onChange) => <label style={{ display: "inline-flex", gap: 4, alignItems: "center", fontSize: 12, marginRight: 10 }}><input type="checkbox" checked={!!on} onChange={e => onChange(e.target.checked)} />{label}</label>;
         const sect = (t) => <div style={{ fontWeight: 600, fontSize: 13, margin: "12px 0 4px" }}>{t}</div>;
-        const roStat = (l, v) => <div style={{ fontSize: 12 }}><span className="row-muted">{l}</span> <b>${money(v)}</b></div>;
+        const roStat = (l, v) => <div style={{ fontSize: 12 }}><span className="row-muted">{l}</span> <b>${dollars(v)}</b></div>;
         const grp = (title, complete, completeKey, items, itemsKey, otherKey, costKey) => (
           <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 8, marginTop: 6 }}>
             <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>{title}</div>
@@ -9041,7 +9041,7 @@ function LeaseRiderTab({ data, add, update, remove }) {
               {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
               <span className="pill pill-accent">Apt {r.apt || "—"}</span>
               <span style={{ fontWeight: 600 }}>{shortAddress(bldg(r.buildingId).address)}</span>
-              <span className="row-muted">{tenantsOf(r).join(" & ") || "no tenant name"} · {r.kind === "renewal" ? "Renewal" : "Vacancy"}{r.startDate ? ` · ${mdy(r.startDate)}${r.endDate ? " – " + mdy(r.endDate) : ""}` : ""}{r.kind === "vacancy" && r.status === "A" && r.prevRent !== "" ? ` · New rent $${money(c.total)}` : ""}</span>
+              <span className="row-muted">{tenantsOf(r).join(" & ") || "no tenant name"} · {r.kind === "renewal" ? "Renewal" : "Vacancy"}{r.startDate ? ` · ${mdy(r.startDate)}${r.endDate ? " – " + mdy(r.endDate) : ""}` : ""}{r.kind === "vacancy" && r.status === "A" && r.prevRent !== "" ? ` · New rent $${dollars(c.total)}` : ""}</span>
               <span style={{ flex: 1 }} />
               <button className="btn-primary" disabled={busy === r.id} onClick={(e) => { e.stopPropagation(); generate(r, "both"); }}><Printer size={14} /> {busy === r.id ? "Building…" : "Print lease + rider"}</button>
               <button className="icon-btn" title="Delete" onClick={(e) => { e.stopPropagation(); if (window.confirm("Delete this lease and rider?")) remove("leaseRiders", r.id); }}><Trash2 size={14} /></button>
@@ -9070,14 +9070,14 @@ function LeaseRiderTab({ data, add, update, remove }) {
                 {field("Lease dated / agreed as of", <input type="date" value={r.leaseDate || ""} onChange={e => set({ leaseDate: e.target.value })} />)}
               </div>
               <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "flex-end", margin: "6px 0 0" }}>
-                {field("Monthly rent ($) — blank = from the rider", inp("monthlyRent", leaseNums(r).monthly > 0 ? money(leaseNums(r).monthly) : "", { width: 150 }))}
-                {field("Security ($) — blank = 1 month", inp("security", leaseNums(r).security > 0 ? money(leaseNums(r).security) : "", { width: 130 }))}
+                {field("Monthly rent ($) — blank = from the rider", inp("monthlyRent", leaseNums(r).monthly > 0 ? dollars(leaseNums(r).monthly) : "", { width: 150 }))}
+                {field("Security ($) — blank = 1 month", inp("security", leaseNums(r).security > 0 ? dollars(leaseNums(r).security) : "", { width: 130 }))}
                 {field("Rider pages initialed (optional)", inp("riderPages", "", { width: 100 }))}
               </div>
               <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "flex-end", margin: "6px 0 0" }}>
                 {field("Rider line printed on the lease (blank = auto: preferential rent + legal rent)", inp("riderText", leaseNums(r).riderLine, { width: 560 }))}
               </div>
-              <div className="hint" style={{ margin: "4px 0 0" }}>Yearly rent on the lease = monthly × 12. {leaseNums(r).monthly > 0 ? `Right now: $${money(leaseNums(r).monthly)} a month, $${money(leaseNums(r).yearly)} a year, $${money(leaseNums(r).security)} security.` : ""}</div>
+              <div className="hint" style={{ margin: "4px 0 0" }}>Yearly rent on the lease = monthly × 12. {leaseNums(r).monthly > 0 ? `Right now: $${dollars(leaseNums(r).monthly)} a month, $${dollars(leaseNums(r).yearly)} a year, $${dollars(leaseNums(r).security)} security.` : ""}</div>
               <div style={{ marginTop: 8, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                 <button className={r.kind === "vacancy" ? "btn-primary" : "btn-ghost"} onClick={() => set({ kind: "vacancy" })}>Vacancy lease (new tenant)</button>
                 <button className={r.kind === "renewal" ? "btn-primary" : "btn-ghost"} onClick={() => set({ kind: "renewal" })}>Renewal lease</button>
@@ -9097,7 +9097,7 @@ function LeaseRiderTab({ data, add, update, remove }) {
                     {field("1. Previous legal regulated rent ($)", inp("prevRent", "0.00", { width: 140 }))}
                     {field("Guideline lease length", <select value={r.years} onChange={e => set({ years: e.target.value })}><option value="1">1 year</option><option value="2">2 year</option></select>)}
                     {field("Guideline %", inp("guidelinePct", "e.g. 2.75", { width: 90 }))}
-                    {field("2. Guideline $ (auto — type to override)", <input value={r.guidelineAmt !== "" ? r.guidelineAmt : (r.prevRent !== "" && r.guidelinePct !== "" ? money(c.guideline) : "")} placeholder="auto" onChange={e => set({ guidelineAmt: e.target.value })} style={{ width: 140 }} />)}
+                    {field("2. Guideline $ (auto — type to override)", <input value={r.guidelineAmt !== "" ? r.guidelineAmt : (r.prevRent !== "" && r.guidelinePct !== "" ? dollars(c.guideline) : "")} placeholder="auto" onChange={e => set({ guidelineAmt: e.target.value })} style={{ width: 140 }} />)}
                   </div>
                   <div className="hint" style={{ margin: "4px 0 0" }}>A vacancy guideline adjustment can only be taken once per calendar year. Check the Rent Guidelines Board order for the right %.</div>
                   {sect("3. Individual Apartment Improvements (IAI) — leave blank if none")}
