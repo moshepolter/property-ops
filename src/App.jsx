@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-55";
+const APP_BUILD = "sync-fix-56";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -2491,6 +2491,14 @@ function allDatedItems(data, tenantName, buildingName) {
     items.push({ key: `ins-${p.id}`, targetId: p.id, date: addMonthsISO(p.expirationDate, -2), type: "Insurance renewal", label: lbl, note: `Expires ${fmtDate(p.expirationDate)} — ask the broker for renewal quotes, get the dec pages and loss runs, and send to other brokers for quotes`, tab: "insurance" });
     items.push({ key: `insd-${p.id}`, targetId: p.id, date: addMonthsISO(p.expirationDate, -1), type: "Insurance renewal", label: lbl, note: `Expires ${fmtDate(p.expirationDate)} — compare coverage and price and choose`, tab: "insurance" });
     items.push({ key: `inse-${p.id}`, targetId: p.id, date: p.expirationDate, type: "Insurance renewal", label: lbl, note: "Policy expires today — make sure the renewal is in place, then press Renewed", tab: "insurance" });
+  });
+  // Reminders typed onto an individual policy (Insurance tab) — show on the calendar until marked done.
+  (data.insurancePolicies || []).forEach(p => {
+    (p.reminders || []).forEach(r => {
+      if (!r || !r.date || r.done) return;
+      const bn = (Array.isArray(p.buildingIds) ? p.buildingIds : []).map(id => buildingName(id)).join(", ") || p.insured || "";
+      items.push({ key: `insr-${p.id}-${r.id}`, targetId: p.id, date: r.date, type: "Insurance reminder", label: `${bn ? `${bn} — ` : ""}${p.type || "Insurance"}${p.carrier ? ` (${p.carrier})` : ""}`, note: r.text, tab: "insurance" });
+    });
   });
   // Anything scheduled for a Saturday gets a second reminder on the Monday after.
   const weekend = [];
@@ -8447,7 +8455,16 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
   const [rf, setRf] = useState({});
   const [bFilter, setBFilter] = useState("All");
   const [openB, setOpenB] = useState({});
+  const [remFor, setRemFor] = useState(null);
+  const [remForm, setRemForm] = useState({ date: "", text: "" });
   const today = todayISO();
+  const saveReminder = (p) => {
+    if (!remForm.date || !remForm.text.trim()) return;
+    update("insurancePolicies", p.id, { reminders: [...(p.reminders || []), { id: uid(), date: remForm.date, text: remForm.text.trim(), done: false }] });
+    setRemFor(null); setRemForm({ date: "", text: "" });
+  };
+  const setReminder = (p, id, patch) => update("insurancePolicies", p.id, { reminders: (p.reminders || []).map(r => r.id === id ? { ...r, ...patch } : r) });
+  const dropReminder = (p, id) => update("insurancePolicies", p.id, { reminders: (p.reminders || []).filter(r => r.id !== id) });
   const policies = (data.insurancePolicies || []).slice().sort((a, b) => (a.expirationDate || "9999-99-99").localeCompare(b.expirationDate || "9999-99-99"));
   const coversText = (p) => insBuildingIds(p).map(id => buildingName(id)).join(", ") || p.covers || "";
   const missingSeed = INSURANCE_SEED.filter(sd => !policies.some(p => (p.policyNumber || "").trim() === sd.policyNumber));
@@ -8504,7 +8521,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
       const left = days === null ? "" : days < 0 ? " (EXPIRED)" : ` (${days} days left)`;
       return `<table class="pol"><tr class="top"><td style="width:15%"><span>Policy</span><b>${escHtml(p.type)}</b></td><td style="width:22%"><span>Carrier</span>${escHtml(p.carrier || "—")}</td><td style="width:18%"><span>Policy #</span>${escHtml(p.policyNumber || "—")}</td><td style="width:25%"><span>Term</span>${escHtml(d(p.effectiveDate))} to <b>${escHtml(d(p.expirationDate))}</b>${escHtml(left)}</td><td style="width:20%"><span>Premium</span>${escHtml(p.premium || "—")}</td></tr>
         <tr><td colspan="3"><span>My broker</span><b>${escHtml(p.brokerContact || "—")}</b>${p.broker ? `<br><small>Policy lists: ${escHtml(p.broker)}</small>` : ""}</td><td colspan="2"><span>Insured</span>${escHtml(p.insured || "—")}</td></tr>
-        ${p.notes ? `<tr><td colspan="5"><span>Notes</span>${escHtml(p.notes)}</td></tr>` : ""}</table>`;
+        ${p.notes ? `<tr><td colspan="5"><span>Notes</span>${escHtml(p.notes)}</td></tr>` : ""}${(p.reminders || []).filter(r => !r.done).length ? `<tr><td colspan="5"><span>Reminders</span>${(p.reminders || []).filter(r => !r.done).map(r => escHtml(fmtDate(r.date) + " — " + r.text)).join("<br>")}</td></tr>` : ""}</table>`;
     };
     const sections = data.buildings.map(b => ({ name: shortAddress(b.address), items: sorted(policies.filter(p => insBuildingIds(p).includes(b.id))) })).filter(g => g.items.length);
     const lone = sorted(policies.filter(p => insBuildingIds(p).length === 0));
@@ -8546,6 +8563,23 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
           </td>
           <td className="wo-edit" data-label="Notes" style={{ minWidth: 220 }}>
             <WoCell multiline value={p.notes || ""} placeholder="Add a note…" onCommit={t => { update("insurancePolicies", p.id, { notes: t }); return true; }} />
+            {(p.reminders || []).slice().sort((x, y) => (x.date || "").localeCompare(y.date || "")).map(r => (
+              <div key={r.id} style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 12, padding: "2px 6px", opacity: r.done ? 0.55 : 1 }}>
+                <input type="checkbox" checked={!!r.done} title="Mark done (removes it from the calendar)" onChange={e => setReminder(p, r.id, { done: e.target.checked })} />
+                <span style={{ flex: 1, textDecoration: r.done ? "line-through" : "none", color: !r.done && r.date < today ? "#B3261E" : "inherit" }}><b>{fmtDate(r.date)}</b> — {r.text}</span>
+                <button className="btn-ghost" style={{ padding: "0 6px" }} title="Delete reminder" onClick={() => dropReminder(p, r.id)}>×</button>
+              </div>
+            ))}
+            {remFor === p.id ? (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", padding: "4px 6px" }}>
+                <input type="date" value={remForm.date} onChange={e => setRemForm({ ...remForm, date: e.target.value })} />
+                <input placeholder="Remind me to…" value={remForm.text} onChange={e => setRemForm({ ...remForm, text: e.target.value })} onKeyDown={e => { if (e.key === "Enter") saveReminder(p); }} style={{ minWidth: 140, flex: 1 }} />
+                <button className="btn-primary" disabled={!remForm.date || !remForm.text.trim()} onClick={() => saveReminder(p)}>Add</button>
+                <button className="btn-ghost" onClick={() => setRemFor(null)}>Cancel</button>
+              </div>
+            ) : (
+              <button className="btn-ghost" style={{ margin: "2px 6px", fontSize: 12 }} onClick={() => { setRemFor(p.id); setRemForm({ date: "", text: "" }); }}><CalendarClock size={12} /> Add reminder</button>
+            )}
           </td>
           <td className="wo-sheet-actions">
             <IconBtn title="Edit" onClick={() => startEdit(p)}><Pencil size={14} /></IconBtn>
