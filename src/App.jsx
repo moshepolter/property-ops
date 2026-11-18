@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-62";
+const APP_BUILD = "sync-fix-65";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -9182,7 +9182,7 @@ function LeaseRiderTab({ data, add, update, remove }) {
     add("leaseRiders", { id, buildingId: nb, unitId: nu, apt: u?.unitNumber || "", tenant1: "", tenant2: "", ownerAgent: last.ownerAgent || b0.hpdOwnerAgent || "",
       landlord: def.legal.toUpperCase() || last.landlord || "", ll1: (def.mail1 + (def.mail2 ? ", " + def.mail2 : "")).toUpperCase(), ll2: def.mailCity.toUpperCase(), bank: def.bank || last.bank || "", premises: (def.street ? `${def.street}, ${def.cityLine}` : (b0.address || "")).toUpperCase(), termYears: "1", monthlyRent: "", security: "", riderText: "", riderPages: "", kind: "vacancy", status: "A", years: "1", prevRent: "", guidelinePct: "", guidelineAmt: "",
       bathComplete: false, bathItems: [], bathOther: "", costBath: "", kitchenComplete: false, kitchenItems: [], kitchenOther: "", costKitchen: "", otherItems: [], otherOther: "", costOther: "", priorIai: "", tier: "1", units35: last.units35 || "le", iaiOn: false,
-      pref: "", ac: "", appl: "", anc: "", other8: "", other8Label: "", statusRent: "", statusLabel: "", docReq: true, startDate: "", endDate: "", leaseDate: "", skip: /ovington/i.test(b0.address || "") ? [] : ["bldRider"], createdAt: todayISO() });
+      pref: "", ac: "", appl: "", anc: "", other8: "", other8Label: "", statusRent: "", statusLabel: "", docReq: false, startDate: "", endDate: "", leaseDate: "", skip: [], manual: [], createdAt: todayISO() });
     setOpen(id); setNu("");
   };
   const generate = async (r, partsIn) => {
@@ -9193,24 +9193,43 @@ function LeaseRiderTab({ data, add, update, remove }) {
     try {
       const b = bldg(r.buildingId);
       const def = bldDefaults(data, b);
-      const ctx = { landlord: (r.landlord || def.legal || "").toUpperCase(), mail1: def.mail1, mail2: def.mail2, mailCity: def.mailCity, phone: def.phone, fax: def.fax, street: def.street, cityLine: def.cityLine, apt: r.apt || "", tenants: tenantsOf(r).map(x => x.toUpperCase()) };
+      const eff = effOf(r);
+      const rr = { ...r, ...eff };
+      const ctx = { landlord: String(eff.landlord || def.legal || "").toUpperCase(), mail1: def.mail1, mail2: def.mail2, mailCity: def.mailCity, phone: def.phone, fax: def.fax, street: def.street, cityLine: def.cityLine, apt: r.apt || "", tenants: tenantsOf(r).map(x => x.toUpperCase()) };
       const ownerAgent = String(r.ownerAgent || b.hpdOwnerAgent || "").toUpperCase();
-      let doc = null;
-      const append = async (src) => { if (!doc) { doc = src; return; } const pg = await doc.copyPages(src, src.getPageIndices()); pg.forEach(p => doc.addPage(p)); };
-      if (parts.includes("lease")) await append(await buildLeasePdf(r, await getLeaseTemplate()));
-      // The lease is on legal-size paper (first 2 pages); everything after it is standard letter size.
-      if (parts.includes("bldRider")) await append(await buildBldRiderPdf(ctx));
-      if (parts.includes("rider")) await append(await toLetterPdf(await buildRiderPdf(r, await getRiderTemplate(), { address: b.address || "", ownerAgent, asDoc: true })));
-      if (parts.includes("noPets")) await append(await buildNoPetsPdf(ctx));
+      // Two files, because a printer can only use one paper size per print job:
+      // the lease (legal size) and everything else (standard letter).
+      const merge = async (list) => { let doc = null; for (const src of list) { if (!doc) { doc = src; continue; } const pg = await doc.copyPages(src, src.getPageIndices()); pg.forEach(p => doc.addPage(p)); } return doc; };
+      const rest = [];
+      if (parts.includes("bldRider")) rest.push(await buildBldRiderPdf(ctx));
+      if (parts.includes("rider")) rest.push(await toLetterPdf(await buildRiderPdf(r, await getRiderTemplate(), { address: b.address || "", ownerAgent, asDoc: true })));
+      if (parts.includes("noPets")) rest.push(await buildNoPetsPdf(ctx));
       const nw = ["stove", "lead"].filter(k => parts.includes(k));
-      if (nw.length) await append(await buildNoticesPdf(ctx, await getNoticesTemplate(), nw));
-      if (parts.includes("emerg")) await append(await buildEmergPdf(ctx));
-      const out = await doc.save();
-      const url = URL.createObjectURL(new Blob([out], { type: "application/pdf" }));
-      const title = parts.length === 1 ? (PACKET_PARTS.find(p => p[0] === parts[0])?.[1] || "Lease") : "Lease packet";
-      setPdfView(prev => { if (prev?.url) URL.revokeObjectURL(prev.url); return { url, name: `${title} - ${shortAddress(b.address)} Apt ${r.apt}.pdf` }; });
+      if (nw.length) rest.push(await buildNoticesPdf(ctx, await getNoticesTemplate(), nw));
+      if (parts.includes("emerg")) rest.push(await buildEmergPdf(ctx));
+      const items = [];
+      const addItem = async (doc, label, name) => { const out = await doc.save(); items.push({ url: URL.createObjectURL(new Blob([out], { type: "application/pdf" })), label, name: `${name} - ${shortAddress(b.address)} Apt ${r.apt}.pdf` }); };
+      if (parts.includes("lease")) await addItem(await buildLeasePdf(rr, await getLeaseTemplate()), "Lease — print on LEGAL paper (8.5 × 14)", "1 Lease (legal)");
+      const restDoc = await merge(rest);
+      if (restDoc) await addItem(restDoc, `${parts.includes("lease") ? "Everything else" : "Papers"} — print on LETTER paper (8.5 × 11)`, `${parts.includes("lease") ? "2 " : ""}Packet (letter)`);
+      setPdfView(prev => { (prev?.items || []).forEach(x => URL.revokeObjectURL(x.url)); return { items, i: 0 }; });
     } catch (e) { setErrMsg("Could not build the PDF: " + (e?.message || e)); }
     setBusy("");
+  };
+  // Entity, mailing address, building address and bank follow the building at print time,
+  // unless that field was typed over by hand on this lease (r.manual). Older leases (no r.manual) keep what they had.
+  const AUTOKEYS = ["landlord", "ll1", "ll2", "premises", "bank"];
+  const effOf = (r) => {
+    const d = bldDefaults(data, bldg(r.buildingId));
+    const auto = Array.isArray(r.manual); const m = r.manual || [];
+    const pick = (k, v) => (auto && !m.includes(k) && v) ? v : (r[k] ?? "");
+    return {
+      landlord: pick("landlord", (d.legal || "").toUpperCase()),
+      ll1: pick("ll1", (d.mail1 + (d.mail2 ? ", " + d.mail2 : "")).toUpperCase()),
+      ll2: pick("ll2", (d.mailCity || "").toUpperCase()),
+      premises: pick("premises", d.street ? `${d.street}, ${d.cityLine}`.toUpperCase() : ""),
+      bank: pick("bank", d.bank || ""),
+    };
   };
   const packetOf = (r) => PACKET_PARTS.map(p => p[0]).filter(k => !(r.skip || []).includes(k));
   const hasIai = (r) => !!(r.iaiOn || r.bathComplete || r.kitchenComplete || (r.bathItems || []).length || (r.kitchenItems || []).length || (r.otherItems || []).length || r.costBath || r.costKitchen || r.costOther || r.priorIai || r.bathOther || r.kitchenOther || r.otherOther);
@@ -9263,16 +9282,17 @@ function LeaseRiderTab({ data, add, update, remove }) {
       </div>
       <div className="filter-row"><select value={bFilter} onChange={e => setBFilter(e.target.value)} style={{ maxWidth: 220 }}><option value="All">All buildings</option>{data.buildings.map(b => <option key={b.id} value={b.id}>{shortAddress(b.address)}</option>)}</select></div>
       {errMsg && <div className="form-panel" style={{ marginBottom: 10, borderColor: "#B00020", color: "#B00020", fontSize: 13 }}>{errMsg} <button className="btn-ghost" style={{ marginLeft: 6 }} onClick={() => setErrMsg("")}>Dismiss</button></div>}
-      {pdfView && <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.6)", display: "flex", flexDirection: "column", padding: 12 }}>
+      {pdfView && (() => { const cur = pdfView.items[pdfView.i] || pdfView.items[0]; const closeAll = () => { pdfView.items.forEach(x => URL.revokeObjectURL(x.url)); setPdfView(null); }; return <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.6)", display: "flex", flexDirection: "column", padding: 12 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center", background: "#fff", padding: "8px 12px", borderRadius: "8px 8px 0 0", flexWrap: "wrap" }}>
-          <b style={{ flex: 1, minWidth: 160 }}>{pdfView.name}</b>
-          <a className="btn-primary" href={pdfView.url} download={pdfView.name} style={{ textDecoration: "none" }}><Download size={14} /> Download</a>
-          <a className="btn-ghost" href={pdfView.url} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>Open in new tab</a>
-          <button className="btn-ghost" onClick={() => { URL.revokeObjectURL(pdfView.url); setPdfView(null); }}><X size={14} /> Close</button>
+          {pdfView.items.length > 1 && pdfView.items.map((x, n) => <button key={n} className={n === pdfView.i ? "btn-primary" : "btn-ghost"} onClick={() => setPdfView({ ...pdfView, i: n })}>{n + 1}. {n === 0 ? "Lease (legal)" : "The rest (letter)"}</button>)}
+          <b style={{ flex: 1, minWidth: 160 }}>{cur.label}</b>
+          <a className="btn-primary" href={cur.url} download={cur.name} style={{ textDecoration: "none" }}><Download size={14} /> Download</a>
+          <a className="btn-ghost" href={cur.url} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>Open in new tab</a>
+          <button className="btn-ghost" onClick={closeAll}><X size={14} /> Close</button>
         </div>
-        <iframe title="Lease PDF" src={pdfView.url} style={{ flex: 1, border: 0, background: "#fff", borderRadius: "0 0 8px 8px" }} />
-        <div style={{ color: "#fff", fontSize: 12, marginTop: 4 }}>Use the print button in the viewer above, or Download and print the file.</div>
-      </div>}
+        <iframe key={cur.url} title="Lease PDF" src={cur.url} style={{ flex: 1, border: 0, background: "#fff", borderRadius: "0 0 8px 8px" }} />
+        <div style={{ color: "#fff", fontSize: 12, marginTop: 4 }}>Use the print button in the viewer above and pick the paper size shown. Print file 1 on legal paper, then file 2 on letter paper.</div>
+      </div>; })()}
       {needTpl && <div className="form-panel" style={{ marginBottom: 10, borderColor: "#C77700" }}>
         <div style={{ fontSize: 13, marginBottom: 6 }}>{needTpl.which === "lease"
           ? <>The blank lease PDF isn't on this site yet. Choose <b>lease-new.pdf</b> (the Blumberg T327 lease) once — it's remembered on this device afterward. To skip this on every device, put it in your project's <code>public</code> folder as <code>Lease-T327.pdf</code>.</>
@@ -9286,7 +9306,8 @@ function LeaseRiderTab({ data, add, update, remove }) {
         const set = (patch) => update("leaseRiders", r.id, patch);
         const c = riderCalc(r);
         const UPPER = ["tenant2", "ownerAgent", "landlord", "ll1", "ll2", "premises"];
-        const inp = (k, ph, extra) => <input value={r[k] ?? ""} placeholder={ph || ""} onChange={e => set({ [k]: UPPER.includes(k) ? e.target.value.toUpperCase() : e.target.value })} style={extra} />;
+        const effR = effOf(r);
+        const inp = (k, ph, extra) => <input value={AUTOKEYS.includes(k) ? effR[k] : (r[k] ?? "")} placeholder={ph || ""} onChange={e => { const v = UPPER.includes(k) ? e.target.value.toUpperCase() : e.target.value; if (AUTOKEYS.includes(k)) set({ [k]: v, manual: Array.from(new Set([...(Array.isArray(r.manual) ? r.manual : AUTOKEYS), k])) }); else set({ [k]: v }); }} style={extra} />;
         const cb = (label, on, onChange) => <label style={{ display: "inline-flex", gap: 4, alignItems: "center", fontSize: 12, marginRight: 10 }}><input type="checkbox" checked={!!on} onChange={e => onChange(e.target.checked)} />{label}</label>;
         const sect = (t) => <div style={{ fontWeight: 600, fontSize: 13, margin: "12px 0 4px" }}>{t}</div>;
         const roStat = (l, v) => <div style={{ fontSize: 12 }}><span className="row-muted">{l}</span> <b>${dollars(v)}</b></div>;
@@ -9320,7 +9341,7 @@ function LeaseRiderTab({ data, add, update, remove }) {
                 {field("Tenant 2 (co-tenant)", inp("tenant2", "", { width: 230 }))}
               </div>
               <details style={{ marginTop: 6 }}>
-                <summary style={{ cursor: "pointer", fontSize: 12 }}><span className="row-muted">Landlord and building (filled in automatically)</span> <b>{r.landlord || "—"}</b></summary>
+                <summary style={{ cursor: "pointer", fontSize: 12 }}><span className="row-muted">Landlord and building (filled in automatically)</span> <b>{effR.landlord || "—"}</b></summary>
               <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "flex-end", margin: "6px 0 0" }}>
                 {field("Landlord (entity)", inp("landlord", "e.g. SG & SONS REALTY LLC", { width: 250 }))}
                 {field("Landlord address line 1", inp("ll1", "", { width: 230 }))}
@@ -9388,7 +9409,7 @@ function LeaseRiderTab({ data, add, update, remove }) {
                     {roStat("3-D subtotal", c.d)}{roStat(r.tier === "2" ? "3-F (2)" : "3-F (1)", c.f)}{roStat("3-G", c.g)}{roStat(`3-H increase (1/${c.div})`, c.h)}
                   </div>
                     </>}
-                  <div style={{ marginTop: 8 }}>{cb("Tenant requests the IAI documentation now (box on page 3 of the rider — checked by default)", r.docReq, v => set({ docReq: v }))}</div>
+                  <div style={{ marginTop: 8 }}>{cb("Tenant requests the IAI documentation now (box on page 3 of the rider)", r.docReq, v => set({ docReq: v }))}</div>
                   {sect("Charges")}
                   <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "flex-end", margin: 0 }}>
                     {field("4A. Preferential rent or higher actual rent ($, if charged)", inp("pref", "", { width: 170 }))}
