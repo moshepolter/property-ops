@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-56";
+const APP_BUILD = "sync-fix-58";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -3018,7 +3018,8 @@ function Dashboard({ data: rawData, buildingName, tenantName, setTab, goTo, setD
     addSheet("Insurance", (data.insurancePolicies || []).map(p => ({
       Policy: p.type || "", Insured: p.insured || "", Buildings: (Array.isArray(p.buildingIds) ? p.buildingIds : []).map(id => buildingMap[id] || "").filter(Boolean).join(", ") || p.covers || "", Starts: p.effectiveDate ? fmtDate(p.effectiveDate) : "", Broker: p.broker || "", Carrier: p.carrier || "", "Policy #": p.policyNumber || "", Premium: p.premium || "",
       Expires: p.expirationDate ? fmtDate(p.expirationDate) : "",
-      Notes: p.notes || "",
+      Notes: [p.notes || "", ...(p.noteLog || []).map(n => `${fmtDate(n.date)}: ${n.text}`)].filter(Boolean).join(" | "),
+      Reminders: (p.reminders || []).map(r => `${fmtDate(r.date)}: ${r.text}${r.done ? " (done)" : ""}`).join(" | "),
     })));
     addSheet("Unit Turns", (data.unitTurns || []).map(t => ({
       Building: buildingMap[t.buildingId] || "", Apt: unitMap[t.unitId] || "", "Previous Tenant": t.prevTenant || "",
@@ -7525,7 +7526,7 @@ function CourtTab({ data, add, update, remove, setData, tenantName, buildingName
                 {view === "closed"
                   ? <IconBtn title="Restore to active" onClick={(e) => { e.stopPropagation(); update("courtCases", c.id, { archived: false }); }}><ArchiveIcon size={14} /></IconBtn>
                   : <IconBtn title="Move to closed" onClick={(e) => { e.stopPropagation(); update("courtCases", c.id, { archived: true }); }}><ArchiveIcon size={14} /></IconBtn>}
-                <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); remove("courtCases", c.id); }}><Trash2 size={14} /></IconBtn>
+                <IconBtn title="Delete" danger onClick={(e) => { e.stopPropagation(); if (!window.confirm("Delete this case? Its stage reminders on the Dashboard/calendar will be removed too.")) return; [c.petitionReminderId, c.defaultReminderId].filter(Boolean).forEach(id => remove("quickNotes", id)); remove("courtCases", c.id); }}><Trash2 size={14} /></IconBtn>
               </div>
               <div className="list-card-body">
                 <div className="row"><strong>Log</strong></div>
@@ -8457,6 +8458,14 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
   const [openB, setOpenB] = useState({});
   const [remFor, setRemFor] = useState(null);
   const [remForm, setRemForm] = useState({ date: "", text: "" });
+  const [openP, setOpenP] = useState({});
+  const [noteDraft, setNoteDraft] = useState({});
+  const addNote = (p) => {
+    const t = (noteDraft[p.id] || "").trim(); if (!t) return;
+    update("insurancePolicies", p.id, { noteLog: [...(p.noteLog || []), { id: uid(), date: todayISO(), text: t }] });
+    setNoteDraft(d => ({ ...d, [p.id]: "" }));
+  };
+  const dropNote = (p, id) => update("insurancePolicies", p.id, { noteLog: (p.noteLog || []).filter(n => n.id !== id) });
   const today = todayISO();
   const saveReminder = (p) => {
     if (!remForm.date || !remForm.text.trim()) return;
@@ -8521,7 +8530,7 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
       const left = days === null ? "" : days < 0 ? " (EXPIRED)" : ` (${days} days left)`;
       return `<table class="pol"><tr class="top"><td style="width:15%"><span>Policy</span><b>${escHtml(p.type)}</b></td><td style="width:22%"><span>Carrier</span>${escHtml(p.carrier || "—")}</td><td style="width:18%"><span>Policy #</span>${escHtml(p.policyNumber || "—")}</td><td style="width:25%"><span>Term</span>${escHtml(d(p.effectiveDate))} to <b>${escHtml(d(p.expirationDate))}</b>${escHtml(left)}</td><td style="width:20%"><span>Premium</span>${escHtml(p.premium || "—")}</td></tr>
         <tr><td colspan="3"><span>My broker</span><b>${escHtml(p.brokerContact || "—")}</b>${p.broker ? `<br><small>Policy lists: ${escHtml(p.broker)}</small>` : ""}</td><td colspan="2"><span>Insured</span>${escHtml(p.insured || "—")}</td></tr>
-        ${p.notes ? `<tr><td colspan="5"><span>Notes</span>${escHtml(p.notes)}</td></tr>` : ""}${(p.reminders || []).filter(r => !r.done).length ? `<tr><td colspan="5"><span>Reminders</span>${(p.reminders || []).filter(r => !r.done).map(r => escHtml(fmtDate(r.date) + " — " + r.text)).join("<br>")}</td></tr>` : ""}</table>`;
+        ${(p.notes || (p.noteLog || []).length) ? `<tr><td colspan="5"><span>Notes</span>${[p.notes ? escHtml(p.notes) : "", ...(p.noteLog || []).map(n => escHtml(fmtDate(n.date) + " — " + n.text))].filter(Boolean).join("<br>")}</td></tr>` : ""}${(p.reminders || []).filter(r => !r.done).length ? `<tr><td colspan="5"><span>Reminders</span>${(p.reminders || []).filter(r => !r.done).map(r => escHtml(fmtDate(r.date) + " — " + r.text)).join("<br>")}</td></tr>` : ""}</table>`;
     };
     const sections = data.buildings.map(b => ({ name: shortAddress(b.address), items: sorted(policies.filter(p => insBuildingIds(p).includes(b.id))) })).filter(g => g.items.length);
     const lone = sorted(policies.filter(p => insBuildingIds(p).length === 0));
@@ -8547,7 +8556,11 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
     return (
       <React.Fragment key={p.id}>
         <tr className="wo-sheet-row">
-          <td data-label="Policy" style={{ fontWeight: 600 }}>{p.type}</td>
+          <td data-label="Policy" style={{ fontWeight: 600 }}>
+            <button type="button" className="btn-ghost" style={{ padding: "0 6px", marginRight: 4 }} title={openP[p.id] ? "Close" : "Open to see and add notes and reminders"} onClick={() => setOpenP(o => ({ ...o, [p.id]: !o[p.id] }))}>{openP[p.id] ? "▾" : "▸"}</button>
+            {p.type}
+            {!openP[p.id] && ((p.noteLog || []).length > 0 || (p.reminders || []).some(r => !r.done)) && <div className="row-muted" style={{ fontSize: 11, fontWeight: 400 }}>{(p.noteLog || []).length > 0 ? `${(p.noteLog || []).length} note${(p.noteLog || []).length === 1 ? "" : "s"}` : ""}{(p.noteLog || []).length > 0 && (p.reminders || []).some(r => !r.done) ? " · " : ""}{(p.reminders || []).some(r => !r.done) ? `${(p.reminders || []).filter(r => !r.done).length} reminder${(p.reminders || []).filter(r => !r.done).length === 1 ? "" : "s"}` : ""}</div>}
+          </td>
           <td data-label="Carrier">{p.carrier || <span className="row-muted">—</span>}</td>
           <td data-label="Policy #">{p.policyNumber || <span className="row-muted">—</span>}</td>
           <td data-label="Expires">
@@ -8563,6 +8576,33 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
           </td>
           <td className="wo-edit" data-label="Notes" style={{ minWidth: 220 }}>
             <WoCell multiline value={p.notes || ""} placeholder="Add a note…" onCommit={t => { update("insurancePolicies", p.id, { notes: t }); return true; }} />
+          </td>
+          <td className="wo-sheet-actions">
+            <IconBtn title="Edit" onClick={() => startEdit(p)}><Pencil size={14} /></IconBtn>
+            <button className="btn-ghost" title="The policy renewed — enter the new term" onClick={() => startRenew(p)}>Renewed</button>
+            <IconBtn title="Delete" danger onClick={() => { if (window.confirm("Delete this policy?")) remove("insurancePolicies", p.id); }}><Trash2 size={14} /></IconBtn>
+          </td>
+        </tr>
+        {openP[p.id] && (
+          <tr className="wo-sheet-detail-row"><td colSpan={8}>
+            <div style={{ display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
+              <div>
+                <strong>Notes</strong>
+                {p.notes && <div style={{ fontSize: 13, padding: "4px 0", whiteSpace: "pre-wrap" }}>{p.notes}</div>}
+                {(p.noteLog || []).map(n => (
+                  <div key={n.id} style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 13, padding: "3px 0" }}>
+                    <span style={{ flex: 1, whiteSpace: "pre-wrap" }}><b>{fmtDate(n.date)}</b> — {n.text}</span>
+                    <button className="btn-ghost" style={{ padding: "0 6px" }} title="Delete note" onClick={() => { if (window.confirm("Delete this note?")) dropNote(p, n.id); }}>×</button>
+                  </div>
+                ))}
+                {!p.notes && (p.noteLog || []).length === 0 && <div className="row-muted" style={{ fontSize: 12 }}>No notes yet.</div>}
+                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                  <textarea rows={2} placeholder="Add a note…" value={noteDraft[p.id] || ""} onChange={e => setNoteDraft(d => ({ ...d, [p.id]: e.target.value }))} style={{ flex: 1 }} />
+                  <button className="btn-primary" disabled={!(noteDraft[p.id] || "").trim()} onClick={() => addNote(p)}>Add note</button>
+                </div>
+              </div>
+              <div>
+                <strong>Reminders</strong>
             {(p.reminders || []).slice().sort((x, y) => (x.date || "").localeCompare(y.date || "")).map(r => (
               <div key={r.id} style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 12, padding: "2px 6px", opacity: r.done ? 0.55 : 1 }}>
                 <input type="checkbox" checked={!!r.done} title="Mark done (removes it from the calendar)" onChange={e => setReminder(p, r.id, { done: e.target.checked })} />
@@ -8580,13 +8620,10 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
             ) : (
               <button className="btn-ghost" style={{ margin: "2px 6px", fontSize: 12 }} onClick={() => { setRemFor(p.id); setRemForm({ date: "", text: "" }); }}><CalendarClock size={12} /> Add reminder</button>
             )}
-          </td>
-          <td className="wo-sheet-actions">
-            <IconBtn title="Edit" onClick={() => startEdit(p)}><Pencil size={14} /></IconBtn>
-            <button className="btn-ghost" title="The policy renewed — enter the new term" onClick={() => startRenew(p)}>Renewed</button>
-            <IconBtn title="Delete" danger onClick={() => { if (window.confirm("Delete this policy?")) remove("insurancePolicies", p.id); }}><Trash2 size={14} /></IconBtn>
-          </td>
-        </tr>
+              </div>
+            </div>
+          </td></tr>
+        )}
         {renewing === p.id && (
           <tr className="wo-sheet-detail-row"><td colSpan={8}>
             <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "center", margin: 0 }}>
@@ -8622,7 +8659,6 @@ function InsuranceTab({ data, add, update, remove, buildingName }) {
       <div className="page-head">
         <h1 className="page-title">Insurance</h1>
         <div className="page-actions">
-          {seedCount > 0 && <button className="btn-ghost" onClick={loadSeed}>Add / update {seedCount} polic{seedCount === 1 ? "y" : "ies"} from my insurance documents</button>}
           <button className="btn-ghost" title="Type your broker once and fill it in on every policy that doesn't have one yet" onClick={() => { const v = window.prompt("Your broker for the policies that don't have one yet (e.g. Jack - Cortland):", ""); if (!v || !v.trim()) return; policies.filter(p => !(p.brokerContact || "").trim()).forEach(p => update("insurancePolicies", p.id, { brokerContact: v.trim() })); }}>Set my broker on all</button>
           <button className="btn-ghost" onClick={() => { const all = data.buildings.every(b => openB[b.id]); const n = {}; data.buildings.forEach(b => { n[b.id] = !all; }); setOpenB(n); }}>{data.buildings.every(b => openB[b.id]) ? "Collapse all" : "Expand all"}</button>
           <button className="btn-ghost" onClick={printAll}><Printer size={14} /> Print all</button>
