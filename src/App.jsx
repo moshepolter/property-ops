@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-60";
+const APP_BUILD = "sync-fix-62";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -8922,7 +8922,7 @@ async function buildLeasePdf(r, tpl) {
 // lead / window falls). Building facts fill in by themselves.
 const OFFICE_DEFAULT = { mail1: "2753 Coney Island Avenue", mail2: "Suite 215", mailCity: "Brooklyn, NY 11235", phone: "(718) 891-2121", fax: "(718) 891-5600" };
 const BLD_RIDER_CLAUSES = [["33", "Upon vacating the premises the apartment must be left broom clean."], ["34", "No washing machines, dryers, or dishwashers are permitted to be taken into or used in the apartment."], ["35", "No floor mats, milk bottles, rubbers, or any other articles shall be kept in the hallways."], ["36", "That hallways, stairways, passages, and lobby shall not be obstructed by any of Tenants or their children or used by them for purposes other than those of ingress and egress from their apartments."], ["37", "Tenants shall not install or cause to be installed any tiles or linoleum in any room of the apartment, which will damage the wooden floors thereof."], ["38", "The apartment may have a terrace or balcony. The terms of this lease apply to the terrace or balcony as if the terrace or balcony is part of the apartment. The Landlord may make special rules for the terrace or balcony. Landlord will notify Tenants of such rules. Tenant must keep the terrace or balcony clean and free from snow, ice, leaves, and garbage and keep all screens and drains in good repair. No cooking is allowed on the terrace or balcony. Tenants may not keep plants or install a fence or any other addition on the terrace or balcony. If the Tenant does, Landlord has the right to remove and store them at the Tenant’s expense."], ["39", "If Tenant fails to correct a default after notice from Landlord, landlord’s cost to correct the default shall be added to rent."], ["40", "The security deposited by the Tenant pursuant to the terms of the lease may not be used as an offset to rent."], ["41", "In case the Landlord has reason to start a dispossess proceeding against the Tenant, then the Tenant shall be required to pay to the Landlord reasonable legal fees, which during the term of this lease shall be considered no less than $200.00."], ["41a", "In the event that a legal proceedings is commenced the Landlord shall be entitled to reimbursement for legal fees and expenses reasonably incurred. These fees shall be considered to be $300.00 plus disbursements unless the Court awards a higher amount."], ["41b", "The Tenant agrees to reimburse the Landlord for all legal fees reasonably incurred in the evaluation of any application of the Tenant to sublet where the Tenant provides false or misleading information or fails to meet all statutory requirements which are required to be by the Tenant or the proposed subtenant."], ["42", "For any payment of rent that is received after the fifth (5 th) of the month in which it is due, the Tenant shall pay $50 administrative charge, which charge shall be treated as additional rent. For any check that is given as rent but is returned by the bank due to insufficient funds, uncollected funds, or a top order directive, there shall be an additional $30 charge."], ["43", "No loud noise at any time of day (i.e. music, t.v., radio, voices) that disturbs ones neighbors is permitted. No loud noise (music, t.v., etc.) will be permitted after 10:00 p.m. If it should occur that the Landlord receives complaints about the use of tapes or records or radios, etc. indicating that the volume was so high as to disturb the neighbors, then the Landlord shall be entitled to evict the said Tenant and terminate the lease on fifteen (15) days written notice to cure and termination."], ["44", "In the event that the guidelines established and adopted by the Rent guidelines Board are increased or decreased, the Owner and Tenant agree to be bound thereby, and the rent payable under this lease as of the first day of the month of the commencement of the lease shall be the rent so increased or decreased."], ["45", "Tenant acknowledges that in the event the Tenant submits a sublease request pursuant to Real Property Law, Section 226-B as amended, and the landlord consents to said request, the Landlord may require the Subtenant to pay, in addition to the Tenant’s base rent, together with any adjustments which the Tenant can obtain under applicable law and as additional rent, an amount equal to the permissible vacancy increase which may be available to the Landlord pursuant to law."], ["46", "Apartment Uses: Prohibited activities in the apartment include: the keeping and using of candles and kerosene lamps. Only battery-powered lighting may be used in electricity is interrupted or terminated."], ["47", "RESIDENT shall not in the LEASED UNIT, hallways, elevators, parking garages, parking lots, maintenance areas, laundry rooms, lobbies, and all other common and/or public areas of the building (the foregoing are collectively referred to herein as the PREMISES) engage in or permit any drug-related criminal activity, or engage in or permit any activity that endangers the health or reputation. Instances of such conduct shall include, but not be limited to, RESIDENT’S permitting any co-resident, occupant, member of RESIDENT’S household or family, guest, invitee, or other persons RESIDENT permits to occupy or use the PREMISES, to use, manufacture, purchase, sell or otherwise distribute illegal drugs or illegal drug-related paraphernalia in or about the PREMISES."], ["", "The restrictions contained hereunder are material obligation under the LEASE. For purposes of this section, OWNER’S receipt of complaints from other residents or building employees shall be evidence that RESIDENT has violated the foregoing restrictions."]];
-const PACKET_PARTS = [["lease", "Lease"], ["rider", "DHCR rider (RA-LR1)"], ["bldRider", "Building rider (33-47)"], ["noPets", "No-pet agreement"], ["emerg", "Emergency contact letter"], ["stove", "Stove knob cover notice"], ["lead", "Lead / window falls notice"]];
+const PACKET_PARTS = [["lease", "Lease (legal size)"], ["bldRider", "Building rider (33-47)"], ["rider", "DHCR rider (RA-LR1)"], ["noPets", "No-pet agreement"], ["stove", "Stove knob cover notice"], ["lead", "Lead / window falls notice"], ["emerg", "Emergency contact letter (last)"]];
 const bldDefaults = (data, b) => {
   b = b || {};
   const pols = (data.insurancePolicies || []).filter(p => Array.isArray(p.buildingIds) && p.buildingIds.includes(b.id));
@@ -8947,6 +8947,14 @@ const nameParts = (full) => {
   if (w.length === 0) return { first: "", mid: "", last: "" };
   if (w.length === 1) return { first: w[0], mid: "", last: "" };
   return { first: w[0], mid: w.length > 2 ? w[1].replace(/\./g, "").charAt(0) : "", last: w[w.length - 1] };
+};
+// Shrinks a legal-size document onto standard letter pages.
+const toLetterPdf = async (src) => {
+  const { PDFDocument } = await loadPdfLib();
+  const out = await PDFDocument.create();
+  const emb = await out.embedPdf(src, src.getPageIndices());
+  emb.forEach(e => { const sc = Math.min(612 / e.width, 792 / e.height); const pg = out.addPage([612, 792]); pg.drawPage(e, { x: (612 - e.width * sc) / 2, y: (792 - e.height * sc) / 2, xScale: sc, yScale: sc }); });
+  return out;
 };
 const caps = (s) => String(s || "").trim().replace(/\s+/g, " ").toUpperCase();
 // Small layout helper for the typed pages (Letter size, y measured from the top).
@@ -9144,8 +9152,8 @@ async function buildRiderPdf(r, tpl, { address, ownerAgent, asDoc }) {
   text("Lease Rider for the housing accommodation 1", address);
   text("Lease Rider for the housing accommodation 2", apt ? `Apt. ${apt}` : "");
   text("Lease Start Date", mdy(r.startDate)); text("Lease End Date", mdy(r.endDate)); text("Lease Dated", mdy(r.leaseDate));
-  text("Print Name of Tenants", tenantsOf(r).join(" & "));
-  text("Print Name of Owner or Owners Agent", ownerAgent);
+  text("Print Name of Tenants", tenantsOf(r).join(" & ").toUpperCase());
+  text("Print Name of Owner or Owners Agent", String(ownerAgent || "").toUpperCase());
   form.updateFieldAppearances(font);
   form.flatten();
   return asDoc ? doc : await doc.save();
@@ -9174,7 +9182,7 @@ function LeaseRiderTab({ data, add, update, remove }) {
     add("leaseRiders", { id, buildingId: nb, unitId: nu, apt: u?.unitNumber || "", tenant1: "", tenant2: "", ownerAgent: last.ownerAgent || b0.hpdOwnerAgent || "",
       landlord: def.legal.toUpperCase() || last.landlord || "", ll1: (def.mail1 + (def.mail2 ? ", " + def.mail2 : "")).toUpperCase(), ll2: def.mailCity.toUpperCase(), bank: def.bank || last.bank || "", premises: (def.street ? `${def.street}, ${def.cityLine}` : (b0.address || "")).toUpperCase(), termYears: "1", monthlyRent: "", security: "", riderText: "", riderPages: "", kind: "vacancy", status: "A", years: "1", prevRent: "", guidelinePct: "", guidelineAmt: "",
       bathComplete: false, bathItems: [], bathOther: "", costBath: "", kitchenComplete: false, kitchenItems: [], kitchenOther: "", costKitchen: "", otherItems: [], otherOther: "", costOther: "", priorIai: "", tier: "1", units35: last.units35 || "le", iaiOn: false,
-      pref: "", ac: "", appl: "", anc: "", other8: "", other8Label: "", statusRent: "", statusLabel: "", docReq: false, startDate: "", endDate: "", leaseDate: "", skip: /ovington/i.test(b0.address || "") ? [] : ["bldRider"], createdAt: todayISO() });
+      pref: "", ac: "", appl: "", anc: "", other8: "", other8Label: "", statusRent: "", statusLabel: "", docReq: true, startDate: "", endDate: "", leaseDate: "", skip: /ovington/i.test(b0.address || "") ? [] : ["bldRider"], createdAt: todayISO() });
     setOpen(id); setNu("");
   };
   const generate = async (r, partsIn) => {
@@ -9185,17 +9193,18 @@ function LeaseRiderTab({ data, add, update, remove }) {
     try {
       const b = bldg(r.buildingId);
       const def = bldDefaults(data, b);
-      const ctx = { landlord: (r.landlord || def.legal || "").toUpperCase(), mail1: def.mail1, mail2: def.mail2, mailCity: def.mailCity, phone: def.phone, fax: def.fax, street: def.street, cityLine: def.cityLine, apt: r.apt || "", tenants: tenantsOf(r) };
-      const ownerAgent = r.ownerAgent || b.hpdOwnerAgent || "";
+      const ctx = { landlord: (r.landlord || def.legal || "").toUpperCase(), mail1: def.mail1, mail2: def.mail2, mailCity: def.mailCity, phone: def.phone, fax: def.fax, street: def.street, cityLine: def.cityLine, apt: r.apt || "", tenants: tenantsOf(r).map(x => x.toUpperCase()) };
+      const ownerAgent = String(r.ownerAgent || b.hpdOwnerAgent || "").toUpperCase();
       let doc = null;
       const append = async (src) => { if (!doc) { doc = src; return; } const pg = await doc.copyPages(src, src.getPageIndices()); pg.forEach(p => doc.addPage(p)); };
       if (parts.includes("lease")) await append(await buildLeasePdf(r, await getLeaseTemplate()));
-      if (parts.includes("rider")) await append(await buildRiderPdf(r, await getRiderTemplate(), { address: b.address || "", ownerAgent, asDoc: true }));
+      // The lease is on legal-size paper (first 2 pages); everything after it is standard letter size.
       if (parts.includes("bldRider")) await append(await buildBldRiderPdf(ctx));
+      if (parts.includes("rider")) await append(await toLetterPdf(await buildRiderPdf(r, await getRiderTemplate(), { address: b.address || "", ownerAgent, asDoc: true })));
       if (parts.includes("noPets")) await append(await buildNoPetsPdf(ctx));
-      if (parts.includes("emerg")) await append(await buildEmergPdf(ctx));
       const nw = ["stove", "lead"].filter(k => parts.includes(k));
       if (nw.length) await append(await buildNoticesPdf(ctx, await getNoticesTemplate(), nw));
+      if (parts.includes("emerg")) await append(await buildEmergPdf(ctx));
       const out = await doc.save();
       const url = URL.createObjectURL(new Blob([out], { type: "application/pdf" }));
       const title = parts.length === 1 ? (PACKET_PARTS.find(p => p[0] === parts[0])?.[1] || "Lease") : "Lease packet";
@@ -9276,7 +9285,8 @@ function LeaseRiderTab({ data, add, update, remove }) {
         const isOpen = open === r.id;
         const set = (patch) => update("leaseRiders", r.id, patch);
         const c = riderCalc(r);
-        const inp = (k, ph, extra) => <input value={r[k] ?? ""} placeholder={ph || ""} onChange={e => set({ [k]: e.target.value })} style={extra} />;
+        const UPPER = ["tenant2", "ownerAgent", "landlord", "ll1", "ll2", "premises"];
+        const inp = (k, ph, extra) => <input value={r[k] ?? ""} placeholder={ph || ""} onChange={e => set({ [k]: UPPER.includes(k) ? e.target.value.toUpperCase() : e.target.value })} style={extra} />;
         const cb = (label, on, onChange) => <label style={{ display: "inline-flex", gap: 4, alignItems: "center", fontSize: 12, marginRight: 10 }}><input type="checkbox" checked={!!on} onChange={e => onChange(e.target.checked)} />{label}</label>;
         const sect = (t) => <div style={{ fontWeight: 600, fontSize: 13, margin: "12px 0 4px" }}>{t}</div>;
         const roStat = (l, v) => <div style={{ fontSize: 12 }}><span className="row-muted">{l}</span> <b>${dollars(v)}</b></div>;
@@ -9306,7 +9316,7 @@ function LeaseRiderTab({ data, add, update, remove }) {
               {sect("The lease")}
               <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "flex-end", margin: 0 }}>
                 {field("Apt #", inp("apt", "", { width: 80 }))}
-                {field("Tenant 1", <input value={r.tenant1 ?? r.tenant ?? ""} onChange={e => set({ tenant1: e.target.value })} style={{ width: 230 }} />)}
+                {field("Tenant 1", <input value={r.tenant1 ?? r.tenant ?? ""} onChange={e => set({ tenant1: e.target.value.toUpperCase() })} style={{ width: 230 }} />)}
                 {field("Tenant 2 (co-tenant)", inp("tenant2", "", { width: 230 }))}
               </div>
               <details style={{ marginTop: 6 }}>
@@ -9364,7 +9374,7 @@ function LeaseRiderTab({ data, add, update, remove }) {
                     : <>
                       <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "12px 0 4px" }}>
                         <div style={{ fontWeight: 600, fontSize: 13 }}>3. Individual Apartment Improvements (IAI)</div>
-                        <button className="btn-ghost" onClick={() => { if (window.confirm("Remove the IAI and everything entered for it?")) set({ iaiOn: false, bathComplete: false, bathItems: [], bathOther: "", costBath: "", kitchenComplete: false, kitchenItems: [], kitchenOther: "", costKitchen: "", otherItems: [], otherOther: "", costOther: "", priorIai: "", docReq: false }); }}>Remove IAI</button>
+                        <button className="btn-ghost" onClick={() => { if (window.confirm("Remove the IAI and everything entered for it?")) set({ iaiOn: false, bathComplete: false, bathItems: [], bathOther: "", costBath: "", kitchenComplete: false, kitchenItems: [], kitchenOther: "", costKitchen: "", otherItems: [], otherOther: "", costOther: "", priorIai: "" }); }}>Remove IAI</button>
                       </div>
                   {grp("3-A. Bathroom", r.bathComplete, "bathComplete", RIDER_BATH, "bathItems", "bathOther", "costBath")}
                   {grp("3-B. Kitchen", r.kitchenComplete, "kitchenComplete", RIDER_KITCHEN, "kitchenItems", "kitchenOther", "costKitchen")}
@@ -9377,8 +9387,8 @@ function LeaseRiderTab({ data, add, update, remove }) {
                   <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 6, padding: "6px 8px", background: "var(--surface-2, #f4f4f4)", borderRadius: 6 }}>
                     {roStat("3-D subtotal", c.d)}{roStat(r.tier === "2" ? "3-F (2)" : "3-F (1)", c.f)}{roStat("3-G", c.g)}{roStat(`3-H increase (1/${c.div})`, c.h)}
                   </div>
-                      <div style={{ marginTop: 8 }}>{cb("Tenant requests the IAI documentation now (checks the box on page 3)", r.docReq, v => set({ docReq: v }))}</div>
                     </>}
+                  <div style={{ marginTop: 8 }}>{cb("Tenant requests the IAI documentation now (box on page 3 of the rider — checked by default)", r.docReq, v => set({ docReq: v }))}</div>
                   {sect("Charges")}
                   <div className="inline-form" style={{ flexWrap: "wrap", alignItems: "flex-end", margin: 0 }}>
                     {field("4A. Preferential rent or higher actual rent ($, if charged)", inp("pref", "", { width: 170 }))}
