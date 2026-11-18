@@ -48,7 +48,7 @@ import {
 const STORAGE_KEY = "pm-ops-data-v1";
 // Shown at the bottom of the Dashboard so you can tell at a glance which copy of
 // the app a given phone or browser tab is actually running.
-const APP_BUILD = "sync-fix-65";
+const APP_BUILD = "sync-fix-66";
 const uid = () => Math.random().toString(36).slice(2, 10);
 // IMPORTANT: never use `.toISOString()` for local dates — that returns the UTC
 // date, not the local one. For anyone west of UTC (all of the US), once evening
@@ -8807,6 +8807,21 @@ function SignaturePad({ current, onSave, onClear }) {
 // ---------------------------------------------------------------------------
 const RIDER_TEMPLATE_URL = "/RA-LR1-06-2026-fillable.pdf";
 const PDFLIB_URLS = ["https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js", "https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js", "https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"];
+const PDFJS_URLS = [
+  ["https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js", "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"],
+  ["https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js", "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js"],
+  ["https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js", "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js"],
+];
+const loadPdfJs = async () => {
+  if (window.pdfjsLib) return window.pdfjsLib;
+  for (const [src, worker] of PDFJS_URLS) {
+    try {
+      await new Promise((resolve, reject) => { const sc = document.createElement("script"); sc.src = src; sc.onload = resolve; sc.onerror = () => { sc.remove(); reject(new Error("blocked")); }; document.head.appendChild(sc); });
+      if (window.pdfjsLib) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = worker; return window.pdfjsLib; }
+    } catch (e) { /* try the next host */ }
+  }
+  throw new Error("Could not load the PDF viewer library (cdnjs, jsDelivr and unpkg all failed).");
+};
 const loadPdfLib = async () => {
   if (window.PDFLib) return window.PDFLib;
   for (const url of PDFLIB_URLS) {
@@ -9185,6 +9200,30 @@ function LeaseRiderTab({ data, add, update, remove }) {
       pref: "", ac: "", appl: "", anc: "", other8: "", other8Label: "", statusRent: "", statusLabel: "", docReq: false, startDate: "", endDate: "", leaseDate: "", skip: [], manual: [], createdAt: todayISO() });
     setOpen(id); setNu("");
   };
+  // Prints a PDF as a page-size-locked document (@page), so the browser asks for / uses the real paper size
+  // (legal 8.5 x 14) and the lease fills the whole sheet instead of shrinking to a letter-size area.
+  const printAtSize = async (item, pageSize) => {
+    const w = window.open("", "_blank");
+    if (!w) { setErrMsg("Your browser blocked the print window — allow pop-ups for this site and try again."); return; }
+    try { w.document.write("<p style=\"font-family:sans-serif;padding:20px\">Preparing the lease for printing…</p>"); } catch (e) { /* ignore */ }
+    try {
+      const lib = await loadPdfJs();
+      const buf = await (await fetch(item.url)).arrayBuffer();
+      const pdf = await lib.getDocument({ data: buf }).promise;
+      const imgs = [];
+      for (let n = 1; n <= pdf.numPages; n++) {
+        const page = await pdf.getPage(n);
+        const vp = page.getViewport({ scale: 2.2 });
+        const c = document.createElement("canvas"); c.width = vp.width; c.height = vp.height;
+        await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
+        imgs.push(c.toDataURL("image/jpeg", 0.92));
+      }
+      w.document.open();
+      w.document.write(`<!doctype html><html><head><title>${item.name}</title><style>@page{size:${pageSize};margin:0}html,body{margin:0;padding:0;background:#fff}img{display:block;width:8.5in;height:14in;page-break-after:always;break-after:page}img:last-child{page-break-after:auto;break-after:auto}</style></head><body>${imgs.map(u => `<img src="${u}">`).join("")}</body></html>`);
+      w.document.close();
+      setTimeout(() => { try { w.focus(); w.print(); } catch (e) { /* user can press Ctrl+P */ } }, 600);
+    } catch (e) { try { w.close(); } catch (e2) { /* ignore */ } setErrMsg("Could not prepare the legal-size print: " + (e?.message || e)); }
+  };
   const generate = async (r, partsIn) => {
     // partsIn: list of packet pieces to print, e.g. ["lease", "rider", "noPets", ...]
     const parts = Array.isArray(partsIn) ? partsIn : (partsIn === "lease" ? ["lease"] : partsIn === "rider" ? ["rider"] : packetOf(r));
@@ -9208,7 +9247,7 @@ function LeaseRiderTab({ data, add, update, remove }) {
       if (nw.length) rest.push(await buildNoticesPdf(ctx, await getNoticesTemplate(), nw));
       if (parts.includes("emerg")) rest.push(await buildEmergPdf(ctx));
       const items = [];
-      const addItem = async (doc, label, name) => { const out = await doc.save(); items.push({ url: URL.createObjectURL(new Blob([out], { type: "application/pdf" })), label, name: `${name} - ${shortAddress(b.address)} Apt ${r.apt}.pdf` }); };
+      const addItem = async (doc, label, name) => { const out = await doc.save(); items.push({ url: URL.createObjectURL(new Blob([out], { type: "application/pdf" })), label, name: `${name} - ${shortAddress(b.address)} Apt ${r.apt}.pdf`, legal: /legal/i.test(label) }); };
       if (parts.includes("lease")) await addItem(await buildLeasePdf(rr, await getLeaseTemplate()), "Lease — print on LEGAL paper (8.5 × 14)", "1 Lease (legal)");
       const restDoc = await merge(rest);
       if (restDoc) await addItem(restDoc, `${parts.includes("lease") ? "Everything else" : "Papers"} — print on LETTER paper (8.5 × 11)`, `${parts.includes("lease") ? "2 " : ""}Packet (letter)`);
@@ -9286,12 +9325,13 @@ function LeaseRiderTab({ data, add, update, remove }) {
         <div style={{ display: "flex", gap: 8, alignItems: "center", background: "#fff", padding: "8px 12px", borderRadius: "8px 8px 0 0", flexWrap: "wrap" }}>
           {pdfView.items.length > 1 && pdfView.items.map((x, n) => <button key={n} className={n === pdfView.i ? "btn-primary" : "btn-ghost"} onClick={() => setPdfView({ ...pdfView, i: n })}>{n + 1}. {n === 0 ? "Lease (legal)" : "The rest (letter)"}</button>)}
           <b style={{ flex: 1, minWidth: 160 }}>{cur.label}</b>
-          <a className="btn-primary" href={cur.url} download={cur.name} style={{ textDecoration: "none" }}><Download size={14} /> Download</a>
+          {cur.legal && <button className="btn-primary" onClick={() => printAtSize(cur, "8.5in 14in")}><Printer size={14} /> Print on legal (fills the page)</button>}
+          <a className={cur.legal ? "btn-ghost" : "btn-primary"} href={cur.url} download={cur.name} style={{ textDecoration: "none" }}><Download size={14} /> Download</a>
           <a className="btn-ghost" href={cur.url} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>Open in new tab</a>
           <button className="btn-ghost" onClick={closeAll}><X size={14} /> Close</button>
         </div>
         <iframe key={cur.url} title="Lease PDF" src={cur.url} style={{ flex: 1, border: 0, background: "#fff", borderRadius: "0 0 8px 8px" }} />
-        <div style={{ color: "#fff", fontSize: 12, marginTop: 4 }}>Use the print button in the viewer above and pick the paper size shown. Print file 1 on legal paper, then file 2 on letter paper.</div>
+        <div style={{ color: "#fff", fontSize: 12, marginTop: 4 }}>File 1 (lease): use "Print on legal" — it locks the page to 8.5 × 14 so the lease fills the whole sheet. File 2: use the viewer's own print button and pick Letter.</div>
       </div>; })()}
       {needTpl && <div className="form-panel" style={{ marginBottom: 10, borderColor: "#C77700" }}>
         <div style={{ fontSize: 13, marginBottom: 6 }}>{needTpl.which === "lease"
